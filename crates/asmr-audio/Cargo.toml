@@ -1,0 +1,16 @@
+[package]
+name = "asmr-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "mp3/pcm decode, encode and resampling as async futures::Stream, backed by ffmpeg"
+
+[dependencies]
+tokio.workspace = true
+futures.workspace = true
+async-stream.workspace = true
+ffmpeg-next.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

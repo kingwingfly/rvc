@@ -1,0 +1,19 @@
+[package]
+name = "asmr-vc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "RVC v2 voice-conversion inference (ort/ONNX) as a streaming Converter"
+
+[dependencies]
+asmr-audio.workspace = true
+tokio.workspace = true
+futures.workspace = true
+async-stream.workspace = true
+ort.workspace = true
+ndarray.workspace = true
+rustfft.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

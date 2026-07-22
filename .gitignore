@@ -1,0 +1,13 @@
+/target
+
+# Trained + downloaded model assets
+/models
+*.onnx
+
+# Training scratch + Python
+/training/.work
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.ruff_cache/

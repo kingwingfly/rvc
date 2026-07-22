@@ -1,0 +1,14 @@
+[package]
+name = "asmr-hub"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Auto-download and cache ONNX model assets from the Hugging Face Hub"
+
+[dependencies]
+hf-hub.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

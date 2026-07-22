@@ -1,0 +1,63 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/asmr-audio",
+    "crates/asmr-hub",
+    "crates/asmr-vc",
+    "crates/asmr-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/kingwingfly/asmr"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# Local crates
+asmr-audio = { path = "crates/asmr-audio" }
+asmr-hub = { path = "crates/asmr-hub" }
+asmr-vc = { path = "crates/asmr-vc" }
+
+# Async / streaming
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "io-std", "io-util", "sync", "fs"] }
+futures = "0.3"
+async-stream = "0.3"
+tokio-util = { version = "0.7", features = ["io"] }
+
+# Signal processing (mel frontend for RMVPE)
+rustfft = "6"
+
+# Inference
+# load-dynamic: dlopen onnxruntime at runtime via ORT_DYLIB_PATH (never bundled).
+# api-24 matches the ONNX Runtime 1.24 API rc.12 targets; cuda EP registered at runtime.
+ort = { version = "=2.0.0-rc.12", default-features = false, features = [
+    "load-dynamic",
+    "std",
+    "ndarray",
+    "tracing",
+    "api-24",
+    "cuda",
+] }
+ndarray = "0.17"
+
+# Audio (ffmpeg 8.1)
+ffmpeg-next = "8.1"
+
+# Model download (async API is the default in 1.0; `blocking` is opt-in)
+hf-hub = { version = "1.0", features = ["rustls-tls"] }
+
+# CLI
+clap = { version = "4.6", features = ["derive", "env"] }
+
+# Error handling / logging
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
