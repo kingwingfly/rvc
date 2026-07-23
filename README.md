@@ -146,12 +146,12 @@ the model's sample rate. ffmpeg handles capture/playback on either end:
 # play a file through the converter
 ffmpeg -i in.mp3 -f f32le -ar 16000 -ac 1 - \
   | rvc serve -m models/voice.onnx --model-sr 48000 \
-  | ffplay -f f32le -ar 48000 -ac 1 -
+  | ffplay -f f32le -ar 48000 -
 
 # live mic → converted → speakers
 ffmpeg -f alsa -i default -f f32le -ar 16000 -ac 1 - \
   | rvc serve -m models/voice.onnx --model-sr 48000 \
-  | ffplay -f f32le -ar 48000 -ac 1 -
+  | ffplay -f f32le -ar 48000 -
 ```
 
 `serve` takes the same `--backend` flag as `convert`; both runtimes stream
