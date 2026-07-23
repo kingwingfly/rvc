@@ -14,33 +14,36 @@ produces the `phone/phone_lengths/pitch/pitchf/ds/rnd → audio` graph that
    same ONNX models the inference path uses, so features are identical at train
    and inference time.
 
-2. **Generator training** — *in progress*. The network is a standalone crate,
+2. **Generator training** — *done*. The network is a standalone crate,
    [`burn-rvc`](../burn-rvc), a faithful `burn` port of RVC v2's
-   `SynthesizerTrnMs768NSFsid`. Reference was RVC-Project tag `2.2.231006`
-   (`infer/lib/infer_pack/{models,attentions,modules}.py`); port is complete.
+   `SynthesizerTrnMs768NSFsid` (`enc_p`, `enc_q`, `flow`, `dec`/`GeneratorNSF`
+   with the NSF `SineGen` source, `emb_g`) plus the `MultiPeriodDiscriminator`.
+   Reference was RVC-Project tag `2.2.231006`
+   (`infer/lib/infer_pack/{models,attentions,modules}.py`).
 
    Correctness is checked by **loading the real pretrained weights** (no unit
    tests): `cargo run -p burn-rvc --example load -- <f0G48k.pth>` reports
-   applied/missing/unused. **The whole generator now loads: 560/560 params, 0
-   missing, 0 unused, 0 errors** — `enc_p`, `enc_q`, `flow`, `dec`, `emb_g`,
-   including weight-norm convs. The loader stamps names from the pickle keys,
-   remaps RVC's flat `attn_layers/norm_layers_*` lists and the flow's even
-   coupling indices onto our tree, and upcasts the fp16 checkpoint to fp32.
+   applied/missing/unused. **The whole generator loads: 560/560 params, 0
+   missing, 0 unused, 0 errors** — including weight-norm convs. The loader
+   stamps names from the pickle keys, remaps RVC's flat `attn_layers/
+   norm_layers_*` lists and the flow's even coupling indices onto our tree, and
+   upcasts the fp16 checkpoint to fp32.
 
-   Remaining before audio/training: the NSF `SineGen` forward (the one un-ported
-   piece; `SourceModule::forward` returns zeros for now), the full inference
-   forward (`enc_p → flow.reverse → dec`), then discriminators + losses + the
-   training loop.
+   The loop (`trainer.rs`) warm-starts G + D, then per step does a discriminator
+   step (fake detached) and a generator step, with two `AdamW` optimizers
+   (lr 1e-4, β 0.8/0.99). Losses match RVC exactly: mel-L1 ×45, KL ×1 (VITS's
+   sampled `logs_p - logs_q - 0.5 + 0.5·(z_p-m_p)²·exp(-2·logs_p)`), feature
+   matching ×2, and LSGAN adversarial. The differentiable STFT/mel front-end
+   (`spectral.rs`) is `n_fft=2048`, `hop=480`, 128 Slaney mels, center=False.
 
-   Modules to port:
-   - `TextEncoder768` — Linear(768→h) + FFT/attention stack → `m_p, logs_p`.
-   - `PosteriorEncoder` (`enc_q`) — from the clip's linear spectrogram (train only).
-   - `ResidualCouplingBlock` (`flow`) — normalizing flow between the two.
-   - `GeneratorNSF` (`dec`) — NSF source (F0 → harmonic excitation) + HiFi-GAN.
-   - `MultiPeriodDiscriminator` (+ scale discriminator) — adversary.
-
-   Losses: mel L1 (48 kHz mel), KL(`enc_q`‖flow∘`enc_p`), feature matching,
-   generator/discriminator adversarial (LSGAN).
+   **Dashboard & early stop.** On a TTY, `dashboard.rs` drives Burn's
+   `TuiMetricsRendererWrapper` directly (our GAN loop doesn't fit Burn's
+   `Learner`): it registers the `g`/`d`/`mel` losses once and pushes a value +
+   progress each step. The renderer shares a Burn `Interrupter` — pressing `q`
+   flips it and the loop stops and saves. Off-TTY (or `--no-tui`), it logs to
+   stderr and **Ctrl-C** (a SIGINT flag threaded through `TrainRequest.stop`)
+   stops and saves. When the TUI is on, the CLI routes `tracing` logs to
+   `{work-dir}/train.log` so they don't corrupt the display.
 
    Notes:
    - Warm-start from RVC's `assets/pretrained_v2/f0G48k.pth` / `f0D48k.pth` is
