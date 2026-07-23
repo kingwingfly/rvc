@@ -1,10 +1,32 @@
 //! Shared helpers: resolve ONNX assets and build an [`RvcConfig`].
 
+use std::path::PathBuf;
+
 use anyhow::{Context, Result};
 use asmr_hub::ModelRef;
 use asmr_vc::{ModelPaths, RvcConfig};
 
 use crate::args::ModelOpts;
+
+/// Resolve the ContentVec and RMVPE ONNX paths (downloading when not provided).
+/// Used by the Burn inference path, which needs the feature extractors but not
+/// the ORT generator session.
+pub async fn resolve_feature_models(opts: &ModelOpts) -> Result<(PathBuf, PathBuf)> {
+    let cache = opts.cache_dir.as_deref();
+    let content = match &opts.content {
+        Some(p) => p.clone(),
+        None => asmr_hub::fetch(&asmr_hub::default_contentvec(), cache)
+            .await
+            .context("failed to fetch ContentVec ONNX (override with --content)")?,
+    };
+    let rmvpe = match &opts.rmvpe {
+        Some(p) => p.clone(),
+        None => asmr_hub::fetch(&asmr_hub::default_rmvpe(), cache)
+            .await
+            .context("failed to fetch RMVPE ONNX (override with --rmvpe)")?,
+    };
+    Ok((content, rmvpe))
+}
 
 /// Resolve the ContentVec and RMVPE ONNX paths, downloading from Hugging Face
 /// when not provided explicitly, then assemble the full pipeline config.

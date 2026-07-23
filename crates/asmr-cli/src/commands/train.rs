@@ -1,47 +1,58 @@
-//! `asmr train` — thin wrapper that drives the Python/uv RVC training pipeline.
+//! `asmr train` — native (Rust/burn) RVC generator training.
 //!
-//! Training is a one-time, offline step. We shell out to `uv run` in the
-//! `training/` project so the whole heavyweight Python/torch stack stays out of
-//! the shipped binary. stdio is inherited so the user sees training progress.
+//! Corpus audio is decoded and resampled with `asmr-audio`, content/F0 features
+//! come from the same ONNX extractors the inference path uses (`asmr-vc`), and
+//! the generator is trained with `burn`. Only the final weight -> ONNX step is
+//! left to a small Python helper (RVC's own exporter), per project policy.
 
-use anyhow::{bail, Context, Result};
-use tokio::process::Command;
+use anyhow::{Context, Result};
+use asmr_train::{TrainRequest, TrainSettings};
 
 use crate::args::TrainArgs;
 
 pub async fn run(args: TrainArgs) -> Result<()> {
-    if !args.project.join("pyproject.toml").exists() {
-        bail!(
-            "training project not found at {} (expected a uv pyproject.toml)",
-            args.project.display()
-        );
-    }
+    let cache = args.cache_dir.as_deref();
 
-    // uv run --project <dir> python -m asmr_train --out <out> -- <data...> [extra]
-    let mut cmd = Command::new("uv");
-    cmd.arg("run")
-        .arg("--project")
-        .arg(&args.project)
-        .args(["python", "-m", "asmr_train"])
-        .arg("--out")
-        .arg(&args.out);
+    let content = match &args.content {
+        Some(p) => p.clone(),
+        None => {
+            tracing::info!("resolving ContentVec ONNX from Hugging Face...");
+            asmr_hub::fetch(&asmr_hub::default_contentvec(), cache)
+                .await
+                .context("failed to fetch ContentVec ONNX (override with --content)")?
+        }
+    };
+    let rmvpe = match &args.rmvpe {
+        Some(p) => p.clone(),
+        None => {
+            tracing::info!("resolving RMVPE ONNX from Hugging Face...");
+            asmr_hub::fetch(&asmr_hub::default_rmvpe(), cache)
+                .await
+                .context("failed to fetch RMVPE ONNX (override with --rmvpe)")?
+        }
+    };
 
-    for path in &args.data {
-        cmd.arg(path);
-    }
-    if !args.extra.is_empty() {
-        cmd.arg("--").args(&args.extra);
-    }
+    let req = TrainRequest {
+        data: args.data,
+        out: args.out.clone(),
+        work_dir: args.work_dir,
+        content,
+        rmvpe,
+        pretrained_g: args.pretrained_g,
+        pretrained_d: args.pretrained_d,
+        settings: TrainSettings {
+            sample_rate: args.model_sr,
+            epochs: args.epochs,
+            batch_size: args.batch_size,
+            speaker_id: args.speaker_id,
+        },
+    };
 
-    tracing::info!("launching training via uv (project: {})", args.project.display());
-    let status = cmd
-        .status()
+    // Training is blocking (GPU/CPU compute); keep it off the async runtime.
+    let out = tokio::task::spawn_blocking(move || asmr_train::train(req))
         .await
-        .context("failed to launch `uv` (is it installed and on PATH?)")?;
+        .context("training task panicked")??;
 
-    if !status.success() {
-        bail!("training exited with status {status}");
-    }
-    tracing::info!("training complete; generator written to {}", args.out.display());
+    tracing::info!("training complete; generator written to {}", out.display());
     Ok(())
 }

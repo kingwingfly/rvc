@@ -1,13 +1,16 @@
 /target
 
-# Trained + downloaded model assets
+# Local RVC-Project reference checkout (architecture reference + the one Python
+# weight->ONNX step); pinned to tag 2.2.231006, never committed.
+/.rvc-repo
+
+# OS cruft
+.DS_Store
+
+# Python (only the ONNX-export helper under export/)
+__pycache__/
+.venv/
+
+# Trained + downloaded model assets, training scratch
 /models
 *.onnx
-
-# Training scratch + Python
-/training/.work
-__pycache__/
-*.py[cod]
-.venv/
-.mypy_cache/
-.ruff_cache/

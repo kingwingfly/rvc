@@ -1,26 +1,20 @@
 [package]
-name = "asmr-cli"
+name = "asmr-train"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "asmr — CLI for RVC voice conversion"
-
-[[bin]]
-name = "asmr"
-path = "src/main.rs"
+description = "Native (Rust) RVC generator training for the ASMR toolkit"
 
 [dependencies]
 asmr-audio.workspace = true
-asmr-hub.workspace = true
 asmr-vc.workspace = true
-asmr-train.workspace = true
 burn-rvc.workspace = true
-burn = { workspace = true, features = ["wgpu"] }
 tokio = { workspace = true }
 futures.workspace = true
-clap.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
+# Training runs on the GPU (wgpu/Vulkan) with autodiff; the HiFiGAN decoder is
+# far too slow on CPU.
+burn = { version = "0.21", default-features = false, features = ["std", "autodiff", "wgpu"] }

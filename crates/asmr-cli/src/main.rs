@@ -1,10 +1,10 @@
-//! `asmr` — CLI for RVC voice conversion (TTS to come in a later phase).
+//! `asmr` — CLI for RVC voice conversion.
 //!
 //! Subcommands:
 //! - `convert` — batch-convert mp3 files to the target timbre (WAV out).
 //! - `serve`   — realtime Unix filter: raw f32le PCM stdin -> stdout.
 //! - `models`  — prefetch the shared ONNX assets from Hugging Face.
-//! - `train`   — drive the Python/uv RVC training pipeline.
+//! - `train`   — train an RVC generator natively in Rust (burn).
 //!
 //! Logs go to **stderr** so `serve`'s stdout carries only PCM.
 
@@ -33,6 +33,5 @@ async fn main() -> Result<()> {
         Command::Serve(a) => commands::serve::run(a).await,
         Command::Models(a) => commands::models::run(a).await,
         Command::Train(a) => commands::train::run(a).await,
-        Command::Tts(a) => commands::tts::run(a).await,
     }
 }

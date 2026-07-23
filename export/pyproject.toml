@@ -1,0 +1,18 @@
+[project]
+name = "asmr-onnx-export"
+version = "0.1.0"
+description = "Convert a Burn-trained RVC generator (safetensors) to ONNX for deploy"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.2",
+    "numpy>=1.26",
+    "safetensors>=0.4",
+    "onnx>=1.16",
+]
+
+[project.scripts]
+asmr-onnx-export = "export_onnx:main"
+
+[tool.uv]
+package = false

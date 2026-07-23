@@ -4,6 +4,8 @@ members = [
     "crates/asmr-audio",
     "crates/asmr-hub",
     "crates/asmr-vc",
+    "crates/burn-rvc",
+    "crates/asmr-train",
     "crates/asmr-cli",
 ]
 
@@ -19,6 +21,9 @@ rust-version = "1.85"
 asmr-audio = { path = "crates/asmr-audio" }
 asmr-hub = { path = "crates/asmr-hub" }
 asmr-vc = { path = "crates/asmr-vc" }
+asmr-train = { path = "crates/asmr-train" }
+burn-rvc = { path = "crates/burn-rvc" }
+burn = { version = "0.21", default-features = false, features = ["std", "ndarray"] }
 
 # Async / streaming
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "io-std", "io-util", "sync", "fs"] }

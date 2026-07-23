@@ -16,6 +16,7 @@ mod dsp;
 mod encoder;
 mod error;
 mod f0;
+mod features;
 mod mel;
 mod rvc;
 mod session;
@@ -28,6 +29,8 @@ pub use config::{
     F0_HOP, RMVPE_BINS,
 };
 pub use convert::{convert_stream, Converter, StreamParams};
+pub use dsp::{f0_to_coarse, shift_pitch, upsample_rows};
 pub use error::{Result, VcError};
+pub use features::{FeatureExtractor, Features};
 pub use rvc::RvcModel;
 pub use session::build_session;

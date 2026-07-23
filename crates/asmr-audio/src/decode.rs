@@ -10,8 +10,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Once;
 
 use ffmpeg_next as ffmpeg;
-use ffmpeg::format::sample::{Sample, Type as SampleType};
-use ffmpeg::util::channel_layout::ChannelLayout;
 use ffmpeg::util::frame::audio::Audio as AudioFrame;
 use futures::Stream;
 use tokio::sync::mpsc;
@@ -100,26 +98,21 @@ fn decode_one_blocking(
         .audio()?;
     decoder.set_parameters(stream.parameters())?;
 
-    // Resample whatever the source is into packed mono f32 at the target rate.
-    let mut resampler = ffmpeg::software::resampling::context::Context::get(
-        decoder.format(),
-        decoder.channel_layout(),
-        decoder.rate(),
-        Sample::F32(SampleType::Packed),
-        ChannelLayout::MONO,
-        target_rate,
-    )?;
+    // Decode every frame to mono f32 at the source rate, then resample once.
+    // We avoid libswresample's frame API entirely: its stereo→mono / rate
+    // conversion is unreliable in this ffmpeg build (spurious "Output changed").
+    let mut mono_src: Vec<f32> = Vec::new();
+    let mut src_rate: u32 = 0;
 
-    let send = |frame: &AudioFrame| -> Result<()> {
-        let n = frame.samples();
-        if n == 0 {
+    let take = |frame: &AudioFrame, mono_src: &mut Vec<f32>, src_rate: &mut u32| -> Result<()> {
+        if frame.samples() == 0 {
             return Ok(());
         }
-        // Packed mono => plane 0 holds exactly `samples()` f32 values.
-        let data: &[f32] = frame.plane(0);
-        let chunk: Samples = data[..n].to_vec();
-        // If the receiver is gone the consumer dropped the stream; stop quietly.
-        tx.blocking_send(Ok(chunk)).map_err(|_| AudioError::WorkerGone)
+        if *src_rate == 0 {
+            *src_rate = frame.rate();
+        }
+        mono_src.extend(frame_to_mono_f32(frame)?);
+        Ok(())
     };
 
     let mut decoded = AudioFrame::empty();
@@ -129,32 +122,105 @@ fn decode_one_blocking(
         }
         decoder.send_packet(&packet)?;
         while decoder.receive_frame(&mut decoded).is_ok() {
-            let mut resampled = AudioFrame::empty();
-            resampler.run(&decoded, &mut resampled)?;
-            send(&resampled)?;
+            take(&decoded, &mut mono_src, &mut src_rate)?;
         }
     }
-
-    // Flush the decoder.
     decoder.send_eof()?;
     while decoder.receive_frame(&mut decoded).is_ok() {
-        let mut resampled = AudioFrame::empty();
-        resampler.run(&decoded, &mut resampled)?;
-        send(&resampled)?;
+        take(&decoded, &mut mono_src, &mut src_rate)?;
     }
 
-    // Flush any samples still buffered inside the resampler.
-    loop {
-        let mut resampled = AudioFrame::empty();
-        match resampler.flush(&mut resampled)? {
-            Some(_) => send(&resampled)?,
-            None => {
-                // A final partial buffer may still be present.
-                send(&resampled)?;
-                break;
-            }
+    if mono_src.is_empty() {
+        return Ok(());
+    }
+    let mono = resample(&mono_src, src_rate, target_rate);
+
+    // Emit in chunks so downstream back-pressure still works.
+    const CHUNK: usize = 16_384;
+    for chunk in mono.chunks(CHUNK) {
+        tx.blocking_send(Ok(chunk.to_vec())).map_err(|_| AudioError::WorkerGone)?;
+    }
+    Ok(())
+}
+
+/// Downmix one decoded frame to mono `f32`, handling the common sample formats
+/// in both planar and packed layouts.
+fn frame_to_mono_f32(frame: &AudioFrame) -> Result<Vec<f32>> {
+    use ffmpeg::format::Sample as S;
+
+    let n = frame.samples();
+    let ch = frame.channels().max(1) as usize;
+    let fmt = frame.format();
+
+    let (width, conv): (usize, fn(&[u8]) -> f32) = match fmt {
+        S::U8(_) => (1, |b| (b[0] as f32 - 128.0) / 128.0),
+        S::I16(_) => (2, |b| i16::from_ne_bytes([b[0], b[1]]) as f32 / 32768.0),
+        S::I32(_) => (4, |b| i32::from_ne_bytes([b[0], b[1], b[2], b[3]]) as f32 / 2_147_483_648.0),
+        S::F32(_) => (4, |b| f32::from_ne_bytes([b[0], b[1], b[2], b[3]])),
+        S::F64(_) => {
+            (8, |b| f64::from_ne_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]) as f32)
+        }
+        other => return Err(AudioError::UnsupportedFormat(other)),
+    };
+
+    let inv = 1.0 / ch as f32;
+    let mut out = Vec::with_capacity(n);
+    if fmt.is_planar() {
+        // Planar audio only fills `linesize[0]`, so each plane's slice length is
+        // unreliable; read `n*width` bytes from each plane pointer directly.
+        let planes: Vec<&[u8]> = (0..ch)
+            .map(|c| unsafe { std::slice::from_raw_parts(frame.data(c).as_ptr(), n * width) })
+            .collect();
+        for i in 0..n {
+            let off = i * width;
+            let sum: f32 = planes.iter().map(|p| conv(&p[off..off + width])).sum();
+            out.push(sum * inv);
+        }
+    } else {
+        let d: &[u8] =
+            unsafe { std::slice::from_raw_parts(frame.data(0).as_ptr(), n * ch * width) };
+        for i in 0..n {
+            let sum: f32 = (0..ch)
+                .map(|c| {
+                    let off = (i * ch + c) * width;
+                    conv(&d[off..off + width])
+                })
+                .sum();
+            out.push(sum * inv);
         }
     }
+    Ok(out)
+}
 
-    Ok(())
+/// Resample a mono signal from `src` to `dst` Hz. Downsampling uses area
+/// averaging (a cheap anti-alias); upsampling uses linear interpolation.
+fn resample(input: &[f32], src: u32, dst: u32) -> Vec<f32> {
+    if src == dst || src == 0 || input.len() < 2 {
+        return input.to_vec();
+    }
+    let ratio = dst as f64 / src as f64;
+    let out_len = ((input.len() as f64) * ratio).round().max(1.0) as usize;
+    let step = 1.0 / ratio; // input samples per output sample
+    let mut out = Vec::with_capacity(out_len);
+
+    if dst < src {
+        // Area average over each output sample's input window.
+        for j in 0..out_len {
+            let start = j as f64 * step;
+            let end = start + step;
+            let a = (start.floor() as usize).min(input.len() - 1);
+            let b = (end.ceil() as usize).clamp(a + 1, input.len());
+            let win = &input[a..b];
+            out.push(win.iter().sum::<f32>() / win.len() as f32);
+        }
+    } else {
+        for j in 0..out_len {
+            let pos = j as f64 * step;
+            let i0 = pos.floor() as usize;
+            let i1 = (i0 + 1).min(input.len() - 1);
+            let frac = (pos - i0 as f64) as f32;
+            out.push(input[i0] * (1.0 - frac) + input[i1] * frac);
+        }
+    }
+    out
 }

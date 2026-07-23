@@ -2,7 +2,19 @@
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+
+/// Which generator backend runs inference.
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+pub enum InferBackend {
+    /// Pick by weights extension: `.onnx` → onnx-runtime, else Burn.
+    #[default]
+    Auto,
+    /// Native Burn generator (`.pth`/`.safetensors`).
+    Burn,
+    /// ONNX Runtime generator (`.onnx`).
+    Onnx,
+}
 
 /// ASMR voice toolkit: RVC voice conversion via ONNX Runtime.
 #[derive(Debug, Parser)]
@@ -20,10 +32,8 @@ pub enum Command {
     Serve(ServeArgs),
     /// Download/prefetch shared ONNX assets from Hugging Face.
     Models(ModelsArgs),
-    /// Train an RVC model on a corpus via the Python/uv pipeline.
+    /// Train an RVC generator on a corpus (native Rust / burn).
     Train(TrainArgs),
-    /// Text-to-speech in the target voice (GPT-SoVITS via Python/uv sidecar).
-    Tts(TtsArgs),
 }
 
 /// Shared options for locating the three ONNX models.
@@ -62,6 +72,9 @@ pub struct ConvertArgs {
     /// Pitch shift in semitones.
     #[arg(short = 't', long, default_value_t = 0)]
     pub transpose: i32,
+    /// Inference backend (default: auto by `-m` extension).
+    #[arg(long, value_enum, default_value_t = InferBackend::Auto)]
+    pub backend: InferBackend,
 }
 
 #[derive(Debug, Args)]
@@ -102,64 +115,6 @@ pub struct ModelsDownloadArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct TtsArgs {
-    #[command(subcommand)]
-    pub command: TtsCommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum TtsCommand {
-    /// Synthesize speech from text using a fine-tuned voice.
-    Speak(TtsSpeakArgs),
-    /// Few-shot fine-tune GPT-SoVITS on a target-voice corpus.
-    Finetune(TtsFinetuneArgs),
-}
-
-/// Shared: path to the training project (uv) and passthrough args.
-#[derive(Debug, Args, Clone)]
-pub struct SidecarOpts {
-    /// Path to the training/sidecar project (contains pyproject.toml for uv).
-    #[arg(long, default_value = "training")]
-    pub project: PathBuf,
-    /// Extra arguments passed through to the sidecar entrypoint (after `--`).
-    #[arg(last = true)]
-    pub extra: Vec<String>,
-}
-
-#[derive(Debug, Args)]
-pub struct TtsSpeakArgs {
-    /// Text to synthesize.
-    #[arg(short = 'x', long)]
-    pub text: String,
-    /// Reference audio clip that defines the voice/prosody.
-    #[arg(short = 'r', long = "ref")]
-    pub ref_audio: PathBuf,
-    /// Output WAV path.
-    #[arg(short = 'o', long, default_value = "tts.wav")]
-    pub out: PathBuf,
-    /// Fine-tuned model directory/checkpoint (default: sidecar's configured one).
-    #[arg(short = 'm', long)]
-    pub model: Option<PathBuf>,
-    /// Language hint (e.g. `zh`, `en`, `auto`).
-    #[arg(short = 'l', long, default_value = "auto")]
-    pub lang: String,
-    #[command(flatten)]
-    pub sidecar: SidecarOpts,
-}
-
-#[derive(Debug, Args)]
-pub struct TtsFinetuneArgs {
-    /// Corpus: one or more target-voice audio files.
-    #[arg(required = true)]
-    pub data: Vec<PathBuf>,
-    /// Output directory for the fine-tuned model.
-    #[arg(short = 'o', long, default_value = "models/tts")]
-    pub out: PathBuf,
-    #[command(flatten)]
-    pub sidecar: SidecarOpts,
-}
-
-#[derive(Debug, Args)]
 pub struct TrainArgs {
     /// Corpus: one or more audio files of the target voice.
     #[arg(required = true)]
@@ -167,10 +122,34 @@ pub struct TrainArgs {
     /// Output path for the trained generator ONNX.
     #[arg(short = 'o', long, default_value = "models/voice.onnx")]
     pub out: PathBuf,
-    /// Path to the training project (contains pyproject.toml for uv).
-    #[arg(long, default_value = "training")]
-    pub project: PathBuf,
-    /// Extra arguments passed through to the training entrypoint.
-    #[arg(last = true)]
-    pub extra: Vec<String>,
+    /// Generator output sample rate (40000 or 48000).
+    #[arg(long, default_value_t = 48000)]
+    pub model_sr: u32,
+    /// Number of training epochs.
+    #[arg(short = 'e', long, default_value_t = 200)]
+    pub epochs: u32,
+    /// Mini-batch size (keep small for a 6 GB GPU).
+    #[arg(short = 'b', long, default_value_t = 4)]
+    pub batch_size: usize,
+    /// Speaker id embedded in the generator (single-speaker corpora use 0).
+    #[arg(long, default_value_t = 0)]
+    pub speaker_id: i64,
+    /// Directory for checkpoints and the intermediate weight file.
+    #[arg(long, default_value = "models/train")]
+    pub work_dir: PathBuf,
+    /// Pretrained generator (`f0G48k.pth`) to warm-start from (recommended).
+    #[arg(long)]
+    pub pretrained_g: Option<PathBuf>,
+    /// Pretrained discriminator (`f0D48k.pth`) to warm-start from (recommended).
+    #[arg(long)]
+    pub pretrained_d: Option<PathBuf>,
+    /// Override the ContentVec encoder ONNX (default: auto-download).
+    #[arg(long)]
+    pub content: Option<PathBuf>,
+    /// Override the RMVPE F0 ONNX (default: auto-download).
+    #[arg(long)]
+    pub rmvpe: Option<PathBuf>,
+    /// Cache directory for downloaded feature-extractor assets.
+    #[arg(long)]
+    pub cache_dir: Option<PathBuf>,
 }

@@ -15,6 +15,9 @@ pub enum AudioError {
     /// The blocking decode worker disappeared before finishing.
     #[error("decode worker terminated unexpectedly")]
     WorkerGone,
+    /// The decoded sample format is not one we convert.
+    #[error("unsupported sample format: {0:?}")]
+    UnsupportedFormat(ffmpeg_next::format::Sample),
 }
 
 /// Convenience alias used throughout the crate.
