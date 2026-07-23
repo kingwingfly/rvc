@@ -16,8 +16,8 @@ produces the `phone/phone_lengths/pitch/pitchf/ds/rnd → audio` graph that
 
 2. **Generator training** — *in progress*. The network is a standalone crate,
    [`burn-rvc`](../burn-rvc), a faithful `burn` port of RVC v2's
-   `SynthesizerTrnMs768NSFsid`. Reference: `.rvc-repo` (RVC-Project tag
-   `2.2.231006`), `infer/lib/infer_pack/{models,attentions,modules}.py`.
+   `SynthesizerTrnMs768NSFsid`. Reference was RVC-Project tag `2.2.231006`
+   (`infer/lib/infer_pack/{models,attentions,modules}.py`); port is complete.
 
    Correctness is checked by **loading the real pretrained weights** (no unit
    tests): `cargo run -p burn-rvc --example load -- <f0G48k.pth>` reports
@@ -62,10 +62,12 @@ produces the `phone/phone_lengths/pitch/pitchf/ds/rnd → audio` graph that
 
 Keeping the burn modules weight-compatible with RVC's `state_dict` lets us
 warm-start from the public pretrained bases (essential on ~1 h of audio) and
-keeps the standalone torch exporter a faithful, trivial mirror. The RVC repo
-(`.rvc-repo`, tag 2.2.231006) is a **read-only reference** for transcribing the
-architecture and a source of the pretrained weights — never an executable
-dependency of the toolkit.
+keeps the standalone torch exporter a faithful, trivial mirror. The RVC-Project
+repo (tag `2.2.231006`, `infer/lib/infer_pack/{models,attentions,modules}.py`)
+was the read-only reference for transcribing the architecture; the port is
+complete and the toolkit no longer needs it. The pretrained warm-start bases
+`f0G48k.pth`/`f0D48k.pth` (HF `lj1995/VoiceConversionWebUI`) are what
+`asmr train --pretrained-g/-d` consumes.
 
 ## Backend
 

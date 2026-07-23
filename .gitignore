@@ -1,9 +1,5 @@
 /target
 
-# Local RVC-Project reference checkout (architecture reference + the one Python
-# weight->ONNX step); pinned to tag 2.2.231006, never committed.
-/.rvc-repo
-
 # OS cruft
 .DS_Store
 
