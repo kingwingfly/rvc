@@ -7,6 +7,12 @@ repository.workspace = true
 rust-version.workspace = true
 description = "RVC v2 voice-conversion inference (ort/ONNX) as a streaming Converter"
 
+[features]
+# The native Burn generator backend (`.pth`/`.safetensors`), a peer to the
+# default ONNX-Runtime path. Off by default so `asmr-vc` stays a lean ort crate
+# for consumers (e.g. `asmr-train`) that only need the shared `FeatureExtractor`.
+burn = ["dep:burn", "dep:burn-rvc"]
+
 [dependencies]
 asmr-audio.workspace = true
 tokio.workspace = true
@@ -17,3 +23,7 @@ ndarray.workspace = true
 rustfft.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+# Burn generator backend (optional; enabled by the `burn` feature). wgpu runs the
+# HiFiGAN decoder on the GPU (far too slow on CPU).
+burn = { workspace = true, features = ["wgpu"], optional = true }
+burn-rvc = { workspace = true, optional = true }

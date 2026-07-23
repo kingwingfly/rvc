@@ -1,6 +1,7 @@
 //! The RVC fine-tuning loop (Burn autodiff on wgpu).
 
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 
 use anyhow::{Context, Result, anyhow};
 use burn::backend::Autodiff;
@@ -11,6 +12,7 @@ use burn::tensor::{Int, Tensor, TensorData};
 use burn_rvc::{MultiPeriodDiscriminator, Synthesizer, SynthesizerConfig};
 
 use crate::TrainRequest;
+use crate::dashboard::Dashboard;
 use crate::dataset::{CONTENT_DIM, Clip, HOP, Rng, sample_batch};
 use crate::losses::{disc_loss, feature_matching, gen_adv, kl, mel_l1};
 use crate::spectral::{Spectral, SpectralConfig};
@@ -99,7 +101,21 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
     let sid = req.settings.speaker_id;
     let seg_len = SEGMENT_FRAMES * HOP;
 
+    let mut dash = Dashboard::new(
+        req.settings.use_tui,
+        total_steps,
+        steps_per_epoch,
+        req.settings.epochs as usize,
+    );
+
+    let mut stopped_early = false;
     for step in 0..total_steps {
+        // Early stop: SIGINT (non-TUI) or `q` in the dashboard. The model saved
+        // below reflects the last completed step.
+        if req.stop.load(Ordering::Relaxed) || dash.interrupted() {
+            stopped_early = true;
+            break;
+        }
         let b = batch;
         let data = sample_batch(&clips, b, WINDOW_FRAMES, &mut rng);
 
@@ -172,7 +188,8 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
         let g_grads = GradientsParams::from_grads(g_loss.backward(), &net_g);
         net_g = opt_g.step(lr, net_g, g_grads);
 
-        if step % 20 == 0 || step + 1 == total_steps {
+        dash.update(step, g_scalar, d_scalar, mel_scalar);
+        if !dash.is_active() && (step % 20 == 0 || step + 1 == total_steps) {
             tracing::info!(
                 "step {}/{}  g={:.3} d={:.3} mel={:.3}",
                 step,
@@ -182,6 +199,12 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
                 mel_scalar
             );
         }
+    }
+
+    // Close the TUI (restores the terminal) before we log/save.
+    dash.finish();
+    if stopped_early {
+        tracing::info!("stopped early; saving current weights");
     }
 
     // Save the fine-tuned generator (inference-backend weights).

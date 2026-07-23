@@ -45,13 +45,14 @@ pub struct ModelOpts {
     /// Generator output sample rate (40000 or 48000).
     #[arg(long, default_value_t = 48000)]
     pub model_sr: u32,
-    /// Override the ContentVec encoder ONNX (default: auto-download).
+    /// ContentVec encoder ONNX [default: auto-downloaded from Hugging Face].
     #[arg(long)]
     pub content: Option<PathBuf>,
-    /// Override the RMVPE F0 ONNX (default: auto-download).
+    /// RMVPE F0 ONNX [default: auto-downloaded from Hugging Face].
     #[arg(long)]
     pub rmvpe: Option<PathBuf>,
-    /// Cache directory for downloaded assets.
+    /// Cache directory for downloaded assets
+    /// [default: the Hugging Face cache, e.g. ~/.cache/huggingface/hub].
     #[arg(long)]
     pub cache_dir: Option<PathBuf>,
     /// Speaker id fed to the generator (single-speaker models use 0).
@@ -87,6 +88,10 @@ pub struct ServeArgs {
     /// Samples per input read chunk from stdin (16 kHz mono f32le).
     #[arg(long, default_value_t = 1600)]
     pub chunk: usize,
+    /// Inference backend (default: auto by `-m` extension). Note: the Burn
+    /// (GPU/wgpu) generator is currently slower than realtime for `serve`.
+    #[arg(long, value_enum, default_value_t = InferBackend::Auto)]
+    pub backend: InferBackend,
 }
 
 #[derive(Debug, Args)]
@@ -103,13 +108,16 @@ pub enum ModelsCommand {
 
 #[derive(Debug, Args)]
 pub struct ModelsDownloadArgs {
-    /// Cache directory for downloaded assets.
+    /// Cache directory for downloaded assets
+    /// [default: the Hugging Face cache, e.g. ~/.cache/huggingface/hub].
     #[arg(long)]
     pub cache_dir: Option<PathBuf>,
-    /// Override ContentVec repo as `owner/name:file`.
+    /// Override the ContentVec repo as `owner/name:file`
+    /// [default: the toolkit's ContentVec ONNX on Hugging Face].
     #[arg(long)]
     pub content: Option<String>,
-    /// Override RMVPE repo as `owner/name:file`.
+    /// Override the RMVPE repo as `owner/name:file`
+    /// [default: the toolkit's RMVPE ONNX on Hugging Face].
     #[arg(long)]
     pub rmvpe: Option<String>,
 }
@@ -119,37 +127,50 @@ pub struct TrainArgs {
     /// Corpus: one or more audio files of the target voice.
     #[arg(required = true)]
     pub data: Vec<PathBuf>,
-    /// Output path for the trained generator ONNX.
-    #[arg(short = 'o', long, default_value = "models/voice.onnx")]
+    /// Output path for the trained generator; a `.safetensors` file is written
+    /// at this path (deploy directly with `asmr convert`, or export to ONNX).
+    #[arg(short = 'o', long, default_value = "models/voice")]
     pub out: PathBuf,
     /// Generator output sample rate (40000 or 48000).
     #[arg(long, default_value_t = 48000)]
     pub model_sr: u32,
-    /// Number of training epochs.
-    #[arg(short = 'e', long, default_value_t = 200)]
+    /// Number of training epochs. Fine-tuning a warm-started base on a small
+    /// (~30 min) corpus converges in a few dozen; stop early any time with
+    /// Ctrl-C (the model is saved) or `q` in the dashboard.
+    #[arg(short = 'e', long, default_value_t = 20)]
     pub epochs: u32,
-    /// Mini-batch size (keep small for a 6 GB GPU).
-    #[arg(short = 'b', long, default_value_t = 4)]
+    /// Mini-batch size (keep small for a 6 GB GPU; 2 is safe on an RTX 2060).
+    #[arg(short = 'b', long, default_value_t = 2)]
     pub batch_size: usize,
     /// Speaker id embedded in the generator (single-speaker corpora use 0).
     #[arg(long, default_value_t = 0)]
     pub speaker_id: i64,
-    /// Directory for checkpoints and the intermediate weight file.
+    /// Directory for the training log, checkpoints, and the saved weights.
     #[arg(long, default_value = "models/train")]
     pub work_dir: PathBuf,
-    /// Pretrained generator (`f0G48k.pth`) to warm-start from (recommended).
+    /// Pretrained generator base (`f0G48k.pth`) to warm-start from (strongly
+    /// recommended on a small corpus). Download the `f0G48k.pth`/`f0D48k.pth`
+    /// bases from Hugging Face `lj1995/VoiceConversionWebUI`
+    /// (`assets/pretrained_v2/`) and pass their paths, e.g.
+    /// `models/pretrained/f0G48k.pth`.
     #[arg(long)]
     pub pretrained_g: Option<PathBuf>,
-    /// Pretrained discriminator (`f0D48k.pth`) to warm-start from (recommended).
+    /// Pretrained discriminator base (`f0D48k.pth`) to warm-start from — see
+    /// `--pretrained-g` for where to get it.
     #[arg(long)]
     pub pretrained_d: Option<PathBuf>,
-    /// Override the ContentVec encoder ONNX (default: auto-download).
+    /// ContentVec encoder ONNX [default: auto-downloaded from Hugging Face].
     #[arg(long)]
     pub content: Option<PathBuf>,
-    /// Override the RMVPE F0 ONNX (default: auto-download).
+    /// RMVPE F0 ONNX [default: auto-downloaded from Hugging Face].
     #[arg(long)]
     pub rmvpe: Option<PathBuf>,
-    /// Cache directory for downloaded feature-extractor assets.
+    /// Cache directory for downloaded feature-extractor assets
+    /// [default: the Hugging Face cache, e.g. ~/.cache/huggingface/hub].
     #[arg(long)]
     pub cache_dir: Option<PathBuf>,
+    /// Disable the interactive training dashboard (TUI) and log to stderr
+    /// instead. The TUI is auto-disabled when stderr is not a terminal.
+    #[arg(long)]
+    pub no_tui: bool,
 }

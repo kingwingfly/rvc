@@ -2,8 +2,13 @@
 //!
 //! Corpus audio is decoded and resampled with `asmr-audio`, content/F0 features
 //! come from the same ONNX extractors the inference path uses (`asmr-vc`), and
-//! the generator is trained with `burn`. Only the final weight -> ONNX step is
-//! left to a small Python helper (RVC's own exporter), per project policy.
+//! the generator is trained with `burn`, writing a `.safetensors` file. Deploy
+//! it directly (`asmr convert --backend burn`), or run the standalone `export/`
+//! uv script to convert it to ONNX — the only Python the toolkit uses.
+
+use std::io::IsTerminal;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use asmr_train::{TrainRequest, TrainSettings};
@@ -11,6 +16,22 @@ use asmr_train::{TrainRequest, TrainSettings};
 use crate::args::TrainArgs;
 
 pub async fn run(args: TrainArgs) -> Result<()> {
+    // The dashboard runs only on a real terminal; otherwise plain logs. This
+    // must match main.rs's decision to route logs off stderr.
+    let use_tui = !args.no_tui && std::io::stdout().is_terminal();
+
+    // Early stop: Ctrl-C flips this flag; the trainer saves the model and exits.
+    // (With the TUI active, Ctrl-C is captured as a key — stop with `q` there.)
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let stop = stop.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                stop.store(true, Ordering::Relaxed);
+            }
+        });
+    }
+
     let cache = args.cache_dir.as_deref();
 
     let content = match &args.content {
@@ -45,7 +66,9 @@ pub async fn run(args: TrainArgs) -> Result<()> {
             epochs: args.epochs,
             batch_size: args.batch_size,
             speaker_id: args.speaker_id,
+            use_tui,
         },
+        stop,
     };
 
     // Training is blocking (GPU/CPU compute); keep it off the async runtime.
@@ -53,6 +76,8 @@ pub async fn run(args: TrainArgs) -> Result<()> {
         .await
         .context("training task panicked")??;
 
+    // Print to stderr so it's visible even in TUI mode (logs went to a file).
     tracing::info!("training complete; generator written to {}", out.display());
+    eprintln!("training complete; generator written to {}", out.display());
     Ok(())
 }

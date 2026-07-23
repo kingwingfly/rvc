@@ -22,6 +22,10 @@ pub enum VcError {
     /// Model file (or a required component) was not found.
     #[error("model file not found: {0}")]
     NotFound(std::path::PathBuf),
+    /// An error from the native Burn generator backend (weight load / inference).
+    #[cfg(feature = "burn")]
+    #[error("burn backend error: {0}")]
+    Burn(String),
 }
 
 /// Convenience alias used throughout the crate.

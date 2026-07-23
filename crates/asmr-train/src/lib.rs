@@ -6,12 +6,15 @@
 //! pretrained bases, and save the result as safetensors. Deploy either directly
 //! (`asmr convert --backend burn`) or via the ONNX export helper.
 
+mod dashboard;
 mod dataset;
 mod losses;
 mod spectral;
 mod trainer;
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result};
 
@@ -26,6 +29,9 @@ pub struct TrainSettings {
     pub batch_size: usize,
     /// Speaker id embedded in the generator.
     pub speaker_id: i64,
+    /// Show Burn's interactive TUI dashboard (the caller must have routed logs
+    /// off stderr; disable for non-TTY output).
+    pub use_tui: bool,
 }
 
 /// A full training request: corpus, output, feature models, and warm-start.
@@ -47,6 +53,9 @@ pub struct TrainRequest {
     pub pretrained_d: Option<PathBuf>,
     /// Generator hyperparameters.
     pub settings: TrainSettings,
+    /// Early-stop flag: set it (e.g. from a SIGINT handler) to stop after the
+    /// current step and save the model. In the TUI, `q` stops too.
+    pub stop: Arc<AtomicBool>,
 }
 
 /// Fine-tune a generator and return the path to the saved weights.

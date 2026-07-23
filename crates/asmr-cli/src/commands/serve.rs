@@ -10,23 +10,21 @@
 //! ```
 
 use anyhow::{Context, Result};
-use asmr_vc::{ConvertParams, Converter, RvcModel, StreamParams, convert_stream};
+use asmr_vc::{StreamParams, convert_stream};
 use futures::StreamExt;
 use tokio::io::{AsyncWriteExt, BufWriter};
 
 use crate::args::ServeArgs;
-use crate::commands::common::build_rvc_config;
+use crate::commands::common::build_converter;
 
 pub async fn run(args: ServeArgs) -> Result<()> {
-    let cfg = build_rvc_config(&args.models).await?;
-    let model = RvcModel::load(cfg).context("failed to load RVC models")?;
-    let converter = Converter::new(
-        model,
+    let converter = build_converter(
+        &args.models,
+        args.backend,
+        args.transpose,
         StreamParams::realtime(),
-        ConvertParams {
-            transpose: args.transpose,
-        },
-    );
+    )
+    .await?;
     let out_sr = converter.output_sr();
     tracing::info!(
         "serving: stdin f32le mono @16000 Hz -> stdout f32le mono @{} Hz",

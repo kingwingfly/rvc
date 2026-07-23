@@ -1,38 +1,43 @@
-//! Native Burn generator inference for `asmr convert`.
+//! Native Burn generator backend — the peer of the ORT [`crate::RvcModel`].
 //!
-//! Feature extraction (ContentVec + RMVPE) reuses `asmr-vc`; the generator is
-//! the `burn-rvc` port. Mirrors the ORT `RvcModel::convert_segment` DSP: content
-//! features are upsampled ×2 to the F0 rate, F0 is pitch-shifted, then the two
-//! are aligned and fed to `Synthesizer::infer`.
+//! Feature extraction (ContentVec + RMVPE) reuses [`FeatureExtractor`]; the
+//! generator is the [`burn_rvc`] port. Mirrors [`RvcModel::convert_segment`]'s
+//! DSP: content features are upsampled ×2 to the F0 rate (inside
+//! [`FeatureExtractor::extract_aligned`]), F0 is pitch-shifted, then the two are
+//! aligned and fed to [`Synthesizer::infer`]. Runs on the GPU (wgpu/Vulkan);
+//! the HiFiGAN decoder is far too slow on CPU.
 
 use std::path::Path;
 
-use anyhow::{Context, Result, anyhow};
-use asmr_vc::{CONTENT_DIM, DEFAULT_CHUNK, FeatureExtractor, f0_to_coarse, shift_pitch};
 use burn::backend::wgpu::{Wgpu, WgpuDevice};
 use burn::tensor::{Int, Tensor, TensorData};
 use burn_rvc::{Synthesizer, SynthesizerConfig};
 
-/// The GPU (wgpu/Vulkan) backend — the HiFiGAN decoder is far too slow on CPU.
+use crate::backend::Generator;
+use crate::config::{CONTENT_DIM, ConvertParams};
+use crate::dsp::{f0_to_coarse, shift_pitch};
+use crate::error::{Result, VcError};
+use crate::features::{DEFAULT_CHUNK, FeatureExtractor};
+
+/// The GPU (wgpu/Vulkan) backend.
 type B = Wgpu;
 
-/// A loaded Burn conversion pipeline.
-pub struct BurnConverter {
+/// A loaded native-Burn conversion pipeline.
+pub struct BurnGenerator {
     extractor: FeatureExtractor,
     model: Synthesizer<B>,
     model_sr: u32,
-    transpose: i32,
     speaker_id: i64,
 }
 
-impl BurnConverter {
-    /// Load feature extractors and the generator weights (`.pth`/`.safetensors`).
+impl BurnGenerator {
+    /// Load the feature extractors and the generator weights
+    /// (`.pth`/`.safetensors`).
     pub fn load(
         content: &Path,
         rmvpe: &Path,
         weights: &Path,
         model_sr: u32,
-        transpose: i32,
         speaker_id: i64,
     ) -> Result<Self> {
         let cfg = match model_sr {
@@ -41,16 +46,16 @@ impl BurnConverter {
         };
         let device = WgpuDevice::default();
         let mut model = Synthesizer::<B>::new(&cfg, &device);
-        let res = model
-            .load_weights(weights)
-            .map_err(|e| anyhow!("loading generator weights {}: {e}", weights.display()))?;
+        let res = model.load_weights(weights).map_err(|e| {
+            VcError::Burn(format!("loading generator weights {}: {e}", weights.display()))
+        })?;
         if !res.missing.is_empty() {
-            return Err(anyhow!(
+            return Err(VcError::Burn(format!(
                 "generator weights {} are incomplete: {} params missing (first: {:?})",
                 weights.display(),
                 res.missing.len(),
                 res.missing.first()
-            ));
+            )));
         }
         tracing::info!(
             "loaded {} generator params from {}",
@@ -58,32 +63,21 @@ impl BurnConverter {
             weights.display()
         );
 
-        let extractor = FeatureExtractor::load(content, rmvpe)
-            .map_err(|e| anyhow!("loading ContentVec/RMVPE ONNX: {e}"))?;
-
-        Ok(Self {
-            extractor,
-            model,
-            model_sr,
-            transpose,
-            speaker_id,
-        })
+        let extractor = FeatureExtractor::load(content, rmvpe)?;
+        Ok(Self { extractor, model, model_sr, speaker_id })
     }
+}
 
-    /// The generator's output sample rate.
-    pub fn output_sr(&self) -> u32 {
+impl Generator for BurnGenerator {
+    fn output_sr(&self) -> u32 {
         self.model_sr
     }
 
-    /// Convert one mono 16 kHz clip, returning audio at [`Self::output_sr`].
-    pub fn convert(&mut self, wav16k: &[f32]) -> Result<Vec<f32>> {
-        // Chunked extraction bounds ONNX memory on long clips; content is
+    fn convert_segment(&mut self, wav16k: &[f32], params: ConvertParams) -> Result<Vec<f32>> {
+        // Chunked extraction bounds ONNX memory on long segments; content is
         // upsampled to the 100 Hz F0 grid and aligned to f0.
-        let (content, mut f0) = self
-            .extractor
-            .extract_aligned(wav16k, DEFAULT_CHUNK)
-            .map_err(|e| anyhow!("feature extraction: {e}"))?;
-        shift_pitch(&mut f0, self.transpose);
+        let (content, mut f0) = self.extractor.extract_aligned(wav16k, DEFAULT_CHUNK)?;
+        shift_pitch(&mut f0, params.transpose);
 
         let n = content.len().min(f0.len());
         if n == 0 {
@@ -107,7 +101,6 @@ impl BurnConverter {
         audio
             .into_data()
             .into_vec::<f32>()
-            .map_err(|e| anyhow!("reading generator output: {e:?}"))
-            .context("converting segment")
+            .map_err(|e| VcError::Burn(format!("reading generator output: {e:?}")))
     }
 }

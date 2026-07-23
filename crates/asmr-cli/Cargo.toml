@@ -14,10 +14,9 @@ path = "src/main.rs"
 [dependencies]
 asmr-audio.workspace = true
 asmr-hub.workspace = true
-asmr-vc.workspace = true
+# `burn` feature brings in the native Burn generator backend (BurnGenerator).
+asmr-vc = { workspace = true, features = ["burn"] }
 asmr-train.workspace = true
-burn-rvc.workspace = true
-burn = { workspace = true, features = ["wgpu"] }
 tokio = { workspace = true }
 futures.workspace = true
 clap.workspace = true

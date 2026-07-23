@@ -10,9 +10,9 @@ use asmr_audio::Samples;
 use futures::{Stream, StreamExt};
 use tokio::sync::mpsc;
 
+use crate::backend::Generator;
 use crate::config::{ANALYSIS_SR, ConvertParams};
 use crate::error::Result;
-use crate::rvc::RvcModel;
 
 /// Block/overlap parameters, expressed in 16 kHz input samples.
 #[derive(Debug, Clone, Copy)]
@@ -45,10 +45,11 @@ impl StreamParams {
     }
 }
 
-/// Stateful block processor. Not `Send`-friendly to share across threads; it is
-/// intended to live on a single (blocking) worker.
+/// Stateful block processor over any [`Generator`] backend (ONNX or Burn). Not
+/// `Send`-friendly to share across threads; it is intended to live on a single
+/// (blocking) worker.
 pub struct Converter {
-    model: RvcModel,
+    generator: Box<dyn Generator>,
     params: StreamParams,
     conv_params: ConvertParams,
     /// Pending, not-yet-processed input samples (16 kHz).
@@ -64,12 +65,16 @@ pub struct Converter {
 }
 
 impl Converter {
-    /// Build a converter around a loaded model.
-    pub fn new(model: RvcModel, params: StreamParams, conv_params: ConvertParams) -> Self {
-        let ratio = model.output_sr() as f32 / ANALYSIS_SR as f32;
+    /// Build a converter around any loaded [`Generator`] backend.
+    pub fn new(
+        generator: impl Generator + 'static,
+        params: StreamParams,
+        conv_params: ConvertParams,
+    ) -> Self {
+        let ratio = generator.output_sr() as f32 / ANALYSIS_SR as f32;
         let xf_out = (params.crossfade as f32 * ratio).round() as usize;
         Self {
-            model,
+            generator: Box::new(generator),
             params,
             conv_params,
             buf: Vec::new(),
@@ -82,7 +87,7 @@ impl Converter {
 
     /// The generator's output sample rate.
     pub fn output_sr(&self) -> u32 {
-        self.model.output_sr()
+        self.generator.output_sr()
     }
 
     /// Clear all streaming state (pending input, look-back context, crossfade
@@ -130,7 +135,7 @@ impl Converter {
         input.extend_from_slice(&self.context);
         input.extend_from_slice(block);
 
-        let conv = self.model.convert_segment(&input, self.conv_params)?;
+        let conv = self.generator.convert_segment(&input, self.conv_params)?;
 
         // Update context to the tail of this block's raw input for next time.
         let ctx_n = self.params.context.min(block.len());

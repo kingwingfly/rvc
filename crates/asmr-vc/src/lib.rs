@@ -10,6 +10,7 @@
 //! [`futures::Stream`]-in → [`futures::Stream`]-out ([`convert::convert_stream`]),
 //! so `asmr serve` is a plain Unix filter and a realtime service is a thin wrapper.
 
+mod backend;
 mod config;
 mod convert;
 mod dsp;
@@ -21,9 +22,15 @@ mod mel;
 mod rvc;
 mod session;
 
+#[cfg(feature = "burn")]
+mod burn_backend;
+
 #[cfg(test)]
 mod model_probe;
 
+pub use backend::Generator;
+#[cfg(feature = "burn")]
+pub use burn_backend::BurnGenerator;
 pub use config::{
     ANALYSIS_SR, CONTENT_DIM, CONTENT_HOP, ConvertParams, F0_HOP, GeneratorIo, ModelPaths,
     RMVPE_BINS, RvcConfig,
