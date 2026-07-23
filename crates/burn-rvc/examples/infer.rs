@@ -18,7 +18,7 @@ fn main() {
     let hop = cfg.hop_length();
     let mut model = Synthesizer::<B>::new(&cfg, &device);
     let res = model
-        .load_pytorch(&path)
+        .load_weights(&path)
         .expect("failed to load checkpoint");
     println!(
         "loaded {} params ({} missing)",
