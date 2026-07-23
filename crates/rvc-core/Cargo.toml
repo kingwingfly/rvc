@@ -23,7 +23,5 @@ ndarray.workspace = true
 rustfft.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-# Burn generator backend (optional; enabled by the `burn` feature). wgpu runs the
-# HiFiGAN decoder on the GPU (far too slow on CPU).
-burn = { workspace = true, features = ["wgpu"], optional = true }
+burn = { workspace = true, features = ["cuda"], optional = true }
 burn-rvc = { workspace = true, optional = true }

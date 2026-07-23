@@ -89,7 +89,7 @@ pub struct ServeArgs {
     #[arg(long, default_value_t = 1600)]
     pub chunk: usize,
     /// Inference backend (default: auto by `-m` extension). Note: the Burn
-    /// (GPU/wgpu) generator is currently slower than realtime for `serve`.
+    /// (GPU/cuda) generator is currently slower than realtime for `serve`.
     #[arg(long, value_enum, default_value_t = InferBackend::Auto)]
     pub backend: InferBackend,
 }

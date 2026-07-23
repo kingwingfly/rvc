@@ -76,7 +76,7 @@ If the source and target sit in different pitch ranges, add e.g. `-t 2` (up) or
 
 ### 1. Fine-tune a generator (native Rust/Burn, GPU)
 
-Training runs natively in Rust (Burn on wgpu/Vulkan) — no Python. Warm-start
+Training runs natively in Rust (Burn on CUDA) — no Python. Warm-start
 from the public pretrained bases (`f0G48k.pth`/`f0D48k.pth`) for good results on
 a small corpus. Get the bases from Hugging Face `lj1995/VoiceConversionWebUI`
 (`assets/pretrained_v2/`) and point `--pretrained-g/-d` at them:
@@ -135,7 +135,7 @@ rvc convert -m models/voice.onnx --model-sr 48000 -o out/  input1.mp3 input2.mp3
 
 Writes `out/input1.wav`, `out/input2.wav` in the target timbre. `--backend`
 (`auto`/`burn`/`onnx`) picks the generator; `auto` chooses by file extension
-(`.onnx` → ONNX Runtime, else Burn). The Burn generator runs on the GPU (wgpu).
+(`.onnx` → ONNX Runtime, else Burn). The Burn generator runs on the GPU (CUDA).
 
 ### 3. Realtime — a Unix filter (raw f32le PCM stdin → stdout)
 
@@ -155,7 +155,7 @@ ffmpeg -f alsa -i default -f f32le -ar 16000 -ac 1 - \
 ```
 
 `serve` takes the same `--backend` flag as `convert`; both runtimes stream
-through the same `Converter`. Use ONNX Runtime for realtime — the Burn (wgpu)
+through the same `Converter`. Use ONNX Runtime for realtime — the Burn (CUDA)
 generator works but is currently slower than realtime. Logs go to stderr, so
 stdout carries only PCM.
 
@@ -164,7 +164,7 @@ stdout carries only PCM.
 - **Native training works** (Rust/Burn, GPU): the full RVC v2 generator +
   MultiPeriod discriminator are ported to Burn (`crates/burn-rvc`), warm-start
   from the public pretrained bases, and fine-tune adversarially (mel-L1 + KL +
-  feature-matching + LSGAN) on wgpu. Verified end-to-end on a real clip —
+  feature-matching + LSGAN) on cuda. Verified end-to-end on a real clip —
   losses decrease and the saved `.safetensors` round-trips through
   `rvc convert`.
 - **Inference works on both backends**, and both `convert` and `serve` run
@@ -181,6 +181,6 @@ stdout carries only PCM.
 ## Roadmap
 
 - 40 kHz training.
-- Faster Burn (wgpu) inference so `serve` is realtime on the native backend.
+- Faster Burn (CUDA) inference so `serve` is realtime on the native backend.
 - Index/retrieval blend + `protect` for even tighter timbre match.
 - TTS (text → voice) — deferred.

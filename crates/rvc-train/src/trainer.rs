@@ -1,11 +1,11 @@
-//! The RVC fine-tuning loop (Burn autodiff on wgpu).
+//! The RVC fine-tuning loop (Burn autodiff on CUDA).
 
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 
 use anyhow::{Context, Result, anyhow};
 use burn::backend::Autodiff;
-use burn::backend::wgpu::{Wgpu, WgpuDevice};
+use burn::backend::cuda::{Cuda, CudaDevice};
 use burn::module::AutodiffModule;
 use burn::optim::{AdamWConfig, GradientsParams, Optimizer};
 use burn::tensor::{Int, Tensor, TensorData};
@@ -18,7 +18,7 @@ use crate::losses::{disc_loss, feature_matching, gen_adv, kl, mel_l1};
 use crate::spectral::{Spectral, SpectralConfig};
 
 /// Autodiff GPU backend.
-type AB = Autodiff<Wgpu>;
+type AB = Autodiff<Cuda>;
 
 const SEGMENT_FRAMES: usize = 36; // 17280 samples / 480 hop
 /// Context window (frames) fed to enc_q/flow each step; clips must be at least
@@ -34,7 +34,7 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
         req.settings.sample_rate == 48_000,
         "native training currently supports only --model-sr 48000"
     );
-    let device = WgpuDevice::default();
+    let device = CudaDevice::default();
     let cfg = SynthesizerConfig::v2_48k();
 
     // ---- Generator: resume a prior run, else warm-start, else scratch -------

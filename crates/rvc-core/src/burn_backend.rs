@@ -4,12 +4,12 @@
 //! generator is the [`burn_rvc`] port. Mirrors [`RvcModel::convert_segment`]'s
 //! DSP: content features are upsampled ×2 to the F0 rate (inside
 //! [`FeatureExtractor::extract_aligned`]), F0 is pitch-shifted, then the two are
-//! aligned and fed to [`Synthesizer::infer`]. Runs on the GPU (wgpu/Vulkan);
+//! aligned and fed to [`Synthesizer::infer`]. Runs on the GPU (CUDA);
 //! the HiFiGAN decoder is far too slow on CPU.
 
 use std::path::Path;
 
-use burn::backend::wgpu::{Wgpu, WgpuDevice};
+use burn::backend::cuda::{Cuda, CudaDevice};
 use burn::tensor::{Int, Tensor, TensorData};
 use burn_rvc::{Synthesizer, SynthesizerConfig};
 
@@ -19,8 +19,8 @@ use crate::dsp::{f0_to_coarse, shift_pitch};
 use crate::error::{Result, VcError};
 use crate::features::{DEFAULT_CHUNK, FeatureExtractor};
 
-/// The GPU (wgpu/Vulkan) backend.
-type B = Wgpu;
+/// The GPU (CUDA) backend.
+type B = Cuda;
 
 /// A loaded native-Burn conversion pipeline.
 pub struct BurnGenerator {
@@ -44,7 +44,7 @@ impl BurnGenerator {
             40_000 => SynthesizerConfig::v2_40k(),
             _ => SynthesizerConfig::v2_48k(),
         };
-        let device = WgpuDevice::default();
+        let device = CudaDevice::default();
         let mut model = Synthesizer::<B>::new(&cfg, &device);
         let res = model.load_weights(weights).map_err(|e| {
             VcError::Burn(format!(
@@ -99,7 +99,7 @@ impl Generator for BurnGenerator {
             phone_flat.extend_from_slice(row);
         }
 
-        let device = WgpuDevice::default();
+        let device = CudaDevice::default();
         let phone =
             Tensor::<B, 3>::from_data(TensorData::new(phone_flat, [1, n, CONTENT_DIM]), &device);
         let pitch = Tensor::<B, 2, Int>::from_data(TensorData::new(coarse, [1, n]), &device);

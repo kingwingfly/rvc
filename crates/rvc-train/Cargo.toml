@@ -15,6 +15,4 @@ tokio = { workspace = true }
 futures.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
-# Training runs on the GPU (wgpu/Vulkan) with autodiff; the HiFiGAN decoder is
-# far too slow on CPU.
-burn = { version = "0.21", default-features = false, features = ["std", "autodiff", "wgpu", "train", "tui"] }
+burn = { version = "0.21", default-features = false, features = ["std", "autodiff", "cuda", "train", "tui"] }

@@ -2,7 +2,7 @@
 //!
 //! Pipeline: decode the corpus and extract ContentVec + RMVPE features (reusing
 //! the ONNX extractors the inference path uses), then adversarially fine-tune
-//! the [`burn_rvc`] generator on the GPU (wgpu), warm-started from the public
+//! the [`burn_rvc`] generator on the GPU (CUDA), warm-started from the public
 //! pretrained bases, and save the result as safetensors. Deploy either directly
 //! (`rvc convert --backend burn`) or via the ONNX export helper.
 

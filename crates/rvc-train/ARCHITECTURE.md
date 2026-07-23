@@ -50,7 +50,7 @@ produces the `phone/phone_lengths/pitch/pitchf/ds/rnd → audio` graph that
      essential for a small (~1 h) single-speaker corpus. This requires our burn
      module layout to map onto RVC's `state_dict` keys.
    - Target GPU is 6 GB (RTX 2060) → small batch (≈4), fp16 where stable.
-   - Backend: `burn` with the wgpu (or cuda) backend at train time; keep the
+   - Backend: `burn` with the cuda backend at train time; keep the
      model generic over `burn::tensor::backend::Backend`.
 
 3. **ONNX export** — the one allowed Python step, kept **minimal and standalone**.
@@ -74,6 +74,6 @@ complete and the toolkit no longer needs it. The pretrained warm-start bases
 
 ## Backend
 
-`burn` with the `ndarray` backend by default (CPU, always compiles); a `wgpu`
+`burn` with the `ndarray` backend by default (CPU, always compiles); a `cuda`
 feature selects the GPU backend for the RTX 2060 at train time. The model is
 generic over `burn::tensor::backend::Backend` / `AutodiffBackend`.

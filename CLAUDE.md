@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `rvc` is a pure-Rust RVC v2 voice-conversion toolkit: it retimbres a source voice
 into a trained target voice while preserving content + F0 pitch (so breathy/expressive
 vocalizations survive by construction). Inference runs on **two interchangeable
-generator backends** — ONNX Runtime (`ort`) and native Burn (GPU/wgpu) — and training
+generator backends** — ONNX Runtime (`ort`) and native Burn (GPU/CUDA) — and training
 is native Rust/Burn. The only Python is a standalone `.safetensors → ONNX` exporter
 under `export/`.
 
@@ -54,7 +54,7 @@ Everything downstream of the generator is shared: the same `FeatureExtractor`, t
 same DSP, and the same streaming `Converter` drive **either** backend through the
 `Generator` trait (`crates/rvc-core/src/backend.rs`). `convert` and `serve` both take
 `--backend auto|burn|onnx`; `auto` picks by the `-m` extension (`.onnx` → ONNX
-Runtime, else Burn). Use ONNX Runtime for realtime `serve` — the Burn (wgpu)
+Runtime, else Burn). Use ONNX Runtime for realtime `serve` — the Burn (CUDA)
 generator is currently slower than realtime.
 
 ### The `burn` feature
@@ -93,7 +93,7 @@ Exported graph contract (matches `rvc-core`):
 
 ## Training notes
 
-Native Rust/Burn on wgpu/Vulkan; no `Learner` (the GAN loop doesn't fit it) — the
+Native Rust/Burn on CUDA; no `Learner` (the GAN loop doesn't fit it) — the
 trainer drives Burn's `TuiMetricsRendererWrapper` directly (`crates/rvc-train/src/dashboard.rs`).
 On a TTY a live dashboard shows `g`/`d`/`mel` losses; `q` stops early and saves. Off-TTY
 (or `--no-tui`), it logs to stderr and Ctrl-C stops and saves. Losses match RVC exactly
