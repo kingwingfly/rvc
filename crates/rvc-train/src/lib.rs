@@ -47,6 +47,10 @@ pub struct TrainRequest {
     pub content: PathBuf,
     /// RMVPE F0 ONNX (already resolved/downloaded).
     pub rmvpe: PathBuf,
+    /// Resume from a prior run's generator `.safetensors` (`--continue`),
+    /// instead of a pretrained base. The discriminator resumes from the sibling
+    /// `<stem>.disc.safetensors` if present. Takes priority over `pretrained_g`.
+    pub resume: Option<PathBuf>,
     /// Pretrained generator (`f0G48k.pth`) for warm-start.
     pub pretrained_g: Option<PathBuf>,
     /// Pretrained discriminator (`f0D48k.pth`) for warm-start.

@@ -1,9 +1,9 @@
 //! `rvc convert` — batch file conversion to WAV (Burn or ONNX generator).
 
 use anyhow::{Context, Result};
+use futures::{StreamExt, stream};
 use rvc_audio::{DecodeOptions, decode_paths, write_wav_file};
 use rvc_core::{ANALYSIS_SR, StreamParams};
-use futures::{StreamExt, stream};
 
 use crate::args::ConvertArgs;
 use crate::commands::common::{build_converter, use_burn_backend};
@@ -16,8 +16,13 @@ pub async fn run(args: ConvertArgs) -> Result<()> {
     };
 
     // One loaded model (GPU/ORT init is expensive), reused across files.
-    let mut converter =
-        build_converter(&args.models, args.backend, args.transpose, StreamParams::batch()).await?;
+    let mut converter = build_converter(
+        &args.models,
+        args.backend,
+        args.transpose,
+        StreamParams::batch(),
+    )
+    .await?;
     let model_sr = converter.output_sr();
 
     tokio::fs::create_dir_all(&args.output_dir)

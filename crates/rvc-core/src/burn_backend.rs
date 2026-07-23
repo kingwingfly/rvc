@@ -47,7 +47,10 @@ impl BurnGenerator {
         let device = WgpuDevice::default();
         let mut model = Synthesizer::<B>::new(&cfg, &device);
         let res = model.load_weights(weights).map_err(|e| {
-            VcError::Burn(format!("loading generator weights {}: {e}", weights.display()))
+            VcError::Burn(format!(
+                "loading generator weights {}: {e}",
+                weights.display()
+            ))
         })?;
         if !res.missing.is_empty() {
             return Err(VcError::Burn(format!(
@@ -64,7 +67,12 @@ impl BurnGenerator {
         );
 
         let extractor = FeatureExtractor::load(content, rmvpe)?;
-        Ok(Self { extractor, model, model_sr, speaker_id })
+        Ok(Self {
+            extractor,
+            model,
+            model_sr,
+            speaker_id,
+        })
     }
 }
 

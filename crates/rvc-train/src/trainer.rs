@@ -37,9 +37,21 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
     let device = WgpuDevice::default();
     let cfg = SynthesizerConfig::v2_48k();
 
-    // ---- Models (warm-started from the public pretrained bases) -------------
+    // ---- Generator: resume a prior run, else warm-start, else scratch -------
     let mut net_g = Synthesizer::<AB>::new(&cfg, &device);
-    if let Some(p) = &req.pretrained_g {
+    if let Some(p) = &req.resume {
+        // Resume from a generator .safetensors written by an earlier run.
+        let res = net_g
+            .load_weights(p)
+            .map_err(|e| anyhow!("resuming G from {}: {e}", p.display()))?;
+        anyhow::ensure!(
+            res.missing.is_empty(),
+            "G resume incomplete ({} missing): {} is not a full generator checkpoint",
+            res.missing.len(),
+            p.display()
+        );
+        tracing::info!("resumed generator from {}", p.display());
+    } else if let Some(p) = &req.pretrained_g {
         let res = net_g
             .load_pytorch(p)
             .map_err(|e| anyhow!("loading G {}: {e}", p.display()))?;
@@ -55,8 +67,24 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
         );
     }
 
+    // ---- Discriminator: resume from the sidecar if present, else warm-start -
     let mut disc = MultiPeriodDiscriminator::<AB>::new(&device);
-    if let Some(p) = &req.pretrained_d {
+    let disc_resume = req
+        .resume
+        .as_deref()
+        .map(disc_sidecar_path)
+        .filter(|p| p.exists());
+    if let Some(p) = &disc_resume {
+        let res = disc
+            .load_safetensors(p)
+            .map_err(|e| anyhow!("resuming D from {}: {e}", p.display()))?;
+        anyhow::ensure!(
+            res.missing.is_empty(),
+            "D resume incomplete: {} missing",
+            res.missing.len()
+        );
+        tracing::info!("resumed discriminator from {}", p.display());
+    } else if let Some(p) = &req.pretrained_d {
         let res = disc
             .load_pytorch(p)
             .map_err(|e| anyhow!("loading D {}: {e}", p.display()))?;
@@ -66,6 +94,11 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
             res.missing.len()
         );
         tracing::info!("warm-started discriminator from {}", p.display());
+    } else if req.resume.is_some() {
+        tracing::warn!(
+            "resuming without a discriminator checkpoint or --pretrained-d: \
+             the discriminator starts fresh (adversarial training will lag)"
+        );
     }
 
     let spectral = Spectral::<AB>::new(&SpectralConfig::v2_48k(), &device);
@@ -220,7 +253,25 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
         .save_safetensors(&out)
         .map_err(|e| anyhow!("saving {}: {e}", out.display()))
         .with_context(|| "saving trained weights")?;
+
+    // Save the discriminator alongside it so a later `--continue <out>` resumes
+    // the adversary too (a best-effort sidecar; a failure here must not discard
+    // the generator we already wrote).
+    let disc_out = disc_sidecar_path(&out);
+    match disc.valid().save_safetensors(&disc_out) {
+        Ok(()) => tracing::info!("saved discriminator checkpoint to {}", disc_out.display()),
+        Err(e) => tracing::warn!(
+            "could not save discriminator checkpoint {}: {e} (resume will fall back to --pretrained-d)",
+            disc_out.display()
+        ),
+    }
     Ok(out)
+}
+
+/// Sidecar path for the discriminator checkpoint next to a generator
+/// safetensors: `voice.safetensors` -> `voice.disc.safetensors`.
+fn disc_sidecar_path(generator: &std::path::Path) -> PathBuf {
+    generator.with_extension("disc.safetensors")
 }
 
 /// Extract a scalar loss value to `f32` for logging.

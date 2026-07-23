@@ -53,9 +53,18 @@ impl Dashboard {
     ) -> Self {
         let interrupter = Interrupter::new();
         let metrics = vec![
-            Metric { id: metric_id("g_loss"), name: "g_loss" },
-            Metric { id: metric_id("d_loss"), name: "d_loss" },
-            Metric { id: metric_id("mel_loss"), name: "mel_loss" },
+            Metric {
+                id: metric_id("g_loss"),
+                name: "g_loss",
+            },
+            Metric {
+                id: metric_id("d_loss"),
+                name: "d_loss",
+            },
+            Metric {
+                id: metric_id("mel_loss"),
+                name: "mel_loss",
+            },
         ];
 
         let renderer = if enabled {
@@ -78,7 +87,14 @@ impl Dashboard {
             None
         };
 
-        Self { renderer, interrupter, metrics, total_steps, steps_per_epoch, total_epochs }
+        Self {
+            renderer,
+            interrupter,
+            metrics,
+            total_steps,
+            steps_per_epoch,
+            total_epochs,
+        }
     }
 
     /// Whether the TUI is driving the display (vs. plain stderr logging).

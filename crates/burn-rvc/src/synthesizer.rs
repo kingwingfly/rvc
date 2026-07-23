@@ -195,7 +195,9 @@ impl<B: Backend> Synthesizer<B> {
     /// Save weights in Burn-native safetensors (our field naming; round-trips
     /// with [`Synthesizer::load_safetensors`]).
     pub fn save_safetensors(&self, path: impl AsRef<Path>) -> Result<(), Box<dyn Error>> {
-        let mut store = SafetensorsStore::from_file(path.as_ref());
+        // Overwrite: re-running training to an existing output must replace it,
+        // not error at save time and lose the just-trained weights.
+        let mut store = SafetensorsStore::from_file(path.as_ref()).overwrite(true);
         self.save_into(&mut store)?;
         Ok(())
     }

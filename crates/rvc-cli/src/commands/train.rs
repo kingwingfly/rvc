@@ -59,6 +59,7 @@ pub async fn run(args: TrainArgs) -> Result<()> {
         work_dir: args.work_dir,
         content,
         rmvpe,
+        resume: args.resume,
         pretrained_g: args.pretrained_g,
         pretrained_d: args.pretrained_d,
         settings: TrainSettings {

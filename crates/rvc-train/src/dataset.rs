@@ -4,9 +4,9 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
+use futures::StreamExt;
 use rvc_audio::{DecodeOptions, decode_path};
 use rvc_core::{DEFAULT_CHUNK, FeatureExtractor, f0_to_coarse};
-use futures::StreamExt;
 
 /// Samples per latent frame (48 kHz, hop 480).
 pub const HOP: usize = 480;

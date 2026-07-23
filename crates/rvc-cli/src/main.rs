@@ -37,15 +37,18 @@ async fn main() -> Result<()> {
 /// PCM). For `train` with the dashboard (a TTY and no `--no-tui`), the TUI owns
 /// the terminal, so logs are redirected to `{work_dir}/train.log` instead.
 fn init_logging(command: &Command) {
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     if let Command::Train(a) = command {
         let tui = !a.no_tui && std::io::stdout().is_terminal();
         if tui {
             let _ = std::fs::create_dir_all(&a.work_dir);
             let path = a.work_dir.join("train.log");
-            if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            if let Ok(file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
                 tracing_subscriber::fmt()
                     .with_env_filter(filter)
                     .with_ansi(false)

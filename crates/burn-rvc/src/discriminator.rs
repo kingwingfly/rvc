@@ -7,7 +7,7 @@ use std::path::Path;
 use burn::module::Module;
 use burn::tensor::Tensor;
 use burn::tensor::backend::Backend;
-use burn_store::ApplyResult;
+use burn_store::{ApplyResult, ModuleSnapshot, SafetensorsStore};
 
 use crate::nn::leaky_relu;
 use crate::store::load_pytorch_into;
@@ -154,5 +154,24 @@ impl<B: Backend> MultiPeriodDiscriminator<B> {
             (r"^discriminators\.8\.", "periods.7."),
         ];
         load_pytorch_into::<B, _>(self, path.as_ref(), "model", &remaps)
+    }
+
+    /// Save the discriminator in Burn-native safetensors (round-trips with
+    /// [`MultiPeriodDiscriminator::load_safetensors`]). Written alongside the
+    /// generator so training can be resumed with the adversary intact.
+    pub fn save_safetensors(&self, path: impl AsRef<Path>) -> Result<(), Box<dyn Error>> {
+        let mut store = SafetensorsStore::from_file(path.as_ref()).overwrite(true);
+        self.save_into(&mut store)?;
+        Ok(())
+    }
+
+    /// Load a discriminator previously written by
+    /// [`MultiPeriodDiscriminator::save_safetensors`].
+    pub fn load_safetensors(
+        &mut self,
+        path: impl AsRef<Path>,
+    ) -> Result<ApplyResult, Box<dyn Error>> {
+        let mut store = SafetensorsStore::from_file(path.as_ref());
+        Ok(self.load_from(&mut store)?)
     }
 }

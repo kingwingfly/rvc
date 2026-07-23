@@ -10,8 +10,8 @@
 //! ```
 
 use anyhow::{Context, Result};
-use rvc_core::{StreamParams, convert_stream};
 use futures::StreamExt;
+use rvc_core::{StreamParams, convert_stream};
 use tokio::io::{AsyncWriteExt, BufWriter};
 
 use crate::args::ServeArgs;

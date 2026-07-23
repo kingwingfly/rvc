@@ -148,6 +148,18 @@ pub struct TrainArgs {
     /// Directory for the training log, checkpoints, and the saved weights.
     #[arg(long, default_value = "models/train")]
     pub work_dir: PathBuf,
+    /// Continue a previous run: resume from a generator `.safetensors` written
+    /// by an earlier `rvc train` (e.g. after Ctrl-C) instead of a pretrained
+    /// base. If a matching `<stem>.disc.safetensors` sits next to it (written
+    /// automatically), the discriminator resumes too; otherwise it falls back to
+    /// `--pretrained-d`. Conflicts with `--pretrained-g`.
+    #[arg(
+        long,
+        alias = "continue",
+        value_name = "SAFETENSORS",
+        conflicts_with = "pretrained_g"
+    )]
+    pub resume: Option<PathBuf>,
     /// Pretrained generator base (`f0G48k.pth`) to warm-start from (strongly
     /// recommended on a small corpus). Download the `f0G48k.pth`/`f0D48k.pth`
     /// bases from Hugging Face `lj1995/VoiceConversionWebUI`

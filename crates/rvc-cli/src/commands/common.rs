@@ -4,10 +4,10 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use rvc_hub::ModelRef;
 use rvc_core::{
     BurnGenerator, ConvertParams, Converter, ModelPaths, RvcConfig, RvcModel, StreamParams,
 };
+use rvc_hub::ModelRef;
 
 use crate::args::{InferBackend, ModelOpts};
 
@@ -41,7 +41,13 @@ pub async fn build_converter(
         );
         tracing::info!("loading Burn generator from {}", opts.model.display());
         let generator = tokio::task::block_in_place(|| {
-            BurnGenerator::load(&content, &rmvpe, &opts.model, opts.model_sr, opts.speaker_id)
+            BurnGenerator::load(
+                &content,
+                &rmvpe,
+                &opts.model,
+                opts.model_sr,
+                opts.speaker_id,
+            )
         })
         .context("failed to load Burn generator")?;
         Ok(Converter::new(generator, params, conv_params))

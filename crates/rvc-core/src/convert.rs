@@ -6,8 +6,8 @@
 //! short linear crossfade to suppress seams. Everything is mono `f32`: input at
 //! 16 kHz (the analysis rate), output at the generator's sample rate.
 
-use rvc_audio::Samples;
 use futures::{Stream, StreamExt};
+use rvc_audio::Samples;
 use tokio::sync::mpsc;
 
 use crate::backend::Generator;

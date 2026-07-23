@@ -87,8 +87,10 @@ rvc train --out models/voice --model-sr 48000 \
   clip1.mp3 clip2.mp3 clip3.mp3
 ```
 
-This writes `models/voice.safetensors`. The shared ContentVec + RMVPE ONNX assets
-(training features + inference) download automatically, or prefetch them:
+This writes the generator to `models/voice.safetensors` and, next to it, the
+discriminator checkpoint `models/voice.disc.safetensors` (the sidecar that makes
+`--continue` below resume the adversary too). The shared ContentVec + RMVPE ONNX
+assets (training features + inference) download automatically, or prefetch them:
 
 ```sh
 rvc models download
@@ -98,7 +100,24 @@ rvc models download
 dashboard (loss plots + progress); logs go to `{work-dir}/train.log` so they
 don't corrupt it. Press `q` to stop early — the model is saved. Without a TTY
 (or with `--no-tui`), it logs `g`/`d`/`mel` to stderr and **Ctrl-C** stops and
-saves.
+saves. Watch **`mel`** for quality — it should fall and plateau; `g`/`d` are
+adversarial and just stay balanced.
+
+**Resume a run (`--continue`).** Stopped early and want to keep going? Point
+`--continue` (alias `--resume`) at the generator `.safetensors` from the earlier
+run instead of a pretrained base — it loads the generator, and picks up the
+discriminator from the `.disc.safetensors` sidecar automatically:
+
+```sh
+rvc train --out models/voice --model-sr 48000 \
+  --continue models/voice.safetensors \
+  clip1.mp3 clip2.mp3 clip3.mp3
+```
+
+`--continue` conflicts with `--pretrained-g` (the checkpoint replaces the base).
+If the discriminator sidecar is missing it falls back to `--pretrained-d` (pass
+it), else the discriminator starts fresh. Note that optimizer (AdamW) momentum
+is not persisted across runs — negligible for short fine-tunes.
 
 Notes: only 48 kHz is supported today; defaults are `-e 20` epochs and `-b 2`
 (safe on a 6 GB RTX 2060). Fine-tuning a warm-started base on ~30 min of audio
