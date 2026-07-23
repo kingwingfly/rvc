@@ -61,7 +61,11 @@ impl FeatureExtractor {
     /// the audio in `chunk`-sample windows so the ONNX convolutions stay within
     /// GPU memory regardless of clip length. Returns **equal-length** aligned
     /// frames `(content[T][768], f0[T])`.
-    pub fn extract_aligned(&mut self, wav16k: &[f32], chunk: usize) -> Result<(Vec<Vec<f32>>, Vec<f32>)> {
+    pub fn extract_aligned(
+        &mut self,
+        wav16k: &[f32],
+        chunk: usize,
+    ) -> Result<(Vec<Vec<f32>>, Vec<f32>)> {
         let chunk = chunk.max(ANALYSIS_SR as usize); // at least 1 s per window
         let mut content: Vec<Vec<f32>> = Vec::new();
         let mut f0: Vec<f32> = Vec::new();

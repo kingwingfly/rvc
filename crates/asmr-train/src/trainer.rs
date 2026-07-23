@@ -2,18 +2,18 @@
 
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Context, Result};
-use burn::backend::wgpu::{Wgpu, WgpuDevice};
+use anyhow::{Context, Result, anyhow};
 use burn::backend::Autodiff;
+use burn::backend::wgpu::{Wgpu, WgpuDevice};
 use burn::module::AutodiffModule;
 use burn::optim::{AdamWConfig, GradientsParams, Optimizer};
 use burn::tensor::{Int, Tensor, TensorData};
 use burn_rvc::{MultiPeriodDiscriminator, Synthesizer, SynthesizerConfig};
 
-use crate::dataset::{sample_batch, Clip, Rng, CONTENT_DIM, HOP};
+use crate::TrainRequest;
+use crate::dataset::{CONTENT_DIM, Clip, HOP, Rng, sample_batch};
 use crate::losses::{disc_loss, feature_matching, gen_adv, kl, mel_l1};
 use crate::spectral::{Spectral, SpectralConfig};
-use crate::TrainRequest;
 
 /// Autodiff GPU backend.
 type AB = Autodiff<Wgpu>;
@@ -38,17 +38,31 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
     // ---- Models (warm-started from the public pretrained bases) -------------
     let mut net_g = Synthesizer::<AB>::new(&cfg, &device);
     if let Some(p) = &req.pretrained_g {
-        let res = net_g.load_pytorch(p).map_err(|e| anyhow!("loading G {}: {e}", p.display()))?;
-        anyhow::ensure!(res.missing.is_empty(), "G warm-start incomplete: {} missing", res.missing.len());
+        let res = net_g
+            .load_pytorch(p)
+            .map_err(|e| anyhow!("loading G {}: {e}", p.display()))?;
+        anyhow::ensure!(
+            res.missing.is_empty(),
+            "G warm-start incomplete: {} missing",
+            res.missing.len()
+        );
         tracing::info!("warm-started generator from {}", p.display());
     } else {
-        tracing::warn!("no --pretrained-g: training the generator from scratch (poor on small data)");
+        tracing::warn!(
+            "no --pretrained-g: training the generator from scratch (poor on small data)"
+        );
     }
 
     let mut disc = MultiPeriodDiscriminator::<AB>::new(&device);
     if let Some(p) = &req.pretrained_d {
-        let res = disc.load_pytorch(p).map_err(|e| anyhow!("loading D {}: {e}", p.display()))?;
-        anyhow::ensure!(res.missing.is_empty(), "D warm-start incomplete: {} missing", res.missing.len());
+        let res = disc
+            .load_pytorch(p)
+            .map_err(|e| anyhow!("loading D {}: {e}", p.display()))?;
+        anyhow::ensure!(
+            res.missing.is_empty(),
+            "D warm-start incomplete: {} missing",
+            res.missing.len()
+        );
         tracing::info!("warm-started discriminator from {}", p.display());
     }
 
@@ -93,20 +107,22 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
             TensorData::new(data.phone, [b, WINDOW_FRAMES, CONTENT_DIM]),
             &device,
         );
-        let pitch =
-            Tensor::<AB, 2, Int>::from_data(TensorData::new(data.coarse, [b, WINDOW_FRAMES]), &device);
-        let nsff0 =
-            Tensor::<AB, 2>::from_data(TensorData::new(data.nsff0, [b, WINDOW_FRAMES]), &device);
-        let gt = Tensor::<AB, 2>::from_data(
-            TensorData::new(data.gt, [b, WINDOW_FRAMES * HOP]),
+        let pitch = Tensor::<AB, 2, Int>::from_data(
+            TensorData::new(data.coarse, [b, WINDOW_FRAMES]),
             &device,
         );
+        let nsff0 =
+            Tensor::<AB, 2>::from_data(TensorData::new(data.nsff0, [b, WINDOW_FRAMES]), &device);
+        let gt =
+            Tensor::<AB, 2>::from_data(TensorData::new(data.gt, [b, WINDOW_FRAMES * HOP]), &device);
 
         // enc_q input spectrogram (a constant w.r.t. autodiff).
         let spec = spectral.linear(gt.clone()).detach();
 
         // Random decode segment per sample.
-        let ids: Vec<usize> = (0..b).map(|_| rng.below(WINDOW_FRAMES - SEGMENT_FRAMES + 1)).collect();
+        let ids: Vec<usize> = (0..b)
+            .map(|_| rng.below(WINDOW_FRAMES - SEGMENT_FRAMES + 1))
+            .collect();
 
         let tf = net_g.forward_train(phone, pitch, nsff0, spec, sid, &ids, SEGMENT_FRAMES);
 
@@ -121,7 +137,10 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
 
         // ---- Discriminator step (fake detached) -----------------------------
         let y_hat_d = y_hat.clone().detach();
-        let mut d_loss = disc_loss(disc.scale.forward(y3.clone()).0, disc.scale.forward(y_hat_d.clone()).0);
+        let mut d_loss = disc_loss(
+            disc.scale.forward(y3.clone()).0,
+            disc.scale.forward(y_hat_d.clone()).0,
+        );
         for p in &disc.periods {
             d_loss = d_loss + disc_loss(p.forward(y3.clone()).0, p.forward(y_hat_d.clone()).0);
         }
@@ -130,8 +149,11 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
         disc = opt_d.step(lr, disc, d_grads);
 
         // ---- Generator step -------------------------------------------------
-        let mel_loss = mel_l1(spectral.mel(y.clone()), spectral.mel(y_hat.clone().reshape([b, seg_len])))
-            .mul_scalar(C_MEL);
+        let mel_loss = mel_l1(
+            spectral.mel(y.clone()),
+            spectral.mel(y_hat.clone().reshape([b, seg_len])),
+        )
+        .mul_scalar(C_MEL);
         let kl_loss = kl(tf.z_p, tf.logs_q, tf.m_p, tf.logs_p).mul_scalar(C_KL);
 
         let (sf_s, ff_s) = disc.scale.forward(y_hat.clone().reshape([b, 1, seg_len]));
@@ -163,10 +185,15 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
     }
 
     // Save the fine-tuned generator (inference-backend weights).
-    std::fs::create_dir_all(req.out.parent().unwrap_or_else(|| std::path::Path::new(".")))
-        .ok();
+    std::fs::create_dir_all(
+        req.out
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(".")),
+    )
+    .ok();
     let out = req.out.with_extension("safetensors");
-    net_g.valid()
+    net_g
+        .valid()
         .save_safetensors(&out)
         .map_err(|e| anyhow!("saving {}: {e}", out.display()))
         .with_context(|| "saving trained weights")?;
@@ -175,5 +202,9 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
 
 /// Extract a scalar loss value to `f32` for logging.
 fn scalar(t: &Tensor<AB, 1>) -> f32 {
-    t.clone().into_data().to_vec::<f32>().map(|v| v.first().copied().unwrap_or(f32::NAN)).unwrap_or(f32::NAN)
+    t.clone()
+        .into_data()
+        .to_vec::<f32>()
+        .map(|v| v.first().copied().unwrap_or(f32::NAN))
+        .unwrap_or(f32::NAN)
 }

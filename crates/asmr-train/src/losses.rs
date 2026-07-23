@@ -1,7 +1,7 @@
 //! RVC/VITS training losses.
 
-use burn::tensor::backend::Backend;
 use burn::tensor::Tensor;
+use burn::tensor::backend::Backend;
 
 /// L1 mel-spectrogram loss between ground-truth and generated audio.
 pub fn mel_l1<B: Backend>(mel_real: Tensor<B, 3>, mel_fake: Tensor<B, 3>) -> Tensor<B, 1> {
@@ -17,7 +17,8 @@ pub fn kl<B: Backend>(
     logs_p: Tensor<B, 3>,
 ) -> Tensor<B, 1> {
     let diff = (z_p - m_p.clone()).powf_scalar(2.0);
-    let term = (logs_q.clone().mul_scalar(2.0).exp() + diff) * logs_p.clone().mul_scalar(-2.0).exp();
+    let term =
+        (logs_q.clone().mul_scalar(2.0).exp() + diff) * logs_p.clone().mul_scalar(-2.0).exp();
     let kl = logs_p - logs_q - 0.5 + term.mul_scalar(0.5);
     kl.mean()
 }

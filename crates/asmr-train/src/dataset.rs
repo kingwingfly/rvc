@@ -3,9 +3,9 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
-use asmr_audio::{decode_path, DecodeOptions};
-use asmr_vc::{f0_to_coarse, FeatureExtractor, DEFAULT_CHUNK};
+use anyhow::{Context, Result, anyhow};
+use asmr_audio::{DecodeOptions, decode_path};
+use asmr_vc::{DEFAULT_CHUNK, FeatureExtractor, f0_to_coarse};
 use futures::StreamExt;
 
 /// Samples per latent frame (48 kHz, hop 480).
@@ -52,7 +52,12 @@ pub async fn prepare_clips(
 
         let frames = content.len().min(gt.len() / HOP);
         if frames < min_frames {
-            tracing::warn!("skipping {} ({} frames < {})", path.display(), frames, min_frames);
+            tracing::warn!(
+                "skipping {} ({} frames < {})",
+                path.display(),
+                frames,
+                min_frames
+            );
             continue;
         }
 
@@ -65,10 +70,19 @@ pub async fn prepare_clips(
         let gt = gt[..frames * HOP].to_vec();
 
         tracing::info!("  {}: {} frames", path.display(), frames);
-        clips.push(Clip { content: cflat, coarse, nsff0, gt, frames });
+        clips.push(Clip {
+            content: cflat,
+            coarse,
+            nsff0,
+            gt,
+            frames,
+        });
     }
 
-    anyhow::ensure!(!clips.is_empty(), "no usable training clips (need >= {min_frames} frames each)");
+    anyhow::ensure!(
+        !clips.is_empty(),
+        "no usable training clips (need >= {min_frames} frames each)"
+    );
     Ok(clips)
 }
 
@@ -99,7 +113,12 @@ pub fn sample_batch(clips: &[Clip], batch: usize, window: usize, rng: &mut Rng) 
         nsff0.extend_from_slice(&clip.nsff0[start..start + window]);
         gt.extend_from_slice(&clip.gt[start * HOP..(start + window) * HOP]);
     }
-    Batch { phone, coarse, nsff0, gt }
+    Batch {
+        phone,
+        coarse,
+        nsff0,
+        gt,
+    }
 }
 
 /// Decode one file to a single mono `f32` buffer at `sample_rate`.

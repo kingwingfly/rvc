@@ -11,7 +11,11 @@ pub enum VcError {
     Audio(#[from] asmr_audio::AudioError),
     /// A model produced an output whose shape we could not interpret.
     #[error("unexpected tensor shape {got:?} for {what} (expected axis of size {expected})")]
-    Shape { what: &'static str, expected: usize, got: Vec<i64> },
+    Shape {
+        what: &'static str,
+        expected: usize,
+        got: Vec<i64>,
+    },
     /// The model output tensor could not be located by name.
     #[error("model has no output named `{0}`")]
     MissingOutput(String),

@@ -5,8 +5,8 @@ use std::error::Error;
 use std::path::Path;
 
 use burn::module::Module;
-use burn::tensor::backend::Backend;
 use burn::tensor::Tensor;
+use burn::tensor::backend::Backend;
 use burn_store::ApplyResult;
 
 use crate::nn::leaky_relu;
@@ -35,7 +35,10 @@ impl<B: Backend> DiscriminatorS<B> {
             WeightNormConv1d::new_grouped(1024, 1024, 41, 4, 20, 1, 256, device),
             WeightNormConv1d::new(1024, 1024, 5, 1, 2, 1, device),
         ];
-        Self { convs, conv_post: WeightNormConv1d::new(1024, 1, 3, 1, 1, 1, device) }
+        Self {
+            convs,
+            conv_post: WeightNormConv1d::new(1024, 1, 3, 1, 1, 1, device),
+        }
     }
 
     /// `x`: `[batch, 1, time]` → (`score [batch, L]`, feature maps).
@@ -71,7 +74,11 @@ impl<B: Backend> DiscriminatorP<B> {
             WeightNormConv2d::new(512, 1024, [5, 1], [3, 1], [2, 0], device),
             WeightNormConv2d::new(1024, 1024, [5, 1], [1, 1], [2, 0], device),
         ];
-        Self { convs, conv_post: WeightNormConv2d::new(1024, 1, [3, 1], [1, 1], [1, 0], device), period }
+        Self {
+            convs,
+            conv_post: WeightNormConv2d::new(1024, 1, [3, 1], [1, 1], [1, 0], device),
+            period,
+        }
     }
 
     /// `x`: `[batch, 1, time]` → (`score [batch, L]`, feature maps).
@@ -79,7 +86,11 @@ impl<B: Backend> DiscriminatorP<B> {
         let [b, c, t] = x.dims();
         // Pad time to a multiple of the period (reflect), then fold to 2-D.
         let rem = t % self.period;
-        let x = if rem != 0 { reflect_pad_last(x, self.period - rem) } else { x };
+        let x = if rem != 0 {
+            reflect_pad_last(x, self.period - rem)
+        } else {
+            x
+        };
         let t2 = x.dims()[2];
         let mut x = x.reshape([b, c, t2 / self.period, self.period]);
 
@@ -100,7 +111,10 @@ impl<B: Backend> DiscriminatorP<B> {
 fn reflect_pad_last<B: Backend>(x: Tensor<B, 3>, n: usize) -> Tensor<B, 3> {
     let t = x.dims()[2];
     // Append x[t-2], x[t-3], ..., x[t-1-n].
-    let tail = x.clone().slice([0..x.dims()[0], 0..x.dims()[1], (t - 1 - n)..(t - 1)]).flip([2]);
+    let tail = x
+        .clone()
+        .slice([0..x.dims()[0], 0..x.dims()[1], (t - 1 - n)..(t - 1)])
+        .flip([2]);
     Tensor::cat(vec![x, tail], 2)
 }
 
@@ -118,7 +132,10 @@ impl<B: Backend> MultiPeriodDiscriminator<B> {
     pub fn new(device: &B::Device) -> Self {
         Self {
             scale: DiscriminatorS::new(device),
-            periods: PERIODS.iter().map(|&p| DiscriminatorP::new(p, device)).collect(),
+            periods: PERIODS
+                .iter()
+                .map(|&p| DiscriminatorP::new(p, device))
+                .collect(),
         }
     }
 

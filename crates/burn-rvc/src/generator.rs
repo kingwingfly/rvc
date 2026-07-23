@@ -34,13 +34,29 @@ impl<B: Backend> ResBlock1<B> {
         let convs1 = dilations
             .iter()
             .map(|&d| {
-                WeightNormConv1d::new(channels, channels, kernel, 1, get_padding(kernel, d), d, device)
+                WeightNormConv1d::new(
+                    channels,
+                    channels,
+                    kernel,
+                    1,
+                    get_padding(kernel, d),
+                    d,
+                    device,
+                )
             })
             .collect();
         let convs2 = dilations
             .iter()
             .map(|_| {
-                WeightNormConv1d::new(channels, channels, kernel, 1, get_padding(kernel, 1), 1, device)
+                WeightNormConv1d::new(
+                    channels,
+                    channels,
+                    kernel,
+                    1,
+                    get_padding(kernel, 1),
+                    1,
+                    device,
+                )
             })
             .collect();
         Self { convs1, convs2 }
@@ -70,7 +86,10 @@ pub struct SourceModule<B: Backend> {
 impl<B: Backend> SourceModule<B> {
     fn new(sampling_rate: usize, device: &B::Device) -> Self {
         // harmonic_num = 0 -> dim = 1.
-        Self { l_linear: LinearConfig::new(1, 1).init(device), sampling_rate }
+        Self {
+            l_linear: LinearConfig::new(1, 1).init(device),
+            sampling_rate,
+        }
     }
 
     /// `f0`: `[batch, time]` (Hz) → harmonic excitation `[batch, 1, time·upp]`.
@@ -86,7 +105,8 @@ impl<B: Backend> SourceModule<B> {
         let mut sine_all = Vec::with_capacity(b * l);
         let mut uv_all = Vec::with_capacity(b * l);
         for row in 0..b {
-            let (sine, uv) = sine_excitation(&f0_data[row * t..row * t + t], self.sampling_rate, upp);
+            let (sine, uv) =
+                sine_excitation(&f0_data[row * t..row * t + t], self.sampling_rate, upp);
             sine_all.extend(sine);
             uv_all.extend(uv);
         }
@@ -97,7 +117,8 @@ impl<B: Backend> SourceModule<B> {
         let one_minus_uv = uv.clone().mul_scalar(-1.0).add_scalar(1.0);
         let noise_amp = uv.clone().mul_scalar(NOISE_STD as f64)
             + one_minus_uv.mul_scalar((SINE_AMP / 3.0) as f64);
-        let noise = Tensor::<B, 2>::random([b, l], Distribution::Normal(0.0, 1.0), &device) * noise_amp;
+        let noise =
+            Tensor::<B, 2>::random([b, l], Distribution::Normal(0.0, 1.0), &device) * noise_amp;
         let source = (sine * uv + noise).reshape([b, l, 1]);
 
         let merged = tanh(self.l_linear.forward(source)); // [b, l, 1]
@@ -139,7 +160,10 @@ fn sine_excitation(f0: &[f32], sampling_rate: usize, upp: usize) -> (Vec<f32>, V
         sine[j] = (phase * 2.0 * PI).sin() * SINE_AMP;
     }
 
-    let uv_frame: Vec<f32> = f0.iter().map(|&f| (f > VOICED_THRESHOLD) as i32 as f32).collect();
+    let uv_frame: Vec<f32> = f0
+        .iter()
+        .map(|&f| (f > VOICED_THRESHOLD) as i32 as f32)
+        .collect();
     let uv = nearest_interp(&uv_frame, upp);
     (sine, uv)
 }
@@ -204,7 +228,14 @@ impl<B: Backend> GeneratorNsf<B> {
             let k = cfg.upsample_kernel_sizes[i];
             let in_ch = uic >> i;
             let out_ch = uic >> (i + 1);
-            ups.push(WeightNormConvTranspose1d::new(in_ch, out_ch, k, u, (k - u) / 2, device));
+            ups.push(WeightNormConvTranspose1d::new(
+                in_ch,
+                out_ch,
+                k,
+                u,
+                (k - u) / 2,
+                device,
+            ));
 
             if i + 1 < n_up {
                 let stride_f0: usize = cfg.upsample_rates[i + 1..].iter().product();
@@ -224,7 +255,11 @@ impl<B: Backend> GeneratorNsf<B> {
         for i in 0..n_up {
             let ch = uic >> (i + 1);
             last_ch = ch;
-            for (k, d) in cfg.resblock_kernel_sizes.iter().zip(cfg.resblock_dilation_sizes.iter()) {
+            for (k, d) in cfg
+                .resblock_kernel_sizes
+                .iter()
+                .zip(cfg.resblock_dilation_sizes.iter())
+            {
                 resblocks.push(ResBlock1::new(ch, *k, d, device));
             }
         }

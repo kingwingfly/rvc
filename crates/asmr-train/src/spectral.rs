@@ -26,7 +26,15 @@ pub struct SpectralConfig {
 impl SpectralConfig {
     /// The 48 kHz config used by RVC v2.
     pub fn v2_48k() -> Self {
-        Self { sample_rate: 48_000, n_fft: 2048, hop: 480, win_length: 2048, n_mels: 128, fmin: 0.0, fmax: 24_000.0 }
+        Self {
+            sample_rate: 48_000,
+            n_fft: 2048,
+            hop: 480,
+            win_length: 2048,
+            n_mels: 128,
+            fmin: 0.0,
+            fmax: 24_000.0,
+        }
     }
 
     /// Number of linear-spectrogram bins.
@@ -70,7 +78,13 @@ impl<B: Backend> Spectral<B> {
         // RVC uses center=False with (n_fft-hop)/2 reflect padding, so the frame
         // count is exactly L/hop (matching the content/F0 frame grid).
         let pad = (n_fft - cfg.hop) / 2;
-        Self { cos_kernel, sin_kernel, mel_fb, hop: cfg.hop, pad }
+        Self {
+            cos_kernel,
+            sin_kernel,
+            mel_fb,
+            hop: cfg.hop,
+            pad,
+        }
     }
 
     /// Magnitude linear spectrogram of `wav [b, L]` → `[b, n_bins, frames]`.
@@ -149,14 +163,16 @@ fn mel_to_hz(m: f32) -> f32 {
 /// `[n_mels, n_bins]` filterbank, row-major.
 fn mel_filterbank(cfg: &SpectralConfig) -> Vec<f32> {
     let n_bins = cfg.n_bins();
-    let fft_freqs: Vec<f32> =
-        (0..n_bins).map(|i| i as f32 * cfg.sample_rate as f32 / cfg.n_fft as f32).collect();
+    let fft_freqs: Vec<f32> = (0..n_bins)
+        .map(|i| i as f32 * cfg.sample_rate as f32 / cfg.n_fft as f32)
+        .collect();
 
     let mel_min = hz_to_mel(cfg.fmin);
     let mel_max = hz_to_mel(cfg.fmax);
     let n = cfg.n_mels;
-    let mel_points: Vec<f32> =
-        (0..n + 2).map(|i| mel_min + (mel_max - mel_min) * i as f32 / (n + 1) as f32).collect();
+    let mel_points: Vec<f32> = (0..n + 2)
+        .map(|i| mel_min + (mel_max - mel_min) * i as f32 / (n + 1) as f32)
+        .collect();
     let hz_points: Vec<f32> = mel_points.iter().map(|&m| mel_to_hz(m)).collect();
 
     let mut fb = vec![0f32; n * n_bins];

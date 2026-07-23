@@ -97,7 +97,11 @@ impl<B: Backend> MultiHeadAttention<B> {
         let pad = (length as isize - (w as isize + 1)).max(0) as usize;
         let slice_start = ((w as isize + 1) - length as isize).max(0) as usize;
         let slice_end = slice_start + 2 * length - 1;
-        let emb = if pad > 0 { pad_dim1(emb, pad, pad) } else { emb };
+        let emb = if pad > 0 {
+            pad_dim1(emb, pad, pad)
+        } else {
+            emb
+        };
         let [_, n, dk] = emb.dims();
         let _ = n;
         emb.slice([0..1, slice_start..slice_end, 0..dk])
@@ -119,12 +123,17 @@ impl<B: Backend> MultiHeadAttention<B> {
         let x = pad_last(x, 0, l - 1); // [b,h,l,2l-1]
         let x = x.reshape([b, h, l * l + l * (l - 1)]);
         let x = pad_last(x, l, 0); // prepend l zeros
-        x.reshape([b, h, l, 2 * l]).slice([0..b, 0..h, 0..l, 1..(2 * l)])
+        x.reshape([b, h, l, 2 * l])
+            .slice([0..b, 0..h, 0..l, 1..(2 * l)])
     }
 }
 
 /// Zero-pad the last dim of a rank-3 or rank-4 tensor by `(left, right)`.
-fn pad_last<B: Backend, const D: usize>(x: Tensor<B, D>, left: usize, right: usize) -> Tensor<B, D> {
+fn pad_last<B: Backend, const D: usize>(
+    x: Tensor<B, D>,
+    left: usize,
+    right: usize,
+) -> Tensor<B, D> {
     if left == 0 && right == 0 {
         return x;
     }
@@ -207,7 +216,12 @@ impl<B: Backend> Encoder<B> {
                     device,
                 ),
                 norm_1: RvcLayerNorm::new(cfg.hidden_channels, device),
-                ffn: Ffn::new(cfg.hidden_channels, cfg.filter_channels, cfg.kernel_size, device),
+                ffn: Ffn::new(
+                    cfg.hidden_channels,
+                    cfg.filter_channels,
+                    cfg.kernel_size,
+                    device,
+                ),
                 norm_2: RvcLayerNorm::new(cfg.hidden_channels, device),
             })
             .collect();

@@ -1,12 +1,12 @@
 //! `asmr convert` — batch file conversion to WAV (Burn or ONNX generator).
 
 use anyhow::{Context, Result};
-use asmr_audio::{decode_paths, write_wav_file, DecodeOptions};
-use asmr_vc::{ConvertParams, Converter, RvcModel, StreamParams, ANALYSIS_SR};
-use futures::{stream, StreamExt};
+use asmr_audio::{DecodeOptions, decode_paths, write_wav_file};
+use asmr_vc::{ANALYSIS_SR, ConvertParams, Converter, RvcModel, StreamParams};
+use futures::{StreamExt, stream};
 
 use crate::args::{ConvertArgs, InferBackend};
-use crate::commands::common::{build_config, resolve_feature_models};
+use crate::commands::common::{build_rvc_config, resolve_feature_models};
 use crate::commands::convert_burn::BurnConverter;
 
 pub async fn run(args: ConvertArgs) -> Result<()> {
@@ -88,7 +88,7 @@ async fn run_burn(args: ConvertArgs) -> Result<()> {
 
 /// ONNX Runtime generator path (`.onnx` weights).
 async fn run_onnx(args: ConvertArgs) -> Result<()> {
-    let cfg = build_config(&args.models).await?;
+    let cfg = build_rvc_config(&args.models).await?;
     let model_sr = cfg.model_sr;
 
     // Load the model once (GPU/ORT init is expensive), reuse across files.
@@ -96,7 +96,9 @@ async fn run_onnx(args: ConvertArgs) -> Result<()> {
     let mut converter = Converter::new(
         model,
         StreamParams::batch(),
-        ConvertParams { transpose: args.transpose },
+        ConvertParams {
+            transpose: args.transpose,
+        },
     );
 
     tokio::fs::create_dir_all(&args.output_dir)

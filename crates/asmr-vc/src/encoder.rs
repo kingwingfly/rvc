@@ -27,6 +27,12 @@ impl ContentEncoder {
         let shape = vec![1i64, 1, wav16k.len() as i64];
         let (out_shape, out_data) = run_single_f32(&mut self.session, shape, wav16k.to_vec())?;
         let (axis, time) = locate_axis(&out_shape, CONTENT_DIM, "content features")?;
-        Ok(to_time_major(&out_data, &out_shape, axis, CONTENT_DIM, time))
+        Ok(to_time_major(
+            &out_data,
+            &out_shape,
+            axis,
+            CONTENT_DIM,
+            time,
+        ))
     }
 }

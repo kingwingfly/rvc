@@ -30,7 +30,7 @@ pub async fn resolve_feature_models(opts: &ModelOpts) -> Result<(PathBuf, PathBu
 
 /// Resolve the ContentVec and RMVPE ONNX paths, downloading from Hugging Face
 /// when not provided explicitly, then assemble the full pipeline config.
-pub async fn build_config(opts: &ModelOpts) -> Result<RvcConfig> {
+pub async fn build_rvc_config(opts: &ModelOpts) -> Result<RvcConfig> {
     let cache = opts.cache_dir.as_deref();
 
     let content = match &opts.content {
@@ -60,7 +60,11 @@ pub async fn build_config(opts: &ModelOpts) -> Result<RvcConfig> {
     );
 
     let mut cfg = RvcConfig::new(
-        ModelPaths { content, rmvpe, generator: opts.model.clone() },
+        ModelPaths {
+            content,
+            rmvpe,
+            generator: opts.model.clone(),
+        },
         opts.model_sr,
     );
     cfg.speaker_id = opts.speaker_id;

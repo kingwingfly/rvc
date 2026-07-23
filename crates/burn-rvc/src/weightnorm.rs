@@ -8,7 +8,7 @@
 
 use burn::module::{Module, Param};
 use burn::tensor::backend::Backend;
-use burn::tensor::module::{conv1d, conv2d, conv_transpose1d};
+use burn::tensor::module::{conv_transpose1d, conv1d, conv2d};
 use burn::tensor::ops::{ConvOptions, ConvTransposeOptions};
 use burn::tensor::{Distribution, Tensor};
 
@@ -60,7 +60,11 @@ impl<B: Backend> WeightNormConv1d<B> {
         groups: usize,
         device: &B::Device,
     ) -> Self {
-        let v = Tensor::random([out_ch, in_ch / groups, kernel], Distribution::Normal(0.0, 0.02), device);
+        let v = Tensor::random(
+            [out_ch, in_ch / groups, kernel],
+            Distribution::Normal(0.0, 0.02),
+            device,
+        );
         let g = norm_except_dim0(v.clone());
         Self {
             weight_g: Param::from_tensor(g),
@@ -168,7 +172,11 @@ impl<B: Backend> WeightNormConvTranspose1d<B> {
         padding: usize,
         device: &B::Device,
     ) -> Self {
-        let v = Tensor::random([in_ch, out_ch, kernel], Distribution::Normal(0.0, 0.02), device);
+        let v = Tensor::random(
+            [in_ch, out_ch, kernel],
+            Distribution::Normal(0.0, 0.02),
+            device,
+        );
         let g = norm_except_dim0(v.clone());
         Self {
             weight_g: Param::from_tensor(g),

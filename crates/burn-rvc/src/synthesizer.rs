@@ -117,7 +117,13 @@ impl<B: Backend> Synthesizer<B> {
         let nsff0_slice = Tensor::cat(f0_slices, 0);
         let y_hat = self.dec.forward(z_slice, nsff0_slice, g);
 
-        TrainForward { y_hat, z_p, m_p, logs_p, logs_q }
+        TrainForward {
+            y_hat,
+            z_p,
+            m_p,
+            logs_p,
+            logs_q,
+        }
     }
 
     /// Voice-conversion inference (`SynthesizerTrnMs768NSFsid.infer`).
@@ -163,10 +169,22 @@ impl<B: Backend> Synthesizer<B> {
         // coupling layers (even indices) with paramless flips, so pack the
         // coupling layers into a contiguous Vec.
         let remaps = [
-            (r"^enc_p\.encoder\.attn_layers\.(\d+)\.", "enc_p.encoder.layers.$1.attn."),
-            (r"^enc_p\.encoder\.norm_layers_1\.(\d+)\.", "enc_p.encoder.layers.$1.norm_1."),
-            (r"^enc_p\.encoder\.ffn_layers\.(\d+)\.", "enc_p.encoder.layers.$1.ffn."),
-            (r"^enc_p\.encoder\.norm_layers_2\.(\d+)\.", "enc_p.encoder.layers.$1.norm_2."),
+            (
+                r"^enc_p\.encoder\.attn_layers\.(\d+)\.",
+                "enc_p.encoder.layers.$1.attn.",
+            ),
+            (
+                r"^enc_p\.encoder\.norm_layers_1\.(\d+)\.",
+                "enc_p.encoder.layers.$1.norm_1.",
+            ),
+            (
+                r"^enc_p\.encoder\.ffn_layers\.(\d+)\.",
+                "enc_p.encoder.layers.$1.ffn.",
+            ),
+            (
+                r"^enc_p\.encoder\.norm_layers_2\.(\d+)\.",
+                "enc_p.encoder.layers.$1.norm_2.",
+            ),
             (r"^flow\.flows\.2\.", "flow.flows.1."),
             (r"^flow\.flows\.4\.", "flow.flows.2."),
             (r"^flow\.flows\.6\.", "flow.flows.3."),
@@ -183,7 +201,10 @@ impl<B: Backend> Synthesizer<B> {
     }
 
     /// Load weights previously written by [`Synthesizer::save_safetensors`].
-    pub fn load_safetensors(&mut self, path: impl AsRef<Path>) -> Result<ApplyResult, Box<dyn Error>> {
+    pub fn load_safetensors(
+        &mut self,
+        path: impl AsRef<Path>,
+    ) -> Result<ApplyResult, Box<dyn Error>> {
         let mut store = SafetensorsStore::from_file(path.as_ref());
         Ok(self.load_from(&mut store)?)
     }
@@ -195,7 +216,9 @@ impl<B: Backend> Synthesizer<B> {
         match path.extension().and_then(|e| e.to_str()) {
             Some("pth") | Some("pt") => self.load_pytorch(path),
             Some("safetensors") => self.load_safetensors(path),
-            other => Err(format!("unsupported weights format: {other:?} ({})", path.display()).into()),
+            other => {
+                Err(format!("unsupported weights format: {other:?} ({})", path.display()).into())
+            }
         }
     }
 }

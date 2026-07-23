@@ -9,13 +9,13 @@
 use std::path::{Path, PathBuf};
 use std::sync::Once;
 
-use ffmpeg_next as ffmpeg;
 use ffmpeg::util::frame::audio::Audio as AudioFrame;
+use ffmpeg_next as ffmpeg;
 use futures::Stream;
 use tokio::sync::mpsc;
 
-use crate::error::{AudioError, Result};
 use crate::Samples;
+use crate::error::{AudioError, Result};
 
 static FFMPEG_INIT: Once = Once::new();
 
@@ -41,7 +41,10 @@ pub struct DecodeOptions {
 impl DecodeOptions {
     /// Options for a given sample rate with a sensible channel capacity.
     pub fn new(sample_rate: u32) -> Self {
-        Self { sample_rate, channel_capacity: 32 }
+        Self {
+            sample_rate,
+            channel_capacity: 32,
+        }
     }
 }
 
@@ -138,7 +141,8 @@ fn decode_one_blocking(
     // Emit in chunks so downstream back-pressure still works.
     const CHUNK: usize = 16_384;
     for chunk in mono.chunks(CHUNK) {
-        tx.blocking_send(Ok(chunk.to_vec())).map_err(|_| AudioError::WorkerGone)?;
+        tx.blocking_send(Ok(chunk.to_vec()))
+            .map_err(|_| AudioError::WorkerGone)?;
     }
     Ok(())
 }
@@ -155,11 +159,13 @@ fn frame_to_mono_f32(frame: &AudioFrame) -> Result<Vec<f32>> {
     let (width, conv): (usize, fn(&[u8]) -> f32) = match fmt {
         S::U8(_) => (1, |b| (b[0] as f32 - 128.0) / 128.0),
         S::I16(_) => (2, |b| i16::from_ne_bytes([b[0], b[1]]) as f32 / 32768.0),
-        S::I32(_) => (4, |b| i32::from_ne_bytes([b[0], b[1], b[2], b[3]]) as f32 / 2_147_483_648.0),
+        S::I32(_) => (4, |b| {
+            i32::from_ne_bytes([b[0], b[1], b[2], b[3]]) as f32 / 2_147_483_648.0
+        }),
         S::F32(_) => (4, |b| f32::from_ne_bytes([b[0], b[1], b[2], b[3]])),
-        S::F64(_) => {
-            (8, |b| f64::from_ne_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]) as f32)
-        }
+        S::F64(_) => (8, |b| {
+            f64::from_ne_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]) as f32
+        }),
         other => return Err(AudioError::UnsupportedFormat(other)),
     };
 

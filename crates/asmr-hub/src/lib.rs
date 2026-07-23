@@ -35,7 +35,11 @@ pub struct ModelRef {
 impl ModelRef {
     /// Construct from static parts.
     pub fn new(owner: impl Into<String>, name: impl Into<String>, file: impl Into<String>) -> Self {
-        Self { owner: owner.into(), name: name.into(), file: file.into() }
+        Self {
+            owner: owner.into(),
+            name: name.into(),
+            file: file.into(),
+        }
     }
 }
 
@@ -44,7 +48,11 @@ impl ModelRef {
 /// NOTE: verify/override for your environment — ONNX mirrors of the RVC content
 /// encoder change; this is a widely used one.
 pub fn default_contentvec() -> ModelRef {
-    ModelRef::new("NaruseMioShirakana", "MoeSS-SUBModel", "vec-768-layer-12.onnx")
+    ModelRef::new(
+        "NaruseMioShirakana",
+        "MoeSS-SUBModel",
+        "vec-768-layer-12.onnx",
+    )
 }
 
 /// Default RMVPE F0 estimator ONNX.
@@ -72,10 +80,16 @@ pub fn default_cache_dir() -> PathBuf {
 /// Download (or reuse the cached copy of) a single Hub file, returning its local
 /// path. Uses `cache_dir` or [`default_cache_dir`] when `None`.
 pub async fn fetch(model: &ModelRef, cache_dir: Option<&Path>) -> Result<PathBuf> {
-    let cache = cache_dir.map(Path::to_path_buf).unwrap_or_else(default_cache_dir);
+    let cache = cache_dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(default_cache_dir);
     let client = HFClient::builder().cache_dir(cache).build()?;
     let repo = client.model(model.owner.clone(), model.name.clone());
-    let path = repo.download_file().filename(model.file.clone()).send().await?;
+    let path = repo
+        .download_file()
+        .filename(model.file.clone())
+        .send()
+        .await?;
     Ok(path)
 }
 

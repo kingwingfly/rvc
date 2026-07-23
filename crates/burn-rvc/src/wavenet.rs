@@ -1,9 +1,9 @@
 //! The WaveNet residual stack (`modules.WN`), shared by `enc_q` and the flow.
 
 use burn::module::Module;
+use burn::tensor::Tensor;
 use burn::tensor::activation::{sigmoid, tanh};
 use burn::tensor::backend::Backend;
-use burn::tensor::Tensor;
 
 use crate::weightnorm::WeightNormConv1d;
 
@@ -28,8 +28,7 @@ impl<B: Backend> Wn<B> {
         device: &B::Device,
     ) -> Self {
         let h = hidden_channels;
-        let cond_layer =
-            WeightNormConv1d::new(gin_channels, 2 * h * n_layers, 1, 1, 0, 1, device);
+        let cond_layer = WeightNormConv1d::new(gin_channels, 2 * h * n_layers, 1, 1, 0, 1, device);
         let mut in_layers = Vec::with_capacity(n_layers);
         let mut res_skip_layers = Vec::with_capacity(n_layers);
         for i in 0..n_layers {
@@ -47,7 +46,13 @@ impl<B: Backend> Wn<B> {
             let res_skip_ch = if i < n_layers - 1 { 2 * h } else { h };
             res_skip_layers.push(WeightNormConv1d::new(h, res_skip_ch, 1, 1, 0, 1, device));
         }
-        Self { cond_layer, in_layers, res_skip_layers, hidden_channels: h, n_layers }
+        Self {
+            cond_layer,
+            in_layers,
+            res_skip_layers,
+            hidden_channels: h,
+            n_layers,
+        }
     }
 
     /// `x`, `g` (speaker cond): `[batch, hidden, time]` / `[batch, gin, 1]`.

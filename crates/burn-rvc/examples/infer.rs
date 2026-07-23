@@ -11,12 +11,20 @@ fn main() {
     type B = NdArray;
     let device = Default::default();
 
-    let path = std::env::args().nth(1).expect("usage: infer <checkpoint.pth>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: infer <checkpoint.pth>");
     let cfg = SynthesizerConfig::v2_48k();
     let hop = cfg.hop_length();
     let mut model = Synthesizer::<B>::new(&cfg, &device);
-    let res = model.load_pytorch(&path).expect("failed to load checkpoint");
-    println!("loaded {} params ({} missing)", res.applied.len(), res.missing.len());
+    let res = model
+        .load_pytorch(&path)
+        .expect("failed to load checkpoint");
+    println!(
+        "loaded {} params ({} missing)",
+        res.applied.len(),
+        res.missing.len()
+    );
 
     // Dummy analysis features for T frames.
     let t = 120usize;
@@ -33,5 +41,8 @@ fn main() {
     let (min, max) = flat
         .iter()
         .fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
-    println!("sample range: [{min:.4}, {max:.4}] over {} samples", flat.len());
+    println!(
+        "sample range: [{min:.4}, {max:.4}] over {} samples",
+        flat.len()
+    );
 }

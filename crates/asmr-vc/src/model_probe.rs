@@ -19,7 +19,10 @@ use crate::session::build_session;
 
 fn read_f32le(path: &str) -> Vec<f32> {
     let mut bytes = Vec::new();
-    std::fs::File::open(path).unwrap().read_to_end(&mut bytes).unwrap();
+    std::fs::File::open(path)
+        .unwrap()
+        .read_to_end(&mut bytes)
+        .unwrap();
     bytes
         .chunks_exact(4)
         .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
@@ -38,7 +41,11 @@ fn probe_shared_models() {
 
     let mut enc = ContentEncoder::new(build_session(&content).expect("load contentvec"));
     let feats = enc.extract(&audio).expect("contentvec extract");
-    eprintln!("contentvec frames: {}  dim: {}", feats.len(), feats[0].len());
+    eprintln!(
+        "contentvec frames: {}  dim: {}",
+        feats.len(),
+        feats[0].len()
+    );
 
     // Diagnostics: what does the RMVPE model actually expect?
     let sess = build_session(&rmvpe).expect("load rmvpe");

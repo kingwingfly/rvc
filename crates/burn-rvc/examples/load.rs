@@ -9,18 +9,28 @@ fn main() {
     type B = NdArray;
     let device = Default::default();
 
-    let path = std::env::args().nth(1).expect("usage: load <G.pth> [D.pth]");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: load <G.pth> [D.pth]");
     let cfg = SynthesizerConfig::v2_48k();
     let mut model = Synthesizer::<B>::new(&cfg, &device);
 
-    let res = model.load_pytorch(&path).expect("failed to read checkpoint");
+    let res = model
+        .load_pytorch(&path)
+        .expect("failed to read checkpoint");
 
     println!("applied : {}", res.applied.len());
-    println!("missing : {}  (model params with no checkpoint tensor)", res.missing.len());
+    println!(
+        "missing : {}  (model params with no checkpoint tensor)",
+        res.missing.len()
+    );
     for (name, why) in &res.missing {
         println!("    MISSING {name}  ({why})");
     }
-    println!("unused  : {}  (checkpoint tensors not yet ported)", res.unused.len());
+    println!(
+        "unused  : {}  (checkpoint tensors not yet ported)",
+        res.unused.len()
+    );
     let mut prefixes: Vec<_> = res
         .unused
         .iter()
@@ -37,7 +47,9 @@ fn main() {
     if let Some(dpath) = std::env::args().nth(2) {
         println!("\n== discriminator {dpath} ==");
         let mut disc = MultiPeriodDiscriminator::<B>::new(&device);
-        let dres = disc.load_pytorch(&dpath).expect("failed to read D checkpoint");
+        let dres = disc
+            .load_pytorch(&dpath)
+            .expect("failed to read D checkpoint");
         println!("applied : {}", dres.applied.len());
         println!("missing : {}", dres.missing.len());
         for (name, why) in &dres.missing {

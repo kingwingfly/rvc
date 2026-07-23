@@ -6,8 +6,8 @@
 //! a periodic Hann window, center/reflect padding, magnitude (not power) spectra,
 //! and `log(clamp(mel, 1e-5))`.
 
-use rustfft::num_complex::Complex;
 use rustfft::FftPlanner;
+use rustfft::num_complex::Complex;
 
 const SR: f32 = 16_000.0;
 const N_FFT: usize = 1024;
@@ -57,7 +57,11 @@ impl RmvpeMel {
             .collect();
         let mel_basis = build_slaney_mel();
         let fft = FftPlanner::<f32>::new().plan_fft_forward(N_FFT);
-        Self { window, mel_basis, fft }
+        Self {
+            window,
+            mel_basis,
+            fft,
+        }
     }
 
     /// Compute the log-mel spectrogram, returned as `(n_mels, time, data)` where

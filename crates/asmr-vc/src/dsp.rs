@@ -23,13 +23,23 @@ pub fn locate_axis(shape: &[i64], size: usize, what: &'static str) -> Result<(us
             .max(1);
         Ok((axis, time))
     } else {
-        Err(VcError::Shape { what, expected: size, got: shape.to_vec() })
+        Err(VcError::Shape {
+            what,
+            expected: size,
+            got: shape.to_vec(),
+        })
     }
 }
 
 /// Convert a flat `[1, T, D]`-or-`[1, D, T]` buffer into a row-major `[T, D]`
 /// matrix (as `Vec<Vec<f32>>`), given the located feature axis.
-pub fn to_time_major(data: &[f32], shape: &[i64], feat_axis: usize, dim: usize, time: usize) -> Vec<Vec<f32>> {
+pub fn to_time_major(
+    data: &[f32],
+    shape: &[i64],
+    feat_axis: usize,
+    dim: usize,
+    time: usize,
+) -> Vec<Vec<f32>> {
     let dims: Vec<usize> = shape.iter().map(|&d| d.max(0) as usize).collect();
     let mut out = vec![vec![0.0f32; dim]; time];
     // Two supported layouts on a batch-1 tensor.

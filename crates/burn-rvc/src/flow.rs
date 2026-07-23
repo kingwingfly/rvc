@@ -6,8 +6,8 @@
 
 use burn::module::Module;
 use burn::nn::conv::{Conv1d, Conv1dConfig};
-use burn::tensor::backend::Backend;
 use burn::tensor::Tensor;
+use burn::tensor::backend::Backend;
 
 use crate::wavenet::Wn;
 
@@ -25,11 +25,23 @@ pub struct ResidualCouplingLayer<B: Backend> {
 }
 
 impl<B: Backend> ResidualCouplingLayer<B> {
-    fn new(channels: usize, hidden_channels: usize, gin_channels: usize, device: &B::Device) -> Self {
+    fn new(
+        channels: usize,
+        hidden_channels: usize,
+        gin_channels: usize,
+        device: &B::Device,
+    ) -> Self {
         let half = channels / 2;
         Self {
             pre: Conv1dConfig::new(half, hidden_channels, 1).init(device),
-            enc: Wn::new(hidden_channels, FLOW_KERNEL, FLOW_DILATION_RATE, FLOW_N_LAYERS, gin_channels, device),
+            enc: Wn::new(
+                hidden_channels,
+                FLOW_KERNEL,
+                FLOW_DILATION_RATE,
+                FLOW_N_LAYERS,
+                gin_channels,
+                device,
+            ),
             post: Conv1dConfig::new(hidden_channels, half, 1).init(device),
             half_channels: half,
         }

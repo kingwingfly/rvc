@@ -7,8 +7,8 @@
 use futures::{Stream, StreamExt};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::error::Result;
 use crate::Samples;
+use crate::error::Result;
 
 /// Read raw `f32le` mono PCM from `reader`, yielding chunks of at most
 /// `chunk_samples` samples. A trailing partial chunk (if the stream ends

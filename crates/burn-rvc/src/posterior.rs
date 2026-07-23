@@ -3,8 +3,8 @@
 
 use burn::module::Module;
 use burn::nn::conv::{Conv1d, Conv1dConfig};
-use burn::tensor::backend::Backend;
 use burn::tensor::Tensor;
+use burn::tensor::backend::Backend;
 
 use crate::wavenet::Wn;
 
@@ -32,7 +32,14 @@ impl<B: Backend> PosteriorEncoder<B> {
     ) -> Self {
         Self {
             pre: Conv1dConfig::new(spec_channels, hidden_channels, 1).init(device),
-            enc: Wn::new(hidden_channels, KERNEL, DILATION_RATE, N_LAYERS, gin_channels, device),
+            enc: Wn::new(
+                hidden_channels,
+                KERNEL,
+                DILATION_RATE,
+                N_LAYERS,
+                gin_channels,
+                device,
+            ),
             proj: Conv1dConfig::new(hidden_channels, out_channels * 2, 1).init(device),
             out_channels,
         }

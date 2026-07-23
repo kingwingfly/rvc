@@ -10,7 +10,7 @@ use asmr_audio::Samples;
 use futures::{Stream, StreamExt};
 use tokio::sync::mpsc;
 
-use crate::config::{ConvertParams, ANALYSIS_SR};
+use crate::config::{ANALYSIS_SR, ConvertParams};
 use crate::error::Result;
 use crate::rvc::RvcModel;
 
@@ -28,12 +28,20 @@ pub struct StreamParams {
 impl StreamParams {
     /// Low-latency preset for `serve` (~0.5 s blocks).
     pub fn realtime() -> Self {
-        Self { block: ANALYSIS_SR as usize / 2, context: ANALYSIS_SR as usize / 4, crossfade: ANALYSIS_SR as usize / 20 }
+        Self {
+            block: ANALYSIS_SR as usize / 2,
+            context: ANALYSIS_SR as usize / 4,
+            crossfade: ANALYSIS_SR as usize / 20,
+        }
     }
 
     /// Large-block preset for batch `convert` (higher quality, more latency).
     pub fn batch() -> Self {
-        Self { block: ANALYSIS_SR as usize * 15, context: ANALYSIS_SR as usize / 2, crossfade: ANALYSIS_SR as usize / 20 }
+        Self {
+            block: ANALYSIS_SR as usize * 15,
+            context: ANALYSIS_SR as usize / 2,
+            crossfade: ANALYSIS_SR as usize / 20,
+        }
     }
 }
 
@@ -158,7 +166,11 @@ impl Converter {
         let tail_n = self.xf_out.min(kept.len());
         self.prev_tail = kept.split_off(kept.len() - tail_n);
 
-        if kept.is_empty() { Ok(None) } else { Ok(Some(kept)) }
+        if kept.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(kept))
+        }
     }
 
     /// Convert an entire 16 kHz buffer to a single output vector at `output_sr()`.
@@ -177,7 +189,10 @@ impl Converter {
 /// Drive a [`Converter`] over an async input stream, yielding an async output
 /// stream. The model runs on a dedicated blocking worker so `ort` never touches
 /// the async runtime threads; back-pressure flows through bounded channels.
-pub fn convert_stream<S>(mut converter: Converter, mut input: S) -> impl Stream<Item = Result<Samples>>
+pub fn convert_stream<S>(
+    mut converter: Converter,
+    mut input: S,
+) -> impl Stream<Item = Result<Samples>>
 where
     S: Stream<Item = std::result::Result<Samples, asmr_audio::AudioError>> + Unpin + Send + 'static,
 {

@@ -10,20 +10,22 @@
 //! ```
 
 use anyhow::{Context, Result};
-use asmr_vc::{convert_stream, ConvertParams, Converter, RvcModel, StreamParams};
+use asmr_vc::{ConvertParams, Converter, RvcModel, StreamParams, convert_stream};
 use futures::StreamExt;
 use tokio::io::{AsyncWriteExt, BufWriter};
 
 use crate::args::ServeArgs;
-use crate::commands::common::build_config;
+use crate::commands::common::build_rvc_config;
 
 pub async fn run(args: ServeArgs) -> Result<()> {
-    let cfg = build_config(&args.models).await?;
+    let cfg = build_rvc_config(&args.models).await?;
     let model = RvcModel::load(cfg).context("failed to load RVC models")?;
     let converter = Converter::new(
         model,
         StreamParams::realtime(),
-        ConvertParams { transpose: args.transpose },
+        ConvertParams {
+            transpose: args.transpose,
+        },
     );
     let out_sr = converter.output_sr();
     tracing::info!(

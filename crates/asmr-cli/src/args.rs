@@ -40,7 +40,7 @@ pub enum Command {
 #[derive(Debug, Args, Clone)]
 pub struct ModelOpts {
     /// Trained RVC generator ONNX (`voice.onnx`).
-    #[arg(short = 'm', long)]
+    #[arg(short, long)]
     pub model: PathBuf,
     /// Generator output sample rate (40000 or 48000).
     #[arg(long, default_value_t = 48000)]

@@ -38,7 +38,9 @@ where
 
     let mut remapper = KeyRemapper::new();
     for (from, to) in remaps {
-        remapper = remapper.add_pattern(*from, *to).expect("static remap patterns are valid");
+        remapper = remapper
+            .add_pattern(*from, *to)
+            .expect("static remap patterns are valid");
     }
     let (snapshots, _) = remapper.remap(snapshots);
 

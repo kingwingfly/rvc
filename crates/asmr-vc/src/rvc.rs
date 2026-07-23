@@ -8,12 +8,12 @@
 use ort::session::Session;
 use ort::value::Tensor;
 
-use crate::config::{RvcConfig, CONTENT_DIM};
+use crate::config::ConvertParams;
+use crate::config::{CONTENT_DIM, RvcConfig};
 use crate::dsp::{f0_to_coarse, shift_pitch, upsample_rows};
 use crate::encoder::ContentEncoder;
 use crate::error::{Result, VcError};
 use crate::f0::F0Estimator;
-use crate::config::ConvertParams;
 use crate::session::build_session;
 
 /// Loaded RVC pipeline ready to convert audio.
@@ -31,7 +31,13 @@ impl RvcModel {
         let encoder = ContentEncoder::new(build_session(&cfg.models.content)?);
         let f0 = F0Estimator::new(build_session(&cfg.models.rmvpe)?, cfg.f0_threshold);
         let generator = build_session(&cfg.models.generator)?;
-        Ok(Self { encoder, f0, generator, cfg, rng: Xorshift::new(0x9E3779B97F4A7C15) })
+        Ok(Self {
+            encoder,
+            f0,
+            generator,
+            cfg,
+            rng: Xorshift::new(0x9E3779B97F4A7C15),
+        })
     }
 
     /// The generator's output sample rate.
@@ -67,10 +73,17 @@ impl RvcModel {
     }
 
     /// Build the generator inputs and run inference.
-    fn run_generator(&mut self, phone: &[f32], n: usize, coarse: &[i64], pitchf: &[f32]) -> Result<Vec<f32>> {
+    fn run_generator(
+        &mut self,
+        phone: &[f32],
+        n: usize,
+        coarse: &[i64],
+        pitchf: &[f32],
+    ) -> Result<Vec<f32>> {
         let io = &self.cfg.io;
 
-        let phone_t = Tensor::from_array((vec![1i64, n as i64, CONTENT_DIM as i64], phone.to_vec()))?;
+        let phone_t =
+            Tensor::from_array((vec![1i64, n as i64, CONTENT_DIM as i64], phone.to_vec()))?;
         let plen_t = Tensor::from_array((vec![1i64], vec![n as i64]))?;
         let pitch_t = Tensor::from_array((vec![1i64, n as i64], coarse.to_vec()))?;
         let pitchf_t = Tensor::from_array((vec![1i64, n as i64], pitchf.to_vec()))?;
@@ -85,7 +98,9 @@ impl RvcModel {
         ];
 
         if io.needs_rnd {
-            let rnd: Vec<f32> = (0..io.rnd_dim * n).map(|_| self.rng.next_gaussian()).collect();
+            let rnd: Vec<f32> = (0..io.rnd_dim * n)
+                .map(|_| self.rng.next_gaussian())
+                .collect();
             let rnd_t = Tensor::from_array((vec![1i64, io.rnd_dim as i64, n as i64], rnd))?;
             inputs.push((io.rnd.clone().into(), rnd_t.into()));
         }
@@ -109,7 +124,10 @@ struct Xorshift {
 
 impl Xorshift {
     fn new(seed: u64) -> Self {
-        Self { state: seed | 1, spare: None }
+        Self {
+            state: seed | 1,
+            spare: None,
+        }
     }
 
     fn next_u64(&mut self) -> u64 {

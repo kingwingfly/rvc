@@ -7,8 +7,8 @@
 
 use std::path::Path;
 
-use anyhow::{anyhow, Context, Result};
-use asmr_vc::{f0_to_coarse, shift_pitch, FeatureExtractor, CONTENT_DIM, DEFAULT_CHUNK};
+use anyhow::{Context, Result, anyhow};
+use asmr_vc::{CONTENT_DIM, DEFAULT_CHUNK, FeatureExtractor, f0_to_coarse, shift_pitch};
 use burn::backend::wgpu::{Wgpu, WgpuDevice};
 use burn::tensor::{Int, Tensor, TensorData};
 use burn_rvc::{Synthesizer, SynthesizerConfig};
@@ -52,12 +52,22 @@ impl BurnConverter {
                 res.missing.first()
             ));
         }
-        tracing::info!("loaded {} generator params from {}", res.applied.len(), weights.display());
+        tracing::info!(
+            "loaded {} generator params from {}",
+            res.applied.len(),
+            weights.display()
+        );
 
         let extractor = FeatureExtractor::load(content, rmvpe)
             .map_err(|e| anyhow!("loading ContentVec/RMVPE ONNX: {e}"))?;
 
-        Ok(Self { extractor, model, model_sr, transpose, speaker_id })
+        Ok(Self {
+            extractor,
+            model,
+            model_sr,
+            transpose,
+            speaker_id,
+        })
     }
 
     /// The generator's output sample rate.
@@ -88,7 +98,8 @@ impl BurnConverter {
         }
 
         let device = WgpuDevice::default();
-        let phone = Tensor::<B, 3>::from_data(TensorData::new(phone_flat, [1, n, CONTENT_DIM]), &device);
+        let phone =
+            Tensor::<B, 3>::from_data(TensorData::new(phone_flat, [1, n, CONTENT_DIM]), &device);
         let pitch = Tensor::<B, 2, Int>::from_data(TensorData::new(coarse, [1, n]), &device);
         let nsff0 = Tensor::<B, 2>::from_data(TensorData::new(pitchf, [1, n]), &device);
 

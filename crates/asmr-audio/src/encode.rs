@@ -10,16 +10,12 @@ use futures::{Stream, StreamExt};
 use tokio::fs::File;
 use tokio::io::{AsyncWrite, AsyncWriteExt, BufWriter};
 
-use crate::error::Result;
 use crate::Samples;
+use crate::error::Result;
 
 /// Collect a stream of mono `f32` chunks and write them to `path` as a
 /// 32-bit float mono WAV at `sample_rate`.
-pub async fn write_wav_file<S>(
-    path: impl AsRef<Path>,
-    sample_rate: u32,
-    stream: S,
-) -> Result<()>
+pub async fn write_wav_file<S>(path: impl AsRef<Path>, sample_rate: u32, stream: S) -> Result<()>
 where
     S: Stream<Item = Result<Samples>> + Unpin,
 {

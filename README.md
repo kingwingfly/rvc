@@ -126,7 +126,7 @@ Logs go to stderr, so stdout carries only PCM.
 - **Inference works on both backends**: the native Burn generator (GPU) and
   ONNX Runtime. Workspace is clippy-clean.
 
-- **ONNX export works**: `export/` is a small standalone uv script that converts
+- **ONNX export works**: `export/` is a small standalone uv/python script that converts
   a Burn `.safetensors` to ONNX (clean-room torch, no RVC repo); verified by
   running the result through `asmr convert --backend onnx`. See
   [`export/README.md`](export/README.md).

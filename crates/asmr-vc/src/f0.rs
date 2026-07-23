@@ -18,7 +18,11 @@ pub struct F0Estimator {
 impl F0Estimator {
     /// Wrap an already-built session with the given voicing threshold.
     pub fn new(session: Session, threshold: f32) -> Self {
-        Self { session, mel: RmvpeMel::new(), threshold }
+        Self {
+            session,
+            mel: RmvpeMel::new(),
+            threshold,
+        }
     }
 
     /// Estimate the F0 (Hz) contour from a mono 16 kHz `f32` buffer.
