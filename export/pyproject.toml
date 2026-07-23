@@ -1,5 +1,5 @@
 [project]
-name = "asmr-onnx-export"
+name = "rvc-onnx-export"
 version = "0.1.0"
 description = "Convert a Burn-trained RVC generator (safetensors) to ONNX for deploy"
 readme = "README.md"
@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.scripts]
-asmr-onnx-export = "export_onnx:main"
+rvc-onnx-export = "export_onnx:main"
 
 [tool.uv]
 package = false

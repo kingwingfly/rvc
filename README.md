@@ -1,8 +1,8 @@
-# asmr — ASMR voice toolkit
+# rvc — RVC voice conversion toolkit
 
-Retimbre your Chinese/English ASMR library into a voice you like. **Voice
-conversion (VC)** runs as pure-Rust ONNX inference (RVC v2) with a streaming
-Unix-filter CLI, and training is moving to a native Rust (burn) pipeline — no
+Retimbre any voice recording into a voice you like. **Voice conversion (VC)**
+runs as pure-Rust inference (RVC v2) — native Burn (GPU) or ONNX Runtime — with a
+streaming Unix-filter CLI, and training is a native Rust (burn) pipeline: no
 Python in the toolkit except the single weight → ONNX conversion step.
 
 Why the expressive vocalizations survive: RVC swaps only **timbre**, driving the
@@ -13,17 +13,17 @@ moans and gasps live in those streams, so they are preserved by construction.
 
 | crate | role |
 |-------|------|
-| `asmr-audio` | ffmpeg (8.1) mp3/wav decode, resample, WAV/raw-PCM I/O — all as `futures::Stream` of mono `f32` |
-| `asmr-vc` | the voice-conversion pipeline: ContentVec + RMVPE feature extraction, and **both** generator backends (ONNX Runtime via `ort`, and native Burn behind the `burn` feature) behind one `Generator` trait; `Stream`-in → `Stream`-out `Converter`; reusable `FeatureExtractor` |
+| `rvc-audio` | ffmpeg (8.1) mp3/wav decode, resample, WAV/raw-PCM I/O — all as `futures::Stream` of mono `f32` |
+| `rvc-core` | the voice-conversion pipeline: ContentVec + RMVPE feature extraction, and **both** generator backends (ONNX Runtime via `ort`, and native Burn behind the `burn` feature) behind one `Generator` trait; `Stream`-in → `Stream`-out `Converter`; reusable `FeatureExtractor` |
 | `burn-rvc` | the RVC v2 network itself, a standalone Burn port of `SynthesizerTrnMs768NSFsid` (no app deps — like `burn_dinov3`) |
-| `asmr-hub` | auto-download ContentVec/RMVPE ONNX from Hugging Face |
-| `asmr-train` | native (Rust/burn) RVC generator training — see `crates/asmr-train/ARCHITECTURE.md` |
-| `asmr-cli` | the `asmr` binary (clap) |
+| `rvc-hub` | auto-download ContentVec/RMVPE ONNX from Hugging Face |
+| `rvc-train` | native (Rust/burn) RVC generator training — see `crates/rvc-train/ARCHITECTURE.md` |
+| `rvc-cli` | the `rvc` binary (clap) |
 
-**On the names** (`burn-rvc` vs `asmr-vc`): they're deliberately different.
+**On the names** (`burn-rvc` vs `rvc-core`): they're deliberately different.
 `burn-rvc` is named after the *model* — **RVC** (Retrieval-based Voice Conversion)
 v2 — and is a self-contained network crate, so it reads like other Burn model
-crates (`burn_dinov3`). `asmr-vc` is the app's **voice-conversion** pipeline (the
+crates (`burn_dinov3`). `rvc-core` is the app's **voice-conversion** pipeline (the
 `vc` function: feature extraction + backends + streaming), not tied to one model.
 
 **One conversion path, two runtimes.** Everything downstream of the generator is
@@ -43,7 +43,7 @@ extension: `.onnx` → ONNX Runtime, else Burn).
   ```
   The CUDA execution provider is tried first, then CPU. A 6 GB GPU is enough for
   inference. (Built against the ORT 1.24 API; newer runtimes work too.)
-- **ffmpeg 8.1** dev libraries (for `asmr-audio`) and the `ffmpeg` binary (for
+- **ffmpeg 8.1** dev libraries (for `rvc-audio`) and the `ffmpeg` binary (for
   piping raw PCM in the realtime example).
 
 ## Build
@@ -65,10 +65,10 @@ target voice as you have.
 export ORT_DYLIB_PATH=/usr/lib/libonnxruntime.so
 
 # 1. Train a generator on the target voice (once, offline) -> models/piner.safetensors.
-asmr train --out models/piner --model-sr 48000  /tmp/piner.mp3
+rvc train --out models/piner --model-sr 48000  /tmp/piner.mp3
 
 # 2. Convert a.mp3 through it -> out/a.wav in that timbre (native Burn backend).
-asmr convert -m models/piner.safetensors --model-sr 48000 -o out/  /tmp/a.mp3
+rvc convert -m models/piner.safetensors --model-sr 48000 -o out/  /tmp/a.mp3
 ```
 
 If the source and target sit in different pitch ranges, add e.g. `-t 2` (up) or
@@ -82,7 +82,7 @@ a small corpus. Get the bases from Hugging Face `lj1995/VoiceConversionWebUI`
 (`assets/pretrained_v2/`) and point `--pretrained-g/-d` at them:
 
 ```sh
-asmr train --out models/voice --model-sr 48000 \
+rvc train --out models/voice --model-sr 48000 \
   --pretrained-g models/pretrained/f0G48k.pth --pretrained-d models/pretrained/f0D48k.pth \
   clip1.mp3 clip2.mp3 clip3.mp3
 ```
@@ -91,7 +91,7 @@ This writes `models/voice.safetensors`. The shared ContentVec + RMVPE ONNX asset
 (training features + inference) download automatically, or prefetch them:
 
 ```sh
-asmr models download
+rvc models download
 ```
 
 **Dashboard & early stop.** On a terminal, training shows Burn's live TUI
@@ -108,10 +108,10 @@ converges in a few dozen epochs — lean on early stop rather than a big `-e`.
 
 ```sh
 # Burn generator (native) — pass the trained .safetensors
-asmr convert -m models/voice.safetensors --model-sr 48000 -o out/  input1.mp3 input2.mp3
+rvc convert -m models/voice.safetensors --model-sr 48000 -o out/  input1.mp3 input2.mp3
 
 # ONNX Runtime generator — pass a .onnx (see the ONNX export step)
-asmr convert -m models/voice.onnx --model-sr 48000 -o out/  input1.mp3 input2.mp3
+rvc convert -m models/voice.onnx --model-sr 48000 -o out/  input1.mp3 input2.mp3
 ```
 
 Writes `out/input1.wav`, `out/input2.wav` in the target timbre. `--backend`
@@ -126,12 +126,12 @@ the model's sample rate. ffmpeg handles capture/playback on either end:
 ```sh
 # play a file through the converter
 ffmpeg -i in.mp3 -f f32le -ar 16000 -ac 1 - \
-  | asmr serve -m models/voice.onnx --model-sr 48000 \
+  | rvc serve -m models/voice.onnx --model-sr 48000 \
   | ffplay -f f32le -ar 48000 -ac 1 -
 
 # live mic → converted → speakers
 ffmpeg -f alsa -i default -f f32le -ar 16000 -ac 1 - \
-  | asmr serve -m models/voice.onnx --model-sr 48000 \
+  | rvc serve -m models/voice.onnx --model-sr 48000 \
   | ffplay -f f32le -ar 48000 -ac 1 -
 ```
 
@@ -147,7 +147,7 @@ stdout carries only PCM.
   from the public pretrained bases, and fine-tune adversarially (mel-L1 + KL +
   feature-matching + LSGAN) on wgpu. Verified end-to-end on a real clip —
   losses decrease and the saved `.safetensors` round-trips through
-  `asmr convert`.
+  `rvc convert`.
 - **Inference works on both backends**, and both `convert` and `serve` run
   either the native Burn generator (GPU) or ONNX Runtime through one shared
   `Converter` (`--backend`). Workspace is clippy-clean.
@@ -156,7 +156,7 @@ stdout carries only PCM.
 
 - **ONNX export works**: `export/` is a small standalone uv/python script that converts
   a Burn `.safetensors` to ONNX (clean-room torch, no RVC repo); verified by
-  running the result through `asmr convert --backend onnx`. See
+  running the result through `rvc convert --backend onnx`. See
   [`export/README.md`](export/README.md).
 
 ## Roadmap

@@ -1,6 +1,6 @@
-# asmr-onnx-export
+# rvc-onnx-export
 
-Convert a Burn-trained RVC generator (`.safetensors`, from `asmr train`) to an
+Convert a Burn-trained RVC generator (`.safetensors`, from `rvc train`) to an
 ONNX model for deployment with ONNX Runtime.
 
 This is the **only** Python in the toolkit — a small, standalone `uv` project. It
@@ -19,10 +19,10 @@ uv run --project export python export/export_onnx.py \
 Then deploy through ONNX Runtime:
 
 ```sh
-asmr convert --backend onnx -m models/voice.onnx --model-sr 48000 -o out/  in.mp3
+rvc convert --backend onnx -m models/voice.onnx --model-sr 48000 -o out/  in.mp3
 ```
 
-The exported graph matches the `asmr-vc` contract:
+The exported graph matches the `rvc-core` contract:
 
 ```
 inputs : phone [1,T,768] f32, phone_lengths [1] i64, pitch [1,T] i64,
@@ -30,5 +30,5 @@ inputs : phone [1,T,768] f32, phone_lengths [1] i64, pitch [1,T] i64,
 output : audio [1,1,L] f32
 ```
 
-Native Burn inference (`asmr convert --backend burn -m voice.safetensors`) needs
+Native Burn inference (`rvc convert --backend burn -m voice.safetensors`) needs
 no export — this is only for ONNX Runtime / cross-framework deploy.

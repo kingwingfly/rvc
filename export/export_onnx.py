@@ -3,11 +3,11 @@
 Usage:
     uv run --project export python export_onnx.py voice.safetensors voice.onnx
 
-The exported graph matches the `asmr-vc` inference contract:
+The exported graph matches the `rvc-core` inference contract:
     inputs : phone [1,T,768] f32, phone_lengths [1] i64, pitch [1,T] i64,
              pitchf [1,T] f32, ds [1] i64, rnd [1,192,T] f32
     output : audio [1,1,L] f32
-so the result drops straight into `asmr convert -m voice.onnx`.
+so the result drops straight into `rvc convert -m voice.onnx`.
 """
 
 from __future__ import annotations

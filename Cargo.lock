@@ -208,75 +208,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "asmr-audio"
-version = "0.1.0"
-dependencies = [
- "async-stream",
- "ffmpeg-next",
- "futures",
- "thiserror 2.0.19",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "asmr-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "asmr-audio",
- "asmr-hub",
- "asmr-train",
- "asmr-vc",
- "clap",
- "futures",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "asmr-hub"
-version = "0.1.0"
-dependencies = [
- "hf-hub",
- "thiserror 2.0.19",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "asmr-train"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "asmr-audio",
- "asmr-vc",
- "burn",
- "burn-rvc",
- "futures",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "asmr-vc"
-version = "0.1.0"
-dependencies = [
- "asmr-audio",
- "async-stream",
- "burn",
- "burn-rvc",
- "futures",
- "ndarray 0.17.2",
- "ort",
- "rustfft",
- "thiserror 2.0.19",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "async-channel"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6028,6 +5959,75 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+
+[[package]]
+name = "rvc-audio"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "ffmpeg-next",
+ "futures",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "rvc-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures",
+ "rvc-audio",
+ "rvc-core",
+ "rvc-hub",
+ "rvc-train",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "rvc-core"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "burn",
+ "burn-rvc",
+ "futures",
+ "ndarray 0.17.2",
+ "ort",
+ "rustfft",
+ "rvc-audio",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "rvc-hub"
+version = "0.1.0"
+dependencies = [
+ "hf-hub",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "rvc-train"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "burn",
+ "burn-rvc",
+ "futures",
+ "rvc-audio",
+ "rvc-core",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "ryu"

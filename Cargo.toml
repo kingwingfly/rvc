@@ -1,12 +1,12 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/asmr-audio",
-    "crates/asmr-hub",
-    "crates/asmr-vc",
+    "crates/rvc-audio",
+    "crates/rvc-hub",
+    "crates/rvc-core",
     "crates/burn-rvc",
-    "crates/asmr-train",
-    "crates/asmr-cli",
+    "crates/rvc-train",
+    "crates/rvc-cli",
 ]
 
 [workspace.package]
@@ -18,10 +18,10 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 # Local crates
-asmr-audio = { path = "crates/asmr-audio" }
-asmr-hub = { path = "crates/asmr-hub" }
-asmr-vc = { path = "crates/asmr-vc" }
-asmr-train = { path = "crates/asmr-train" }
+rvc-audio = { path = "crates/rvc-audio" }
+rvc-hub = { path = "crates/rvc-hub" }
+rvc-core = { path = "crates/rvc-core" }
+rvc-train = { path = "crates/rvc-train" }
 burn-rvc = { path = "crates/burn-rvc" }
 burn = { version = "0.21", default-features = false, features = ["std", "ndarray"] }
 

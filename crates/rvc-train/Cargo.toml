@@ -1,0 +1,20 @@
+[package]
+name = "rvc-train"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Native (Rust) RVC generator training for the rvc toolkit"
+
+[dependencies]
+rvc-audio.workspace = true
+rvc-core.workspace = true
+burn-rvc.workspace = true
+tokio = { workspace = true }
+futures.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+# Training runs on the GPU (wgpu/Vulkan) with autodiff; the HiFiGAN decoder is
+# far too slow on CPU.
+burn = { version = "0.21", default-features = false, features = ["std", "autodiff", "wgpu", "train", "tui"] }

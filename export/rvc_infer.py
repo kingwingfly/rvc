@@ -372,7 +372,7 @@ class Synthesizer(nn.Module):
         g = self.emb_g(ds).unsqueeze(-1)
         m_p, logs_p = self.enc_p(phone, pitch)
         # Sequence mask from phone_lengths (all ones at full length); keeps
-        # phone_lengths as a graph input for the asmr-vc inference contract.
+        # phone_lengths as a graph input for the rvc-core inference contract.
         idx = torch.arange(phone.shape[1], device=phone.device).unsqueeze(0)
         mask = (idx < phone_lengths.unsqueeze(1)).to(m_p.dtype).unsqueeze(1)
         m_p = m_p * mask

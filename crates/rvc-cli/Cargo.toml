@@ -1,0 +1,25 @@
+[package]
+name = "rvc-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "rvc — CLI for RVC voice conversion"
+
+[[bin]]
+name = "rvc"
+path = "src/main.rs"
+
+[dependencies]
+rvc-audio.workspace = true
+rvc-hub.workspace = true
+# `burn` feature brings in the native Burn generator backend (BurnGenerator).
+rvc-core = { workspace = true, features = ["burn"] }
+rvc-train.workspace = true
+tokio = { workspace = true }
+futures.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
