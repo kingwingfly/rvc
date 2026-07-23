@@ -9,16 +9,19 @@ pub fn mel_l1<B: Backend>(mel_real: Tensor<B, 3>, mel_fake: Tensor<B, 3>) -> Ten
 }
 
 /// KL divergence between the flow-transformed posterior and the prior
-/// (`kl_loss` from VITS), averaged over all elements.
+/// (`kl_loss` from VITS/RVC), averaged over all elements.
+///
+/// This is VITS's Monte-Carlo estimate using the sampled `z_p` (not the closed
+/// form), matching `infer/lib/train/losses.py::kl_loss`:
+/// `logs_p - logs_q - 0.5 + 0.5·(z_p - m_p)²·exp(-2·logs_p)`.
 pub fn kl<B: Backend>(
     z_p: Tensor<B, 3>,
     logs_q: Tensor<B, 3>,
     m_p: Tensor<B, 3>,
     logs_p: Tensor<B, 3>,
 ) -> Tensor<B, 1> {
-    let diff = (z_p - m_p.clone()).powf_scalar(2.0);
-    let term =
-        (logs_q.clone().mul_scalar(2.0).exp() + diff) * logs_p.clone().mul_scalar(-2.0).exp();
+    let diff = (z_p - m_p).powf_scalar(2.0);
+    let term = diff * logs_p.clone().mul_scalar(-2.0).exp();
     let kl = logs_p - logs_q - 0.5 + term.mul_scalar(0.5);
     kl.mean()
 }
