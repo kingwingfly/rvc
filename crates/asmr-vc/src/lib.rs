@@ -31,6 +31,6 @@ pub use config::{
 pub use convert::{convert_stream, Converter, StreamParams};
 pub use dsp::{f0_to_coarse, shift_pitch, upsample_rows};
 pub use error::{Result, VcError};
-pub use features::{FeatureExtractor, Features};
+pub use features::{FeatureExtractor, Features, DEFAULT_CHUNK};
 pub use rvc::RvcModel;
 pub use session::build_session;

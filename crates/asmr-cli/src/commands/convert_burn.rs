@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
-use asmr_vc::{f0_to_coarse, shift_pitch, upsample_rows, FeatureExtractor, CONTENT_DIM};
+use asmr_vc::{f0_to_coarse, shift_pitch, FeatureExtractor, CONTENT_DIM, DEFAULT_CHUNK};
 use burn::backend::wgpu::{Wgpu, WgpuDevice};
 use burn::tensor::{Int, Tensor, TensorData};
 use burn_rvc::{Synthesizer, SynthesizerConfig};
@@ -67,11 +67,12 @@ impl BurnConverter {
 
     /// Convert one mono 16 kHz clip, returning audio at [`Self::output_sr`].
     pub fn convert(&mut self, wav16k: &[f32]) -> Result<Vec<f32>> {
-        let feats = self.extractor.extract(wav16k).map_err(|e| anyhow!("feature extraction: {e}"))?;
-
-        // Content at 50 Hz -> ×2 -> 100 Hz to match F0; F0 pitch-shifted.
-        let content = upsample_rows(&feats.content, 2);
-        let mut f0 = feats.f0;
+        // Chunked extraction bounds ONNX memory on long clips; content is
+        // upsampled to the 100 Hz F0 grid and aligned to f0.
+        let (content, mut f0) = self
+            .extractor
+            .extract_aligned(wav16k, DEFAULT_CHUNK)
+            .map_err(|e| anyhow!("feature extraction: {e}"))?;
         shift_pitch(&mut f0, self.transpose);
 
         let n = content.len().min(f0.len());

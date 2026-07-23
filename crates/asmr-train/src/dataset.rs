@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use asmr_audio::{decode_path, DecodeOptions};
-use asmr_vc::{f0_to_coarse, upsample_rows, FeatureExtractor};
+use asmr_vc::{f0_to_coarse, FeatureExtractor, DEFAULT_CHUNK};
 use futures::StreamExt;
 
 /// Samples per latent frame (48 kHz, hop 480).
@@ -44,11 +44,13 @@ pub async fn prepare_clips(
         anyhow::ensure!(!wav16k.is_empty(), "{} decoded to nothing", path.display());
         let gt = decode_mono(path, model_sr).await?;
 
-        let feats = fx.extract(&wav16k).map_err(|e| anyhow!("features for {}: {e}", path.display()))?;
-        let content = upsample_rows(&feats.content, 2); // 50 Hz -> 100 Hz
-        let f0 = feats.f0;
+        // Chunked extraction bounds ONNX memory on long clips; content is
+        // already upsampled to the 100 Hz F0 grid and aligned to f0.
+        let (content, f0) = fx
+            .extract_aligned(&wav16k, DEFAULT_CHUNK)
+            .map_err(|e| anyhow!("features for {}: {e}", path.display()))?;
 
-        let frames = content.len().min(f0.len()).min(gt.len() / HOP);
+        let frames = content.len().min(gt.len() / HOP);
         if frames < min_frames {
             tracing::warn!("skipping {} ({} frames < {})", path.display(), frames, min_frames);
             continue;
