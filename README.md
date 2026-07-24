@@ -5,33 +5,16 @@ runs as pure-Rust inference (RVC v2) — native Burn (GPU) or ONNX Runtime — w
 streaming Unix-filter CLI, and training is a native Rust (burn) pipeline: no
 Python in the toolkit except the single weight → ONNX conversion step.
 
-Why the expressive vocalizations survive: RVC swaps only **timbre**, driving the
-generator from the source's *content features* + *F0 pitch*. Breathy cries,
-moans and gasps live in those streams, so they are preserved by construction.
-
 ## Architecture
 
 | crate | role |
 |-------|------|
 | `rvc-audio` | ffmpeg (8.1) mp3/wav decode, resample, WAV/raw-PCM I/O — all as `futures::Stream` of mono `f32` |
 | `rvc-core` | the voice-conversion pipeline: ContentVec + RMVPE feature extraction, and **both** generator backends (ONNX Runtime via `ort`, and native Burn behind the `burn` feature) behind one `Generator` trait; `Stream`-in → `Stream`-out `Converter`; reusable `FeatureExtractor` |
-| `burn-rvc` | the RVC v2 network itself, a standalone Burn port of `SynthesizerTrnMs768NSFsid` (no app deps — like `burn_dinov3`) |
+| `burn-rvc` | the RVC v2 network itself, a standalone Burn port of `SynthesizerTrnMs768NSFsid` |
 | `rvc-hub` | auto-download ContentVec/RMVPE ONNX from Hugging Face |
 | `rvc-train` | native (Rust/burn) RVC generator training — see `crates/rvc-train/ARCHITECTURE.md` |
 | `rvc-cli` | the `rvc` binary (clap) |
-
-**On the names** (`burn-rvc` vs `rvc-core`): they're deliberately different.
-`burn-rvc` is named after the *model* — **RVC** (Retrieval-based Voice Conversion)
-v2 — and is a self-contained network crate, so it reads like other Burn model
-crates (`burn_dinov3`). `rvc-core` is the app's **voice-conversion** pipeline (the
-`vc` function: feature extraction + backends + streaming), not tied to one model.
-
-**One conversion path, two runtimes.** Everything downstream of the generator is
-shared: the same `FeatureExtractor` (ContentVec + RMVPE), the same coarse-pitch /
-upsample / pitch-shift DSP, and the same streaming `Converter` (block / overlap /
-crossfade) drive either backend through the `Generator` trait. `convert` and
-`serve` both take `--backend auto|burn|onnx` (`auto` picks by the `-m`
-extension: `.onnx` → ONNX Runtime, else Burn).
 
 ## Prerequisites
 
@@ -64,11 +47,11 @@ target voice as you have.
 ```sh
 export ORT_DYLIB_PATH=/usr/lib/libonnxruntime.so
 
-# 1. Train a generator on the target voice (once, offline) -> models/piner.safetensors.
-rvc train --out models/piner --model-sr 48000  /tmp/piner.mp3
+# 1. Train a generator on the target voice (once, offline) -> models/personA.safetensors.
+rvc train --out models/personA --model-sr 48000  /tmp/personA.mp3
 
 # 2. Convert a.mp3 through it -> out/a.wav in that timbre (native Burn backend).
-rvc convert -m models/piner.safetensors --model-sr 48000 -o out/  /tmp/a.mp3
+rvc convert -m models/personA.safetensors --model-sr 48000 -o out/ /tmp/a.mp3
 ```
 
 If the source and target sit in different pitch ranges, add e.g. `-t 2` (up) or
@@ -89,7 +72,7 @@ rvc train --out models/voice --model-sr 48000 \
 
 This writes the generator to `models/voice.safetensors` and, next to it, the
 discriminator checkpoint `models/voice.disc.safetensors` (the sidecar that makes
-`--continue` below resume the adversary too). The shared ContentVec + RMVPE ONNX
+`--resume` below resume the adversary too). The shared ContentVec + RMVPE ONNX
 assets (training features + inference) download automatically, or prefetch them:
 
 ```sh
@@ -97,24 +80,24 @@ rvc models download
 ```
 
 **Dashboard & early stop.** On a terminal, training shows Burn's live TUI
-dashboard (loss plots + progress); logs go to `{work-dir}/train.log` so they
-don't corrupt it. Press `q` to stop early — the model is saved. Without a TTY
+dashboard (loss plots + progress); logs go to `{save-dir}/train/train.log`. 
+Press `q` to stop early — the model is saved. Without a TTY
 (or with `--no-tui`), it logs `g`/`d`/`mel` to stderr and **Ctrl-C** stops and
 saves. Watch **`mel`** for quality — it should fall and plateau; `g`/`d` are
 adversarial and just stay balanced.
 
-**Resume a run (`--continue`).** Stopped early and want to keep going? Point
-`--continue` (alias `--resume`) at the generator `.safetensors` from the earlier
+**Resume a run (`--resume`).** Stopped early and want to keep going? Point
+`--resume` (alias `--continue`) at the generator `.safetensors` from the earlier
 run instead of a pretrained base — it loads the generator, and picks up the
 discriminator from the `.disc.safetensors` sidecar automatically:
 
 ```sh
 rvc train --out models/voice --model-sr 48000 \
-  --continue models/voice.safetensors \
+  --resume models/voice.safetensors \
   clip1.mp3 clip2.mp3 clip3.mp3
 ```
 
-`--continue` conflicts with `--pretrained-g` (the checkpoint replaces the base).
+`--resume` conflicts with `--pretrained-g` (the checkpoint replaces the base).
 If the discriminator sidecar is missing it falls back to `--pretrained-d` (pass
 it), else the discriminator starts fresh. Note that optimizer (AdamW) momentum
 is not persisted across runs — negligible for short fine-tunes.
@@ -156,7 +139,7 @@ ffmpeg -f alsa -i default -f f32le -ar 16000 -ac 1 - \
 
 `serve` takes the same `--backend` flag as `convert`; both runtimes stream
 through the same `Converter`. Use ONNX Runtime for realtime — the Burn (CUDA)
-generator works but is currently slower than realtime. Logs go to stderr, so
+generator works but is currently slower than onnx. Logs go to stderr, so
 stdout carries only PCM.
 
 ## Status
@@ -169,7 +152,7 @@ stdout carries only PCM.
   `rvc convert`.
 - **Inference works on both backends**, and both `convert` and `serve` run
   either the native Burn generator (GPU) or ONNX Runtime through one shared
-  `Converter` (`--backend`). Workspace is clippy-clean.
+  `Converter` (`--backend`).
 - **Live training dashboard**: Burn's TUI shows loss plots + progress; `q` (or
   Ctrl-C without the TUI) stops early and saves.
 
