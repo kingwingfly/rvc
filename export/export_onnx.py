@@ -69,25 +69,31 @@ def export_model(model: Synthesizer, dst: str) -> None:
 
     The sequence length is dynamic on phone dim1, pitch dim1, pitchf dim1 and
     rnd dim2; the trace ties them to one symbol, and the output audio length
-    `L` follows from it. phone_lengths and ds stay static [1]. `Dim.AUTO` lets
-    the exporter infer and share the symbol without emitting the "axis name
-    shares constraints" warning that a single named `Dim` would. `dynamic_shapes`
-    is a tuple aligned to the positional args of forward().
+    `L` follows from it. phone_lengths and ds stay static [1]. We use
+    `Dim.DYNAMIC` (not `Dim.AUTO`): DYNAMIC *asserts* the axes stay dynamic and
+    raises if the trace specializes one to the dummy length, whereas AUTO would
+    silently bake in a fixed length — the whole point of this export is a
+    variable sequence length. The exporter still infers the shared symbol from
+    the trace without emitting the "axis name shares constraints" warning a
+    single named `Dim` would. `dynamic_shapes` is a tuple aligned to the
+    positional args of forward().
     """
-    auto = torch.export.Dim.AUTO
+    dyn = torch.export.Dim.DYNAMIC
     dynamic_shapes = (
-        {1: auto},   # phone
+        {1: dyn},    # phone
         {},          # phone_lengths (static [1])
-        {1: auto},   # pitch
-        {1: auto},   # pitchf
+        {1: dyn},    # pitch
+        {1: dyn},    # pitchf
         {},          # ds (static [1])
-        {2: auto},   # rnd
+        {2: dyn},    # rnd
     )
     with warnings.catch_warnings():
-        # torch 2.13's dynamo export path deepcopies pytree TreeSpecs during
-        # run_decompositions, tripping torch's own deprecated LeafSpec shim.
-        # That FutureWarning is internal to torch and unrelated to how we call
-        # the exporter, so silence just that one message to keep export clean.
+        # The dynamo export path (observed on the resolved torch 2.13)
+        # deepcopies pytree TreeSpecs during run_decompositions, tripping
+        # torch's own deprecated LeafSpec shim. That FutureWarning is internal
+        # to torch and unrelated to how we call the exporter, so silence just
+        # that one message to keep export clean; drop it once torch stops
+        # emitting it.
         warnings.filterwarnings("ignore", message=r".*LeafSpec.*", category=FutureWarning)
         torch.onnx.export(
             model,
@@ -99,7 +105,10 @@ def export_model(model: Synthesizer, dst: str) -> None:
             opset_version=18,
             dynamo=True,
         )
-    onnx.checker.check_model(dst)
+    # full_check=True also runs shape inference, catching an internally
+    # inconsistent graph (e.g. a mis-propagated dynamic dim) that the default
+    # structural check would pass.
+    onnx.checker.check_model(dst, full_check=True)
     print(f"wrote {dst} (onnx.checker: ok)")
 
 

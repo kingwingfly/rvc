@@ -9,7 +9,7 @@ dependencies = [
     "numpy>=1.26",
     "safetensors>=0.4",
     "onnx>=1.16",
-    "onnxscript>=0.2",
+    "onnxscript>=0.7",
 ]
 
 [project.scripts]
