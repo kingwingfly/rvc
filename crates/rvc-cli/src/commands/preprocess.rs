@@ -6,6 +6,7 @@
 //! their audio files; each file is sliced and its segments written as
 //! `<stem>_<NNN>.wav` at `--model-sr`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -26,27 +27,51 @@ pub async fn run(args: PreprocessArgs) -> Result<()> {
         pad: args.pad,
     };
 
-    let files = expand_inputs(&args.input)?;
-    if files.is_empty() {
-        anyhow::bail!("no audio files found in the given input paths");
-    }
-
     tokio::fs::create_dir_all(&args.output_dir)
         .await
         .with_context(|| format!("creating output dir {}", args.output_dir.display()))?;
+
+    let files = expand_inputs(&args.input, &args.output_dir)?;
+    if files.is_empty() {
+        anyhow::bail!("no audio files found in the given input paths");
+    }
 
     let sr = args.model_sr;
     let mut total_clips = 0usize;
     let mut total_in_secs = 0.0f64;
     let mut total_kept_secs = 0.0f64;
+    let mut failed = 0usize;
+    // Files sharing a stem (e.g. `a/song.mp3` and `b/song.mp3`) would otherwise
+    // overwrite each other's clips; disambiguate the output base per stem.
+    let mut used_stems: HashMap<String, usize> = HashMap::new();
 
     for file in &files {
-        let samples = decode_mono(file, sr).await?;
+        // One undecodable file must not abort the whole batch.
+        let samples = match decode_mono(file, sr).await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("skipping {}: {e:#}", file.display());
+                failed += 1;
+                continue;
+            }
+        };
         let in_secs = samples.len() as f64 / sr as f64;
         total_in_secs += in_secs;
 
         let segments = slice(&samples, sr, &opts);
-        let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("clip");
+
+        let stem = file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("clip")
+            .to_string();
+        let seen = used_stems.entry(stem.clone()).or_insert(0);
+        let base = if *seen == 0 {
+            stem.clone()
+        } else {
+            format!("{stem}__{seen}")
+        };
+        *seen += 1;
 
         let mut kept_secs = 0.0f64;
         for (i, (start, end)) in segments.iter().enumerate() {
@@ -55,7 +80,7 @@ pub async fn run(args: PreprocessArgs) -> Result<()> {
                 peak_normalize(&mut clip, 0.95);
             }
             kept_secs += clip.len() as f64 / sr as f64;
-            let out_path = args.output_dir.join(format!("{stem}_{i:03}.wav"));
+            let out_path = args.output_dir.join(format!("{base}_{i:03}.wav"));
             let out_stream = stream::iter([Ok::<_, rvc_audio::AudioError>(clip)]);
             write_wav_file(&out_path, sr, out_stream)
                 .await
@@ -73,10 +98,16 @@ pub async fn run(args: PreprocessArgs) -> Result<()> {
         );
     }
 
+    let skipped = if failed > 0 {
+        format!(" ({failed} skipped)")
+    } else {
+        String::new()
+    };
     println!(
-        "total: {} clips from {} files  ({:.1}s in -> {:.1}s kept)  -> {}",
+        "total: {} clips from {} files{}  ({:.1}s in -> {:.1}s kept)  -> {}",
         total_clips,
-        files.len(),
+        files.len() - failed,
+        skipped,
         total_in_secs,
         total_kept_secs,
         args.output_dir.display(),
@@ -84,21 +115,16 @@ pub async fn run(args: PreprocessArgs) -> Result<()> {
     Ok(())
 }
 
-/// Expand input paths: files are kept as-is; directories yield their audio
-/// files (by extension, case-insensitive). Result is sorted and de-duplicated.
-fn expand_inputs(inputs: &[PathBuf]) -> Result<Vec<PathBuf>> {
+/// Expand input paths: files are kept as-is; directories are walked
+/// **recursively** for audio files (by extension, case-insensitive). The output
+/// dir is skipped so a re-run never re-ingests its own clips. Result is sorted
+/// and de-duplicated.
+fn expand_inputs(inputs: &[PathBuf], output_dir: &Path) -> Result<Vec<PathBuf>> {
+    let skip = std::fs::canonicalize(output_dir).ok();
     let mut files = Vec::new();
     for path in inputs {
         if path.is_dir() {
-            let entries = std::fs::read_dir(path)
-                .with_context(|| format!("reading directory {}", path.display()))?;
-            for entry in entries {
-                let entry = entry?;
-                let p = entry.path();
-                if p.is_file() && has_audio_ext(&p) {
-                    files.push(p);
-                }
-            }
+            collect_dir(path, skip.as_deref(), &mut files)?;
         } else {
             files.push(path.clone());
         }
@@ -106,6 +132,26 @@ fn expand_inputs(inputs: &[PathBuf]) -> Result<Vec<PathBuf>> {
     files.sort();
     files.dedup();
     Ok(files)
+}
+
+/// Recursively collect audio files under `dir`, skipping the output dir.
+fn collect_dir(dir: &Path, skip: Option<&Path>, out: &mut Vec<PathBuf>) -> Result<()> {
+    if let (Some(skip), Ok(here)) = (skip, std::fs::canonicalize(dir)) {
+        if here == skip {
+            return Ok(());
+        }
+    }
+    let entries =
+        std::fs::read_dir(dir).with_context(|| format!("reading directory {}", dir.display()))?;
+    for entry in entries {
+        let p = entry?.path();
+        if p.is_dir() {
+            collect_dir(&p, skip, out)?;
+        } else if p.is_file() && has_audio_ext(&p) {
+            out.push(p);
+        }
+    }
+    Ok(())
 }
 
 /// Whether `path`'s extension is a recognised audio format (case-insensitive).

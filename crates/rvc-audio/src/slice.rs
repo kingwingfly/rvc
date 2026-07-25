@@ -102,16 +102,31 @@ pub fn slice(samples: &[f32], sample_rate: u32, opts: &SliceOptions) -> Vec<(usi
         ranges.push((start, end));
     }
 
+    // Enforce the documented non-overlap invariant. A voiced frame spans `win`
+    // (~30 ms) but frames step by `hop` (~10 ms), so with a very small
+    // `--min-silence` the padded ranges above could touch or overlap. Clamp each
+    // start past the previous end (dropping any range fully swallowed).
+    let mut prev_end = 0usize;
+    ranges.retain_mut(|(s, e)| {
+        *s = (*s).max(prev_end);
+        if *s >= *e {
+            return false;
+        }
+        prev_end = *e;
+        true
+    });
+
+    let min_clip_samples = (opts.min_clip * sample_rate as f32).round() as usize;
+
     // Split over-long runs at their quietest interior frame.
     if opts.max_clip > 0.0 {
         let max_samples = (opts.max_clip * sample_rate as f32).round() as usize;
         if max_samples > 0 {
-            ranges = split_long_ranges(ranges, samples, hop, win, max_samples);
+            ranges = split_long_ranges(ranges, samples, hop, win, max_samples, min_clip_samples);
         }
     }
 
     // Drop runs shorter than `min_clip`.
-    let min_clip_samples = (opts.min_clip * sample_rate as f32).round() as usize;
     ranges.retain(|(s, e)| e.saturating_sub(*s) >= min_clip_samples);
 
     ranges
@@ -196,12 +211,19 @@ fn merged_voiced_runs(db: &[f32], silence_db: f32, min_silence_frames: usize) ->
 
 /// Greedily split any sample range longer than `max_samples` at its quietest
 /// interior frame, recursing until every piece fits.
+///
+/// The cut is constrained so both halves are at least `min_clip_samples` long,
+/// so splitting never manufactures a sub-`min_clip` fragment that the later
+/// filter would silently discard (losing real voiced audio). If a range is too
+/// short to split into two `>= min_clip` pieces, it is kept whole even though it
+/// slightly exceeds `max_samples` — keeping audio beats dropping it.
 fn split_long_ranges(
     ranges: Vec<(usize, usize)>,
     samples: &[f32],
     hop: usize,
     win: usize,
     max_samples: usize,
+    min_clip_samples: usize,
 ) -> Vec<(usize, usize)> {
     let mut out = Vec::with_capacity(ranges.len());
     let mut stack: Vec<(usize, usize)> = ranges.into_iter().rev().collect();
@@ -210,18 +232,17 @@ fn split_long_ranges(
             out.push((start, end));
             continue;
         }
-        // Search for the quietest interior frame, biased away from the exact
-        // edges so each half makes progress.
-        let margin = (max_samples / 4).max(hop);
+        // Keep both halves >= min_clip (and away from the exact edges) so no
+        // droppable fragment is created and each half makes progress.
+        let margin = (max_samples / 4).max(hop).max(min_clip_samples);
         let cut_lo = start + margin;
         let cut_hi = end.saturating_sub(margin);
-        let cut = if cut_lo < cut_hi {
-            quietest_cut(samples, hop, win, cut_lo, cut_hi)
-        } else {
-            start + (end - start) / 2
-        };
-        // Guard against a degenerate cut that fails to split.
-        let cut = cut.clamp(start + 1, end - 1);
+        if cut_lo >= cut_hi {
+            // Can't split without a sub-min_clip fragment; keep the range whole.
+            out.push((start, end));
+            continue;
+        }
+        let cut = quietest_cut(samples, hop, win, cut_lo, cut_hi).clamp(cut_lo, cut_hi);
         // Push right first so the left half is emitted in order after sorting.
         stack.push((cut, end));
         stack.push((start, cut));
@@ -337,6 +358,32 @@ mod tests {
             "pad must push segment start ({start}) before the first voiced sample ({first_voiced})"
         );
         assert!(end <= sig.len());
+    }
+
+    #[test]
+    fn ranges_never_overlap_with_tiny_min_silence() {
+        // A small `--min-silence` with generous padding is the case where two
+        // padded ranges could otherwise overlap (the ~30 ms energy window and
+        // the 0.15 s pad both reach into the short gap between them).
+        let mut sig = Vec::new();
+        push_voiced(&mut sig, 1.5);
+        push_silence(&mut sig, 0.08); // 80 ms > 30 ms window -> a detectable gap
+        push_voiced(&mut sig, 1.5);
+        let opts = SliceOptions {
+            min_silence: 0.02, // 20 ms -> the 80 ms gap becomes a cut
+            pad: 0.15,
+            ..SliceOptions::default()
+        };
+        let segs = slice(&sig, SR, &opts);
+        assert!(segs.len() >= 2, "tiny gap should cut: got {segs:?}");
+        for w in segs.windows(2) {
+            assert!(
+                w[0].1 <= w[1].0,
+                "ranges must stay sorted and non-overlapping: {:?} then {:?}",
+                w[0],
+                w[1]
+            );
+        }
     }
 
     #[test]
