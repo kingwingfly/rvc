@@ -30,6 +30,7 @@ async fn main() -> Result<()> {
         Command::Serve(a) => commands::serve::run(a).await,
         Command::Models(a) => commands::models::run(a).await,
         Command::Train(a) => commands::train::run(a).await,
+        Command::Preprocess(a) => commands::preprocess::run(a).await,
     }
 }
 

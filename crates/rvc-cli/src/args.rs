@@ -34,6 +34,8 @@ pub enum Command {
     Models(ModelsArgs),
     /// Train an RVC generator on a corpus (native Rust / burn).
     Train(TrainArgs),
+    /// Slice a corpus into clean per-sentence training clips (dead-air removed).
+    Preprocess(PreprocessArgs),
 }
 
 /// Shared options for locating the three ONNX models.
@@ -120,6 +122,44 @@ pub struct ModelsDownloadArgs {
     /// [default: the toolkit's RMVPE ONNX on Hugging Face].
     #[arg(long)]
     pub rmvpe: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct PreprocessArgs {
+    /// Input audio files and/or directories (directories are expanded to their
+    /// audio files: mp3, wav, flac, m4a, ogg, opus, aac, wma).
+    #[arg(required = true)]
+    pub input: Vec<PathBuf>,
+    /// Directory to write the sliced `<stem>_<NNN>.wav` clips into.
+    #[arg(short = 'o', long, default_value = "dataset")]
+    pub output_dir: PathBuf,
+    /// Sample rate of the written clips (match your training `--model-sr`).
+    #[arg(long, default_value_t = 48000)]
+    pub model_sr: u32,
+    /// Energy floor in dBFS: audio quieter than this counts as between-sentence
+    /// dead-air. ASMR users can lower it (e.g. -50) to keep the very softest
+    /// passages — energy is used only to find silent gaps, never to gate quiet
+    /// content.
+    #[arg(long, default_value_t = -40.0)]
+    pub silence_db: f32,
+    /// Minimum silent-gap length (seconds) that counts as a sentence boundary.
+    /// Shorter pauses stay inside the clip, so complete sentences are never
+    /// split.
+    #[arg(long, default_value_t = 0.3)]
+    pub min_silence: f32,
+    /// Drop any clip shorter than this (seconds).
+    #[arg(long, default_value_t = 1.0)]
+    pub min_clip: f32,
+    /// Hard cap on clip length (seconds); 0 means never split a long sentence.
+    #[arg(long, default_value_t = 0.0)]
+    pub max_clip: f32,
+    /// Edge-pad each clip by up to this many seconds of bordering quiet so
+    /// onsets and soft breathy tails are not clipped.
+    #[arg(long, default_value_t = 0.15)]
+    pub pad: f32,
+    /// Peak-normalize each written clip to ~0.95 full-scale.
+    #[arg(long)]
+    pub normalize: bool,
 }
 
 #[derive(Debug, Args)]

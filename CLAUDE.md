@@ -47,7 +47,7 @@ Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper
 | `burn-rvc` | the RVC v2 network itself (standalone Burn port of `SynthesizerTrnMs768NSFsid` + `MultiPeriodDiscriminator`); no app deps |
 | `rvc-train` | native Rust/Burn adversarial training loop (see `crates/rvc-train/ARCHITECTURE.md`) |
 | `rvc-hub` | auto-download ContentVec/RMVPE ONNX from Hugging Face |
-| `rvc-cli` | the `rvc` binary (clap): `convert`, `serve`, `models`, `train` |
+| `rvc-cli` | the `rvc` binary (clap): `convert`, `serve`, `models`, `train`, `preprocess` |
 
 ### Two runtimes, one path (the key abstraction)
 Everything downstream of the generator is shared: the same `FeatureExtractor`, the
@@ -101,3 +101,15 @@ On a TTY a live dashboard shows `g`/`d`/`mel` losses; `q` stops early and saves.
 hop=480, 128 Slaney mels, center=False (`crates/rvc-train/src/spectral.rs`). Target GPU
 is 6 GB (RTX 2060) → small batch. Warm-start from `--pretrained-g/-d` is strongly
 recommended on a small corpus.
+
+**Preprocess first (`rvc preprocess`).** `sample_batch` draws random 0.48 s
+windows uniformly across each corpus file, so raw recordings full of
+between-sentence dead-air collapse the generator to silence. `rvc preprocess
+raw/*.mp3 -o clips/` then `rvc train clips/*.wav ...` slices the corpus into
+clean per-sentence clips first — it removes between-sentence dead-air while
+**preserving soft/breathy ASMR content** (energy is used only to find long
+silent gaps, never to gate quiet-but-present sound). The shared slicer lives in
+`crates/rvc-audio/src/slice.rs` (`SliceOptions`, `slice`); the two tuning knobs
+are `--silence-db` (energy floor; lower to keep the softest passages) and
+`--min-silence` (how long a quiet gap must last to be a cut, so sentences are
+never split). Training itself is unchanged — it just consumes the cleaned folder.
