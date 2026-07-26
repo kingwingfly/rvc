@@ -38,7 +38,11 @@ async fn main() -> Result<()> {
 /// PCM). For `train` with the dashboard (a TTY and no `--no-tui`), the TUI owns
 /// the terminal, so logs are redirected to `{work_dir}/train.log` instead.
 fn init_logging(command: &Command) {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // App logs at `info`, but drop `ort`'s chatty INFO (per-tensor allocation /
+    // static-memory-planning spam) to `warn`. Override the whole thing with
+    // `RUST_LOG`, e.g. `RUST_LOG=ort=info`.
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,ort=warn"));
 
     if let Command::Train(a) = command {
         let tui = !a.no_tui && std::io::stdout().is_terminal();
