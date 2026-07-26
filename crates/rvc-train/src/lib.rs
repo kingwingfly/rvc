@@ -31,15 +31,19 @@ pub struct TrainSettings {
     pub speaker_id: i64,
     /// Base learning rate (AdamW), before decay.
     pub lr: f64,
-    /// Per-epoch exponential LR decay factor (`lr_epoch = lr * decay^epoch`).
-    /// `1.0` disables decay; smaller settles the late-training oscillation that
-    /// keeps `mel_loss` shaking on a constant LR.
-    pub lr_decay: f64,
-    /// Generator weight EMA decay (`ema = decay*ema + (1-decay)*g` each step).
-    /// The EMA weights — averaged over the adversarial oscillation, so cleaner
-    /// and less staticky — are what gets saved. `0.0` disables EMA (save the raw
-    /// live weights instead).
-    pub ema_decay: f64,
+    /// End-of-run learning rate as a fraction of [`Self::lr`]. The LR decays
+    /// exponentially from `lr` to `lr * lr_final` over the whole scheduled run
+    /// (`lr * lr_final^(step/total_steps)`), so the schedule is independent of the
+    /// epoch count. `1.0` disables decay; smaller settles the late-training
+    /// oscillation that keeps `mel_loss` shaking on a constant LR.
+    pub lr_final: f64,
+    /// Generator weight EMA smoothing window as a fraction of the whole run. The
+    /// per-step decay is derived as `1 - 1/(ema_frac * total_steps)`, so the EMA
+    /// averages over `ema_frac` of the run regardless of epoch count. The EMA
+    /// weights — averaged over the adversarial oscillation, so cleaner and less
+    /// staticky — are what gets saved (the raw live weights are saved alongside).
+    /// `0.0` disables EMA (save only the raw live weights).
+    pub ema_frac: f64,
     /// Micro-batches accumulated per optimizer step. Raises the *effective*
     /// batch size without extra VRAM (more stable gradients on a small GPU).
     /// `1` = plain batching.

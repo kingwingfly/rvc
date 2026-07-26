@@ -118,8 +118,7 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
         .with_weight_decay(0.01)
         .init::<AB, MultiPeriodDiscriminator<AB>>();
     let base_lr = req.settings.lr;
-    let lr_decay = req.settings.lr_decay;
-    let ema_decay = req.settings.ema_decay;
+    let lr_final = req.settings.lr_final;
     let accum = req.settings.grad_accum.max(1);
     let d_lr_ratio = req.settings.d_lr_ratio;
     let d_interval = req.settings.d_interval.max(1);
@@ -128,11 +127,21 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
     let total_frames: usize = clips.iter().map(|c| c.frames).sum();
     let steps_per_epoch = (total_frames / (batch * WINDOW_FRAMES)).max(1);
     let total_steps = req.settings.epochs as usize * steps_per_epoch;
+
+    // Derive the per-step EMA decay from a smoothing window = ema_frac of the run,
+    // so it stays sensible for any epoch count. `ema_frac == 0` disables EMA.
+    let ema_window = req.settings.ema_frac * total_steps as f64;
+    let ema_decay = if ema_window >= 1.0 {
+        (1.0 - 1.0 / ema_window).min(0.9999)
+    } else {
+        0.0
+    };
     // Clip-sampling bias (None = uniform); computed once from each clip's SNR.
     let cdf = clip_weights(&clips, req.settings.snr_weight);
     tracing::info!(
         "training: {} clips, batch {}x{} accum, {} steps/epoch, {} epochs -> {} steps; \
-         lr {} decay {}, ema {}, d-lr-ratio {} interval {}, snr-weight {}",
+         lr {:.1e}->{:.1e} (final {}x), ema window {:.0} steps (decay {:.4}), \
+         d-lr-ratio {} interval {}, snr-weight {}",
         clips.len(),
         batch,
         accum,
@@ -140,7 +149,9 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
         req.settings.epochs,
         total_steps,
         base_lr,
-        lr_decay,
+        base_lr * lr_final,
+        lr_final,
+        ema_window.max(0.0),
         ema_decay,
         d_lr_ratio,
         d_interval,
@@ -153,7 +164,7 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
 
     // Generator weight EMA (kept on the inner backend). The saved model is the
     // EMA — averaged over the adversarial oscillation, so cleaner. `None` when
-    // disabled (`--ema 0`), in which case the raw live weights are saved.
+    // disabled (`--ema-frac 0`), in which case the raw live weights are saved.
     let mut ema: Option<Synthesizer<IB>> = (ema_decay > 0.0).then(|| net_g.valid());
 
     let mut dash = Dashboard::new(
@@ -172,8 +183,10 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
             stopped_early = true;
             break;
         }
-        let epoch = step / steps_per_epoch;
-        let cur_lr = base_lr * lr_decay.powi(epoch as i32);
+        // Exponential LR schedule over the whole run: base_lr at step 0 decaying
+        // to base_lr * lr_final at the final step (epoch-count independent).
+        let progress = step as f64 / total_steps.max(1) as f64;
+        let cur_lr = base_lr * lr_final.powf(progress);
         let update_d = step % d_interval == 0;
 
         // Accumulate gradients over `accum` micro-batches (effective batch =

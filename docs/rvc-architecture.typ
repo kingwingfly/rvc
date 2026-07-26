@@ -130,6 +130,49 @@ The rest of this document unfolds that diagram top to bottom, then explains how
 the speaker-specific decoder is *trained* — which is where the GAN enters.
 
 // =========================================================================
+= Background: a few building blocks
+
+Readers new to audio machine learning may want these six ideas first; every later
+section leans on them. Experienced readers can skip ahead.
+
+#block(inset: (x: 10pt))[
+  #set text(size: 9.8pt)
+  / Digital audio — samples & sample rate: a sound wave is stored as a long list
+    of numbers, the *samples*, measured many thousands of times per second. The
+    *sample rate* is how many per second. Analysis here runs at 16 kHz (16 000
+    samples/s — enough to read content and pitch), while the target voice is
+    synthesised at 48 kHz for full fidelity.
+  / Spectrogram (STFT): the raw sample list is hard to reason about directly.
+    Sliding a short window along the signal and taking a *Fourier transform* of
+    each window gives the *short-time Fourier transform* — a 2-D picture of *how
+    much energy sits at each frequency, moment by moment*. Columns are time
+    frames; rows are frequency bins.
+  / The mel scale & mel spectrogram: human hearing resolves low frequencies far
+    more finely than high ones. The *mel scale* warps frequency to match,
+    $"mel"(f) = 1127 · ln(1 + f/700)$. A *mel spectrogram* is an STFT whose
+    frequency rows have been regrouped into a smaller set of perceptually spaced
+    *mel bands* (128 of them here). Because closeness on a mel spectrogram tracks
+    "sounds alike," the main training loss is simply an $L_1$ distance between the
+    mel spectrograms of the real and generated audio (§6).
+  / Embeddings: a network cannot consume a raw category ("speaker #3", "pitch bin
+    57") directly. An *embedding* is a learned lookup table turning each discrete
+    id into a short vector the network can use; because it is learned, similar ids
+    drift to similar vectors. RVC embeds both the *speaker* ($g$) and the *coarse
+    pitch*.
+  / Convolutions: a *convolution* slides a small learnable filter along the signal
+    and fires wherever its local pattern appears. Stacking them detects
+    increasingly complex structure (edges → harmonics → textures) while reusing
+    the same weights everywhere — efficient and natural for audio, where the same
+    waveform shapes recur throughout. Both the vocoder and the discriminators are
+    convolutional.
+  / Training — loss & gradient descent: a *loss* is one number measuring how wrong
+    the output is. *Gradient descent* nudges every weight a tiny step in the
+    direction that most reduces it; repeated over many examples, the network
+    learns. The step size is the *learning rate*, and how it is scheduled turns
+    out to matter for stability (§8).
+]
+
+// =========================================================================
 = Analysis: turning audio into content and pitch
 
 Two pretrained, frozen models do the analysis. Neither is trained by RVC; they
@@ -507,25 +550,33 @@ $ L_G = L_"adv"(G) + 2 L_"fm" + 45 L_"mel" + L_"kl" . $
 
 == The alternating step
 
-One training step updates the two networks in turn. The generated audio is
-*detached* for the discriminator step, so $D$'s gradient never leaks into $G$;
-then $G$ is updated through the (now fixed-weights) discriminators.
+One training step touches both networks. For the *discriminator* term the
+generated audio is *detached*, so $D$'s gradient never leaks into $G$. Both the
+$D$ and the $G$ gradients are computed from the *same start-of-step weights*, and
+only *then* are the two optimisers stepped — so within a step $G$ is pushed
+against the discriminator as it stood at the start, not a half-updated one. (With
+gradient accumulation, §8, these gradients are summed over several micro-batches
+before the step.)
 
-#panel(caption: [One training iteration. The order matters: $D$ first on
-detached audio, then $G$ against the updated $D$.])[
+#panel(caption: [One training iteration. Both losses are measured against the
+same start-of-step weights; the two optimisers then step together.])[
   #set align(center)
   #set text(size: 8.8pt)
   #node([sample batch of windows → forward: posterior, flow, decode a random 0.36 s segment $hat(y)$ ; take matching real segment $y$], fill: c-prior, w: 92%)
   #dn
-  #node([*① Discriminator step* — score $y$ and `detach`$(hat(y))$ across scale + 8 periods; \ $L(D) = sum_k$ LSGAN$(D_k)$; `opt_d.step`], fill: c-disc, w: 92%)
+  #node([*① Discriminator loss* — score $y$ and `detach`$(hat(y))$ across scale + 8 periods; \ $L(D) = sum_k$ LSGAN$(D_k)$ → accumulate $nabla D$], fill: c-disc, w: 92%)
   #dn
-  #node([*② Generator step* — $L_G = L_"adv" + 2 L_"fm" + 45 L_"mel" + L_"kl"$; `opt_g.step`], fill: c-dec, w: 92%)
+  #node([*② Generator loss* (against the start-of-step $D$) — $L_G = L_"adv" + 2 L_"fm" + 45 L_"mel" + L_"kl"$ → accumulate $nabla G$], fill: c-dec, w: 92%)
   #dn
-  #node([log `g`, `d`, `mel` to the live dashboard; repeat], fill: c-loss, w: 92%)
+  #node([*③ Step* — `opt_d.step` then `opt_g.step`; update the generator's EMA snapshot], fill: c-lat, w: 92%)
+  #dn
+  #node([log `g`, `d`, `mel`, `lr` to the live dashboard; repeat], fill: c-loss, w: 92%)
 ]
 
-Both optimisers are AdamW ($beta_1{=}0.8$, $beta_2{=}0.99$, lr $10^(-4)$),
-matching the reference recipe.
+Both optimisers are AdamW ($beta_1{=}0.8$, $beta_2{=}0.99$), matching the
+reference recipe, with a base learning rate of $10^(-4)$ that is *decayed over the
+run* (§8). What ships is not the raw final weights but a smoothed *exponential
+moving average* of them — also §8.
 
 == Reading the loss curves
 
@@ -535,15 +586,82 @@ they seek an equilibrium. Practical intuition:
 #block(inset: (x: 10pt))[
   #set text(size: 9.8pt)
   - *`mel_loss` is the one to watch.* It is the honest reconstruction signal and
-    *should trend down*. If it shakes around a plateau and never descends, the
-    generator is not learning the voice — most often a *data* problem (see
-    below), not a hyperparameter one.
+    *should trend down*. Some *shaking around a plateau* in the back half is
+    normal — it is the adversarial equilibrium, and the stabilisation techniques
+    of §8 (LR decay, weight EMA) exist to tame exactly that. But if it *never*
+    descends and the output is silent, suspect a *data* problem (§9), not a
+    hyperparameter one.
   - *`d_loss` near a small positive constant* (not collapsing to 0) means the
     discriminator is appropriately challenged. A `d_loss` crashing to 0 means
     $D$ has won and $G$ gets no useful gradient.
   - *`g_loss` is dominated by the $45 times$ mel term*, so it largely tracks
     `mel_loss` plus adversarial jitter.
 ]
+
+// =========================================================================
+= Training III: making training stable and reliable
+
+The recipe so far — LSGAN, feature matching, mel-L1, KL — is faithful to the
+reference. But an adversarial game trained on a *small* corpus and a *small* GPU
+is a jittery thing: with a tiny batch each step's gradient is noisy, and once $G$
+and $D$ settle into their tug-of-war the mel loss stops descending and instead
+*oscillates* around a plateau. Left alone, whatever noisy point the final step
+lands on is what gets saved. Five techniques — all optional `rvc train` flags, two
+on by default — make the outcome steadier and the saved model better. None of them
+touches the *objective*; they shape the *dynamics*.
+
+== A decaying learning-rate schedule
+
+A constant learning rate keeps taking full-size steps forever, so near the optimum
+the weights *bounce around* it instead of settling in. The remedy is to shrink the
+step as training proceeds. Here the rate decays *exponentially over the whole run*,
+$ "lr"(t) = "lr"_0 · rho^(t slash T) , $
+from $"lr"_0$ (the `--lr` base) at the first step down to $"lr"_0 · rho$ at the
+last, where $rho =$ `--lr-final` and $T$ is the total number of steps. Tying the
+schedule to the *fraction of the run completed* rather than to an epoch count
+makes it behave identically whether you train for two epochs or forty.
+
+== Averaging the weights: the EMA snapshot
+
+Even with a decaying rate the weights still wobble step to step. A cheap, standard
+trick from GAN vocoders is to keep a second, *shadow* copy of the generator that
+trails the live weights — an *exponential moving average*:
+$ theta_"ema" arrow.l d · theta_"ema" + (1 - d) · theta_"live" quad "(every step)." $
+Averaging over the recent past cancels the oscillation, so the EMA weights are
+*cleaner and less buzzy* than any single step. Two points worth stressing: the EMA
+is a *read-only snapshot* — it never feeds back into the optimiser, so it does
+*not* slow learning — and it is what gets *saved as the model* (the raw live
+weights are written beside it, so nothing is lost, and on a very short run that
+never plateaus you can prefer them). The averaging window is set as a fraction of
+the run (`--ema-frac`), so, like the LR schedule, it needs no re-tuning when the
+run length changes.
+
+== Bigger effective batches for free: gradient accumulation
+
+A 6 GB GPU forces a tiny batch, and tiny batches make noisy gradients. Gradient
+*accumulation* recovers a larger *effective* batch without more memory: run
+`--grad-accum N` micro-batches, *sum* their gradients, and step once. Peak memory
+stays that of a single micro-batch — each one's computation graph is freed after
+its backward pass — while the summed gradient is as steady as a batch $N$ times
+larger, at $N times$ the compute.
+
+== Keeping the discriminator in check
+
+If $D$ learns much faster than $G$ it starts winning outright: its gradients stop
+being informative and instead inject *buzzy, high-frequency artefacts* into the
+generator. Two knobs rebalance the game — `--d-lr-ratio` scales $D$'s learning
+rate below $G$'s, and `--d-interval` updates $D$ only every few steps — both
+handing $G$ a little room to catch up.
+
+== Weighting the data by cleanliness
+
+Finally, corpus clips are not equally clean. `--snr-weight` biases sampling toward
+the clips with a lower noise floor, weighting each by $"SNR"^alpha$. Crucially the
+score is a *signal-to-noise ratio* — a clip's loud-percentile level over its
+noise-floor level — and *not loudness*, so a soft, breathy ASMR take still scores
+high and is never penalised for being quiet. This steers away from hiss while
+keeping the very content the corpus exists to capture. (Contrast §9, which removes
+between-sentence *silence*; this weights whole clips by *noise*.)
 
 // =========================================================================
 = Where training goes wrong: data, not just model

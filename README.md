@@ -137,22 +137,26 @@ If the discriminator sidecar is missing it falls back to `--pretrained-d` (pass
 it), else the discriminator starts fresh. Note that optimizer (AdamW) momentum
 is not persisted across runs — negligible for short fine-tunes.
 
-Notes: only 48 kHz is supported today; defaults are `-e 20` epochs and `-b 2`
-(safe on a 6 GB RTX 2060). Fine-tuning a warm-started base on ~30 min of audio
-converges in a few dozen epochs — lean on early stop rather than a big `-e`.
+Notes: only 48 kHz is supported today; defaults are `-e 5` epochs and `-b 2`
+(safe on a 6 GB RTX 2060). One epoch is one pass over the corpus and can be slow
+on the native Burn/CUDA trainer — lean on early stop (`q`/Ctrl-C, which saves)
+rather than a big `-e`.
 
 **Tuning (muffled / static / shaking plateau).** The loss magnitudes match RVC
-exactly; these flags shape the training *dynamics* on a small corpus. Two are on
-by default:
+exactly; these flags shape the training *dynamics* on a small corpus. The LR
+schedule and EMA **auto-scale to the run length**, so they stay sensible at any
+`-e`. Two are on by default:
 
-- `--ema` (default `0.999`, **on**) — the **saved model is an exponential moving
-  average** of the generator weights, averaged over the adversarial oscillation
-  so it's cleaner and less staticky than the raw final step. The raw weights are
-  still written to `<out>.raw.safetensors`. `--ema 0` saves the raw weights.
-- `--lr-decay` (default `0.999` per epoch, **on**) with `--lr` (default `1e-4`) —
-  exponential LR decay. A constant LR bounces around the minimum; decay lets the
-  late-training oscillation settle. **Lower it (e.g. `0.99`)** if `mel` plateaus
-  and shakes.
+- `--ema-frac` (default `0.1`, **on**) — the **saved model is an exponential
+  moving average** of the generator weights over a window = this fraction of the
+  run, averaging out the adversarial oscillation so it's cleaner than the raw
+  final step. EMA is a *saved snapshot only* — it does **not** slow learning. The
+  raw weights are always also written to `<out>.raw.safetensors`; `--ema-frac 0`
+  saves only those.
+- `--lr-final` (default `0.1`, **on**) with `--lr` (default `1e-4`) — the LR
+  decays exponentially from `--lr` to `--lr × --lr-final` over the whole run. A
+  constant LR bounces around the minimum; decay lets the late-training oscillation
+  settle. Set `--lr-final 1.0` to disable.
 - `--grad-accum` (default `1`) — accumulate N micro-batches per optimizer step
   for an effective batch of `batch × N` at no extra VRAM (steadier gradients on a
   6 GB GPU; ~N× slower per epoch). Try `2`–`4`.
@@ -221,6 +225,18 @@ ffmpeg -i in.mp3 -f f32le -ar 16000 -ac 1 - \
   | ffmpeg -f f32le -ar 48000 -ac 1 -i - -af afftdn=nf=-25,highpass=f=60 \
       -f f32le -ar 48000 -ac 1 - \
   | ffplay -f f32le -ar 48000 -ac 1 -
+```
+
+### 4. Shell completions
+
+`rvc completions <shell>` prints a completion script (generated from the actual
+flags, so it never drifts) to stdout — `bash`, `zsh`, `fish`, `powershell`, or
+`elvish`:
+
+```sh
+rvc completions zsh  > ~/.zfunc/_rvc
+rvc completions bash > /etc/bash_completion.d/rvc
+rvc completions fish > ~/.config/fish/completions/rvc.fish
 ```
 
 ## Status
