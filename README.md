@@ -57,6 +57,36 @@ rvc convert -m models/personA.safetensors --model-sr 48000 -o out/ /tmp/a.mp3
 If the source and target sit in different pitch ranges, add e.g. `-t 2` (up) or
 `-t -3` (down) to step 2.
 
+### 0. Preprocess the corpus (recommended)
+
+`rvc train` draws random short windows uniformly across each corpus file, so
+raw recordings full of between-sentence dead-air teach the generator to output
+silence. `rvc preprocess` first slices the corpus into clean per-sentence clips
+with that dead-air removed — **without** discarding quiet content (soft, breathy
+ASMR passages are low-energy but wanted, so they are preserved by construction):
+
+```sh
+rvc preprocess raw/*.mp3 -o clips/        # or a directory: rvc preprocess raw/ -o clips/
+rvc train clips/*.wav --out models/voice --model-sr 48000 \
+  --pretrained-g models/pretrained/f0G48k.pth --pretrained-d models/pretrained/f0D48k.pth
+```
+
+Energy is used **only** to find long silent gaps between sentences: a gap is a
+cut point only when it is both below the energy floor and lasts longer than
+`--min-silence` (default 0.3 s), so a complete sentence is never split and short
+internal pauses / soft tails stay inside the clip. Two knobs tune it:
+
+- `--silence-db` (default `-40`) — the energy floor. **Lower** it (e.g. `-50`)
+  to keep the very softest passages; raise it to strip more aggressively.
+- `--min-silence` (default `0.3`) — how long a quiet gap must last to count as a
+  between-sentence cut.
+
+Other flags: `--min-clip` (drop clips shorter than, default 1 s), `--max-clip`
+(cap clip length, `0` = never split), `--pad` (edge-pad each clip with bordering
+quiet so onsets/tails aren't clipped, default 0.15 s), `--normalize` (peak-
+normalize each clip), and `--model-sr` (match your training rate). The output
+folder is inspectable — listen to a few clips before training.
+
 ### 1. Fine-tune a generator (native Rust/Burn, GPU)
 
 Training runs natively in Rust (Burn on CUDA) — no Python. Warm-start
