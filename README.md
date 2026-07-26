@@ -173,13 +173,47 @@ upstream rather than reaching for these knobs. See
 [`crates/rvc-train/ARCHITECTURE.md`](crates/rvc-train/ARCHITECTURE.md) for the
 implementation.
 
-### 2. Batch-convert files
+### 2. Export to ONNX (optional — for ONNX Runtime / cross-framework deploy)
+
+Native Burn inference needs **no export**: `rvc convert`/`serve` run a trained
+`.safetensors` directly on the GPU. Export only matters when you want to run the
+generator under **ONNX Runtime** — notably realtime `serve`, which is faster on
+ORT than the Burn (CUDA) backend today — or to deploy the model in another
+framework.
+
+`export/` is the toolkit's **only Python**: a small, self-contained `uv` project
+whose `rvc_infer.py` is a *clean-room* torch reimplementation mirroring the
+`burn-rvc` network — it does **not** depend on the RVC-Project repo.
+`export_onnx.py` loads a trained `.safetensors` and runs `torch.onnx.export`:
+
+```sh
+uv run --project export python export/export_onnx.py \
+  models/voice.safetensors models/voice.onnx
+```
+
+Then point `convert`/`serve` at the `.onnx` — the ONNX Runtime backend is chosen
+automatically by the extension (and needs `ORT_DYLIB_PATH`, see Prerequisites):
+
+```sh
+rvc convert -m models/voice.onnx --model-sr 48000 -o out/ input.mp3
+```
+
+The exported graph matches exactly what `rvc-core` feeds the generator:
+
+```
+phone[1,T,768] f32,  phone_lengths[1] i64,  pitch[1,T] i64,
+pitchf[1,T] f32,     ds[1] i64,             rnd[1,192,T] f32   →   audio[1,1,L] f32
+```
+
+Setup and details: [`export/README.md`](export/README.md).
+
+### 3. Batch-convert files
 
 ```sh
 # Burn generator (native) — pass the trained .safetensors
 rvc convert -m models/voice.safetensors --model-sr 48000 -o out/  input1.mp3 input2.mp3
 
-# ONNX Runtime generator — pass a .onnx (see the ONNX export step)
+# ONNX Runtime generator — pass a .onnx (built by the Export step above)
 rvc convert -m models/voice.onnx --model-sr 48000 -o out/  input1.mp3 input2.mp3
 ```
 
@@ -194,7 +228,7 @@ preserving soft/breathy content (breaths sit *above* the floor). For heavier
 cleanup, run the WAV through ffmpeg's adaptive denoiser instead:
 `ffmpeg -i out/input_voice.wav -af afftdn=nf=-25,highpass=f=60 clean.wav`.
 
-### 3. Realtime — a Unix filter (raw f32le PCM stdin → stdout)
+### 4. Realtime — a Unix filter (raw f32le PCM stdin → stdout)
 
 Input is mono **f32le @ 16 kHz** (the RVC analysis rate); output is mono f32le at
 the model's sample rate. ffmpeg handles capture/playback on either end:
@@ -227,7 +261,7 @@ ffmpeg -i in.mp3 -f f32le -ar 16000 -ac 1 - \
   | ffplay -f f32le -ar 48000 -ac 1 -
 ```
 
-### 4. Shell completions
+### 5. Shell completions
 
 `rvc completions <shell>` prints a completion script (generated from the actual
 flags, so it never drifts) to stdout — `bash`, `zsh`, `fish`, `powershell`, or
