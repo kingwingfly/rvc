@@ -146,9 +146,16 @@ rvc convert -m models/voice.safetensors --model-sr 48000 -o out/  input1.mp3 inp
 rvc convert -m models/voice.onnx --model-sr 48000 -o out/  input1.mp3 input2.mp3
 ```
 
-Writes `out/input1.wav`, `out/input2.wav` in the target timbre. `--backend`
+Writes `out/input1_voice.wav`, `out/input2_voice.wav` (named
+`<input>_<model>.wav`) in the target timbre. `--backend`
 (`auto`/`burn`/`onnx`) picks the generator; `auto` chooses by file extension
 (`.onnx` → ONNX Runtime, else Burn). The Burn generator runs on the GPU (CUDA).
+
+Add `--denoise` to strip steady background **hiss** from the output — a
+conservative spectral suppressor that removes the constant noise floor while
+preserving soft/breathy content (breaths sit *above* the floor). For heavier
+cleanup, run the WAV through ffmpeg's adaptive denoiser instead:
+`ffmpeg -i out/input_voice.wav -af afftdn=nf=-25,highpass=f=60 clean.wav`.
 
 ### 3. Realtime — a Unix filter (raw f32le PCM stdin → stdout)
 
@@ -171,6 +178,17 @@ ffmpeg -f alsa -i default -f f32le -ar 16000 -ac 1 - \
 through the same `Converter`. Use ONNX Runtime for realtime — the Burn (CUDA)
 generator works but is currently slower than onnx. Logs go to stderr, so
 stdout carries only PCM.
+
+`serve` also takes `--denoise` (same conservative de-hiss as `convert`, ~21 ms
+extra latency). Or denoise downstream with ffmpeg:
+
+```sh
+ffmpeg -i in.mp3 -f f32le -ar 16000 -ac 1 - \
+  | rvc serve -m models/voice.onnx --model-sr 48000 \
+  | ffmpeg -f f32le -ar 48000 -ac 1 -i - -af afftdn=nf=-25,highpass=f=60 \
+      -f f32le -ar 48000 -ac 1 - \
+  | ffplay -f f32le -ar 48000 -ac 1 -
+```
 
 ## Status
 

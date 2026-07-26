@@ -8,6 +8,17 @@
 //!   | rvc serve -m voice.onnx --model-sr 48000 \
 //!   | ffplay -f f32le -ar 48000 -ac 1 -
 //! ```
+//!
+//! Pass `--denoise` to strip steady background hiss from the output (a
+//! conservative spectral suppressor that preserves soft/breathy content). For
+//! heavier cleanup, denoise downstream with ffmpeg instead, e.g.:
+//!
+//! ```sh
+//! ... | rvc serve -m voice.onnx --model-sr 48000 \
+//!   | ffmpeg -f f32le -ar 48000 -ac 1 -i - -af afftdn=nf=-25,highpass=f=60 \
+//!       -f f32le -ar 48000 -ac 1 - \
+//!   | ffplay -f f32le -ar 48000 -ac 1 -
+//! ```
 
 use anyhow::{Context, Result};
 use futures::StreamExt;
@@ -23,6 +34,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         args.backend,
         args.transpose,
         StreamParams::realtime(),
+        args.denoise,
     )
     .await?;
     let out_sr = converter.output_sr();

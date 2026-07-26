@@ -78,6 +78,11 @@ pub struct ConvertArgs {
     /// Inference backend (default: auto by `-m` extension).
     #[arg(long, value_enum, default_value_t = InferBackend::Auto)]
     pub backend: InferBackend,
+    /// Remove steady background hiss from the output (conservative spectral
+    /// de-hiss that preserves soft/breathy content). For heavier cleanup, pipe
+    /// the WAV through `ffmpeg -af afftdn` instead.
+    #[arg(long)]
+    pub denoise: bool,
 }
 
 #[derive(Debug, Args)]
@@ -94,6 +99,11 @@ pub struct ServeArgs {
     /// (GPU/cuda) generator is currently slower than realtime for `serve`.
     #[arg(long, value_enum, default_value_t = InferBackend::Auto)]
     pub backend: InferBackend,
+    /// Remove steady background hiss from the output (conservative spectral
+    /// de-hiss that preserves soft/breathy content). Adds ~21 ms of latency. For
+    /// heavier cleanup, pipe stdout through `ffmpeg -af afftdn` instead.
+    #[arg(long)]
+    pub denoise: bool,
 }
 
 #[derive(Debug, Args)]

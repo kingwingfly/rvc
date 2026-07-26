@@ -30,6 +30,7 @@ pub async fn build_converter(
     backend: InferBackend,
     transpose: i32,
     params: StreamParams,
+    denoise: bool,
 ) -> Result<Converter> {
     let conv_params = ConvertParams { transpose };
     if use_burn_backend(backend, &opts.model) {
@@ -50,11 +51,11 @@ pub async fn build_converter(
             )
         })
         .context("failed to load Burn generator")?;
-        Ok(Converter::new(generator, params, conv_params))
+        Ok(Converter::new(generator, params, conv_params).with_denoise(denoise))
     } else {
         let cfg = build_rvc_config(opts).await?;
         let model = RvcModel::load(cfg).context("failed to load RVC models")?;
-        Ok(Converter::new(model, params, conv_params))
+        Ok(Converter::new(model, params, conv_params).with_denoise(denoise))
     }
 }
 

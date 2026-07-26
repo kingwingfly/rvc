@@ -13,6 +13,7 @@
 mod backend;
 mod config;
 mod convert;
+mod denoise;
 mod dsp;
 mod encoder;
 mod error;
@@ -36,6 +37,7 @@ pub use config::{
     RMVPE_BINS, RvcConfig,
 };
 pub use convert::{Converter, StreamParams, convert_stream};
+pub use denoise::{DenoiseParams, Denoiser};
 pub use dsp::{f0_to_coarse, shift_pitch, upsample_rows};
 pub use error::{Result, VcError};
 pub use features::{DEFAULT_CHUNK, FeatureExtractor, Features};

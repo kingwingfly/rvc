@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 
 use crate::backend::Generator;
 use crate::config::{ANALYSIS_SR, ConvertParams};
+use crate::denoise::{DenoiseParams, Denoiser};
 use crate::error::Result;
 
 /// Block/overlap parameters, expressed in 16 kHz input samples.
@@ -62,6 +63,8 @@ pub struct Converter {
     xf_out: usize,
     /// Output samples per input sample.
     ratio: f32,
+    /// Optional post de-hiss stage, applied to the emitted output stream.
+    denoiser: Option<Denoiser>,
 }
 
 impl Converter {
@@ -82,7 +85,17 @@ impl Converter {
             prev_tail: Vec::new(),
             xf_out,
             ratio,
+            denoiser: None,
         }
+    }
+
+    /// Enable the optional post de-hiss stage (off by default). See
+    /// [`crate::Denoiser`].
+    pub fn with_denoise(mut self, enabled: bool) -> Self {
+        self.denoiser = enabled.then(|| {
+            Denoiser::new(self.generator.output_sr(), DenoiseParams::default())
+        });
+        self
     }
 
     /// The generator's output sample rate.
@@ -97,6 +110,22 @@ impl Converter {
         self.buf.clear();
         self.context.clear();
         self.prev_tail.clear();
+        if let Some(d) = &mut self.denoiser {
+            d.reset();
+        }
+    }
+
+    /// Route an emitted output chunk through the optional de-hiss stage.
+    fn emit(&mut self, chunk: Samples, outs: &mut Vec<Samples>) {
+        match &mut self.denoiser {
+            Some(d) => {
+                let den = d.process(&chunk);
+                if !den.is_empty() {
+                    outs.push(den);
+                }
+            }
+            None => outs.push(chunk),
+        }
     }
 
     /// Feed input samples; returns zero or more converted output chunks.
@@ -106,23 +135,31 @@ impl Converter {
         while self.buf.len() >= self.params.block {
             let block: Vec<f32> = self.buf.drain(..self.params.block).collect();
             if let Some(chunk) = self.process_block(&block)? {
-                outs.push(chunk);
+                self.emit(chunk, &mut outs);
             }
         }
         Ok(outs)
     }
 
-    /// Flush remaining buffered input and the withheld crossfade tail.
+    /// Flush remaining buffered input, the withheld crossfade tail, and the
+    /// de-hiss stage's look-ahead.
     pub fn flush(&mut self) -> Result<Vec<Samples>> {
         let mut outs = Vec::new();
         if !self.buf.is_empty() {
             let block: Vec<f32> = std::mem::take(&mut self.buf);
             if let Some(chunk) = self.process_block(&block)? {
-                outs.push(chunk);
+                self.emit(chunk, &mut outs);
             }
         }
         if !self.prev_tail.is_empty() {
-            outs.push(std::mem::take(&mut self.prev_tail));
+            let tail = std::mem::take(&mut self.prev_tail);
+            self.emit(tail, &mut outs);
+        }
+        if let Some(d) = &mut self.denoiser {
+            let tail = d.flush();
+            if !tail.is_empty() {
+                outs.push(tail);
+            }
         }
         Ok(outs)
     }
@@ -145,10 +182,15 @@ impl Converter {
             return Ok(None);
         }
 
-        // Keep only the portion corresponding to this block (drop the context's
-        // output prefix), estimated via the sample-rate ratio.
+        // Keep this block's output (drop the context prefix) plus an extra
+        // `xf_out` samples of look-back, so this block's head OVERLAPS the
+        // previous block's withheld tail — the same output-time region the
+        // crossfade below blends. Without the overlap the two regions are merely
+        // adjacent, and blending would delete `xf_out` samples per block: ~10% of
+        // each 0.5 s realtime block (audible speed-up + seam clicks), negligible
+        // for batch's 15 s blocks. Saturates to 0 on the first block.
         let block_out = (block.len() as f32 * self.ratio).round() as usize;
-        let start = conv.len().saturating_sub(block_out);
+        let start = conv.len().saturating_sub(block_out + self.xf_out);
         let mut kept = conv[start..].to_vec();
 
         // Crossfade the head of `kept` against the previously withheld tail.
@@ -260,5 +302,66 @@ where
         while let Some(item) = out_rx.recv().await {
             yield item;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ConvertParams;
+
+    /// A stand-in generator that upsamples the input by an integer `ratio` with
+    /// sample-hold, so streaming behaviour can be checked without ONNX/GPU.
+    struct FakeGen {
+        sr: u32,
+        ratio: usize,
+    }
+
+    impl Generator for FakeGen {
+        fn output_sr(&self) -> u32 {
+            self.sr
+        }
+        fn convert_segment(&mut self, wav16k: &[f32], _p: ConvertParams) -> Result<Vec<f32>> {
+            let mut out = Vec::with_capacity(wav16k.len() * self.ratio);
+            for &s in wav16k {
+                for _ in 0..self.ratio {
+                    out.push(s);
+                }
+            }
+            Ok(out)
+        }
+    }
+
+    /// Streaming must preserve the sample-rate ratio (output length ≈
+    /// `input * ratio`). The pre-fix crossfade deleted `xf_out` samples per
+    /// block — ~10% of each realtime block (the audible speed-up).
+    #[test]
+    fn streaming_preserves_length() {
+        let ratio = 3usize; // 48 kHz out / 16 kHz in
+        let params = StreamParams::realtime();
+        let mut conv = Converter::new(
+            FakeGen {
+                sr: ANALYSIS_SR * ratio as u32,
+                ratio,
+            },
+            params,
+            ConvertParams { transpose: 0 },
+        );
+        // ~4 s of input → many realtime blocks, so any per-block loss compounds.
+        let input: Vec<f32> = (0..ANALYSIS_SR as usize * 4)
+            .map(|i| (i as f32 * 0.001).sin() * 0.5)
+            .collect();
+        let out = conv.convert_all(&input).unwrap();
+        let expected = input.len() * ratio;
+        let drift = (out.len() as isize - expected as isize).unsigned_abs();
+        // Allow one crossfade's worth of slack for edge handling.
+        assert!(
+            drift <= conv.xf_out * 2,
+            "output length {} drifted from expected {} by {} (> {})",
+            out.len(),
+            expected,
+            drift,
+            conv.xf_out * 2
+        );
     }
 }
