@@ -89,12 +89,10 @@ impl Converter {
         }
     }
 
-    /// Enable the optional post de-hiss stage (off by default). See
-    /// [`crate::Denoiser`].
-    pub fn with_denoise(mut self, enabled: bool) -> Self {
-        self.denoiser = enabled.then(|| {
-            Denoiser::new(self.generator.output_sr(), DenoiseParams::default())
-        });
+    /// Enable the optional post de-hiss stage with the given [`DenoiseParams`]
+    /// (off by default; pass `None` to leave it disabled). See [`crate::Denoiser`].
+    pub fn with_denoise(mut self, params: Option<DenoiseParams>) -> Self {
+        self.denoiser = params.map(|p| Denoiser::new(self.generator.output_sr(), p));
         self
     }
 

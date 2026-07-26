@@ -18,6 +18,9 @@ pub enum AudioError {
     /// The decoded sample format is not one we convert.
     #[error("unsupported sample format: {0:?}")]
     UnsupportedFormat(ffmpeg_next::format::Sample),
+    /// A required libavfilter filter is missing from this ffmpeg build.
+    #[error("ffmpeg filter unavailable: {0}")]
+    FilterUnavailable(&'static str),
 }
 
 /// Convenience alias used throughout the crate.

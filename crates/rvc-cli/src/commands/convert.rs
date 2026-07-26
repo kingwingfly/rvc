@@ -21,7 +21,7 @@ pub async fn run(args: ConvertArgs) -> Result<()> {
         args.backend,
         args.transpose,
         StreamParams::batch(),
-        args.denoise,
+        args.denoise.params(),
     )
     .await?;
     let model_sr = converter.output_sr();

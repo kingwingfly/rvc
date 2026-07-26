@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use rvc_core::{
-    BurnGenerator, ConvertParams, Converter, ModelPaths, RvcConfig, RvcModel, StreamParams,
+    BurnGenerator, ConvertParams, Converter, DenoiseParams, ModelPaths, RvcConfig, RvcModel,
+    StreamParams,
 };
 use rvc_hub::ModelRef;
 
@@ -30,7 +31,7 @@ pub async fn build_converter(
     backend: InferBackend,
     transpose: i32,
     params: StreamParams,
-    denoise: bool,
+    denoise: Option<DenoiseParams>,
 ) -> Result<Converter> {
     let conv_params = ConvertParams { transpose };
     if use_burn_backend(backend, &opts.model) {

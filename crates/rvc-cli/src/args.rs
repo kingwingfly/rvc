@@ -78,11 +78,8 @@ pub struct ConvertArgs {
     /// Inference backend (default: auto by `-m` extension).
     #[arg(long, value_enum, default_value_t = InferBackend::Auto)]
     pub backend: InferBackend,
-    /// Remove steady background hiss from the output (conservative spectral
-    /// de-hiss that preserves soft/breathy content). For heavier cleanup, pipe
-    /// the WAV through `ffmpeg -af afftdn` instead.
-    #[arg(long)]
-    pub denoise: bool,
+    #[command(flatten)]
+    pub denoise: DenoiseOpts,
 }
 
 #[derive(Debug, Args)]
@@ -99,11 +96,45 @@ pub struct ServeArgs {
     /// (GPU/cuda) generator is currently slower than realtime for `serve`.
     #[arg(long, value_enum, default_value_t = InferBackend::Auto)]
     pub backend: InferBackend,
-    /// Remove steady background hiss from the output (conservative spectral
-    /// de-hiss that preserves soft/breathy content). Adds ~21 ms of latency. For
-    /// heavier cleanup, pipe stdout through `ffmpeg -af afftdn` instead.
+    #[command(flatten)]
+    pub denoise: DenoiseOpts,
+}
+
+/// De-hiss options shared by `convert` and `serve`. Off unless `--denoise` is
+/// given; the tuning flags only take effect when it is. Defaults mirror
+/// [`rvc_core::DenoiseParams::default`]; `--denoise-strength` is the main knob.
+#[derive(Debug, Args, Clone)]
+pub struct DenoiseOpts {
+    /// Remove steady background hiss from the output (ffmpeg `anlmdn`
+    /// non-local-means de-noise, run in-process, tuned to preserve the soft
+    /// broadband texture of ASMR/breathy content).
     #[arg(long)]
     pub denoise: bool,
+    /// De-hiss strength: raise to remove more hiss, lower if soft/breathy
+    /// texture starts to smear. Only used with `--denoise`.
+    #[arg(long = "denoise-strength", default_value_t = 0.008)]
+    pub denoise_strength: f32,
+    /// `anlmdn` patch duration (seconds): the unit compared for self-similarity;
+    /// smaller keeps finer detail. Only used with `--denoise`.
+    #[arg(long = "denoise-patch", default_value_t = 0.002)]
+    pub denoise_patch: f32,
+    /// `anlmdn` research window (seconds): how far in time it looks for similar
+    /// patches. Must exceed the patch, and sets the de-hiss latency. Only used
+    /// with `--denoise`.
+    #[arg(long = "denoise-research", default_value_t = 0.006)]
+    pub denoise_research: f32,
+}
+
+impl DenoiseOpts {
+    /// The [`rvc_core::DenoiseParams`] these flags describe, or `None` when
+    /// `--denoise` was not passed (stage disabled).
+    pub fn params(&self) -> Option<rvc_core::DenoiseParams> {
+        self.denoise.then_some(rvc_core::DenoiseParams {
+            strength: self.denoise_strength,
+            patch_secs: self.denoise_patch,
+            research_secs: self.denoise_research,
+        })
+    }
 }
 
 #[derive(Debug, Args)]

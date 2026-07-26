@@ -8,10 +8,12 @@
 //! - [`decode`] turns mp3/wav/... files into a resampled mono `f32` stream.
 //! - [`pcm`] turns raw `f32le` stdin/stdout into/out of that same stream shape.
 //! - [`encode`] writes a stream to a float WAV file.
+//! - [`filter`] applies a streaming libavfilter chain (e.g. de-noise) in-process.
 
 pub mod decode;
 pub mod encode;
 mod error;
+pub mod filter;
 pub mod pcm;
 pub mod slice;
 
@@ -23,5 +25,6 @@ pub type Samples = Vec<f32>;
 
 pub use decode::{DecodeOptions, decode_path, decode_paths};
 pub use encode::{write_wav, write_wav_file};
+pub use filter::AudioFilter;
 pub use pcm::{read_f32le, write_f32le};
 pub use slice::{SliceOptions, slice};

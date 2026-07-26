@@ -9,9 +9,10 @@
 //!   | ffplay -f f32le -ar 48000 -ac 1 -
 //! ```
 //!
-//! Pass `--denoise` to strip steady background hiss from the output (a
-//! conservative spectral suppressor that preserves soft/breathy content). For
-//! heavier cleanup, denoise downstream with ffmpeg instead, e.g.:
+//! Pass `--denoise` to strip steady background hiss from the output — ffmpeg's
+//! `anlmdn` non-local-means de-noiser applied in-process (via libavfilter),
+//! tuned to preserve the soft broadband texture of ASMR/breathy content. For a
+//! different chain, denoise downstream with the `ffmpeg` binary instead, e.g.:
 //!
 //! ```sh
 //! ... | rvc serve -m voice.onnx --model-sr 48000 \
@@ -34,7 +35,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         args.backend,
         args.transpose,
         StreamParams::realtime(),
-        args.denoise,
+        args.denoise.params(),
     )
     .await?;
     let out_sr = converter.output_sr();

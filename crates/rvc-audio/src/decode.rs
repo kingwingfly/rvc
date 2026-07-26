@@ -20,7 +20,7 @@ use crate::error::{AudioError, Result};
 static FFMPEG_INIT: Once = Once::new();
 
 /// Ensure ffmpeg's global state is initialised exactly once per process.
-fn ensure_ffmpeg() {
+pub(crate) fn ensure_ffmpeg() {
     FFMPEG_INIT.call_once(|| {
         // Only fails if ffmpeg itself is broken; nothing sane to do but proceed.
         let _ = ffmpeg::init();
