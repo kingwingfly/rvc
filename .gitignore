@@ -1,7 +1,8 @@
 /target
 
 # OS cruft
-.DS_Store
+*DS_Store
+._*
 
 # Python (only the ONNX-export helper under export/)
 __pycache__/
