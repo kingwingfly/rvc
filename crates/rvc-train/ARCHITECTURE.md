@@ -65,21 +65,26 @@ timbre but leave `mel_loss` plateauing/oscillating in the back half — audible 
 muffled (under-resolved highs) or faintly staticky output. All are `TrainSettings`
 fields with matching `rvc train` flags; two are on by default.
 
-- **Generator weight EMA** (`--ema`, default `0.999`, **on**). The trainer keeps
-  an exponential moving average of the generator weights and **saves the EMA as
-  the model** — averaged over the adversarial oscillation, so cleaner and less
-  prone to shipping a noisy final step. The raw live weights are written
-  alongside as `<out>.raw.safetensors` (for resume/debug); `--ema 0` disables EMA
-  and saves the raw weights as `<out>`. Implemented device-side via a
-  `ModuleVisitor` that collects the live params as rank-erased
+- **Generator weight EMA** (`--ema-frac`, default `0.1`, **on**). The trainer
+  keeps an exponential moving average of the generator weights and **saves the EMA
+  as the model** — averaged over the adversarial oscillation, so cleaner and less
+  prone to shipping a noisy final step. The window is **derived from the run
+  length**: `ema_decay = 1 − 1/(ema_frac · total_steps)` (clamped ≤ 0.9999), so a
+  fraction `ema_frac` of the run is averaged regardless of epoch count. The raw
+  live weights are written alongside as `<out>.raw.safetensors` (for resume/debug);
+  `--ema-frac 0` disables EMA and saves the raw weights as `<out>`. Implemented
+  device-side via a `ModuleVisitor` that collects the live params as rank-erased
   `TensorPrimitive`s and a `ModuleMapper` that blends `keep·ema + (1-keep)·live`,
-  order-paired by traversal (no CPU round-trip, no `ParamId` dependency).
+  order-paired by traversal (no CPU round-trip, no `ParamId` dependency). EMA is a
+  *saved snapshot only* — it does not feed back into the optimizer.
 
-- **Per-epoch LR decay** (`--lr` / `--lr-decay`, default base `1e-4` × `0.999^epoch`,
-  **on**). Exponential decay applied to *both* optimizers. A constant LR bounces
-  around the minimum instead of settling into it — the decay is what lets the
-  late-training oscillation quiet down. Lower `--lr-decay` (e.g. `0.99`) for a
-  short run where the default barely moves.
+- **LR schedule** (`--lr` base, `--lr-final` end fraction, default `1e-4` → `0.1×`,
+  **on**). The LR decays **exponentially over the whole run**,
+  `cur_lr = lr · lr_final^(step/total_steps)`, applied to *both* optimizers — so it
+  is independent of the epoch count (unlike a per-epoch gamma, whose effect
+  silently depends on `-e`). A constant LR bounces around the minimum instead of
+  settling; the decay is what lets the late-training oscillation quiet down. Set
+  `--lr-final 1.0` to disable.
 
 - **Gradient accumulation** (`--grad-accum`, default `1`). Sums gradients over N
   micro-batches before one optimizer step, giving an *effective* batch of

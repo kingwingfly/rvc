@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap_complete::Shell;
 
 /// Which generator backend runs inference.
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -36,6 +37,15 @@ pub enum Command {
     Train(TrainArgs),
     /// Slice a corpus into clean per-sentence training clips (dead-air removed).
     Preprocess(PreprocessArgs),
+    /// Print a shell completion script (bash, zsh, fish, powershell, elvish).
+    Completions(CompletionsArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CompletionsArgs {
+    /// Shell to generate the completion script for.
+    #[arg(value_enum)]
+    pub shell: Shell,
 }
 
 /// Shared options for locating the three ONNX models.
@@ -208,65 +218,50 @@ pub struct TrainArgs {
     /// Corpus: one or more audio files of the target voice.
     #[arg(required = true)]
     pub data: Vec<PathBuf>,
-    /// Output path for the trained generator; a `.safetensors` file is written
-    /// at this path (deploy directly with `rvc convert`, or export to ONNX).
+    /// Output path for the trained generator (writes `<path>.safetensors`).
     #[arg(short = 'o', long, default_value = "models/voice")]
     pub out: PathBuf,
-    /// Generator output sample rate (40000 or 48000).
+    /// Generator output sample rate (48000).
     #[arg(long, default_value_t = 48000)]
     pub model_sr: u32,
-    /// Number of training epochs. Fine-tuning a warm-started base on a small
-    /// (~30 min) corpus converges in a few dozen; stop early any time with
-    /// Ctrl-C (the model is saved) or `q` in the dashboard.
-    #[arg(short = 'e', long, default_value_t = 20)]
+    /// Number of training epochs; stop early with `q` or Ctrl-C (saves).
+    #[arg(short = 'e', long, default_value_t = 5)]
     pub epochs: u32,
-    /// Mini-batch size (keep small for a 6 GB GPU; 2 is safe on an RTX 2060).
+    /// Mini-batch size (keep small for a 6 GB GPU).
     #[arg(short = 'b', long, default_value_t = 2)]
     pub batch_size: usize,
-    /// Speaker id embedded in the generator (single-speaker corpora use 0).
+    /// Speaker id embedded in the generator (single-speaker: 0).
     #[arg(long, default_value_t = 0)]
     pub speaker_id: i64,
-    /// Base AdamW learning rate (before decay).
+    /// Base AdamW learning rate.
     #[arg(long, default_value_t = 1e-4)]
     pub lr: f64,
-    /// Per-epoch exponential LR-decay factor (`lr * decay^epoch`); `1.0`
-    /// disables decay. Lower it (e.g. 0.99) if `mel_loss` plateaus and shakes
-    /// in the back half of training — a constant LR bounces around the minimum
-    /// instead of settling into it.
-    #[arg(long, default_value_t = 0.999)]
-    pub lr_decay: f64,
-    /// Generator weight EMA decay; the EMA (averaged over the adversarial
-    /// oscillation, so cleaner and less staticky) is what gets saved. `0`
-    /// disables EMA and saves the raw live weights.
-    #[arg(long, default_value_t = 0.999)]
-    pub ema: f64,
-    /// Micro-batches accumulated per optimizer step: raises the *effective*
-    /// batch size without extra VRAM (steadier gradients on a 6 GB GPU). Costs
-    /// ~N× compute per epoch. `1` = off.
+    /// End-of-run LR as a fraction of `--lr`, decayed over the whole run
+    /// (`1.0` = no decay).
+    #[arg(long, default_value_t = 0.1)]
+    pub lr_final: f64,
+    /// EMA smoothing window as a fraction of the run; the saved model is the EMA
+    /// (`0` = save the raw weights).
+    #[arg(long, default_value_t = 0.1)]
+    pub ema_frac: f64,
+    /// Micro-batches per optimizer step (effective batch = batch×N). `1` = off.
     #[arg(long, default_value_t = 1)]
     pub grad_accum: usize,
-    /// Discriminator LR multiplier vs. the generator. Set `< 1.0` (e.g. 0.5) if
-    /// the output has buzzy/high-frequency static — a symptom of the
-    /// discriminator overpowering the generator.
+    /// Discriminator LR multiplier; `<1.0` tames buzzy static.
     #[arg(long, default_value_t = 1.0)]
     pub d_lr_ratio: f64,
-    /// Update the discriminator only every N steps (`1` = every step); another
-    /// lever to rein in an over-eager discriminator.
+    /// Update the discriminator every N steps.
     #[arg(long, default_value_t = 1)]
     pub d_interval: usize,
-    /// Bias clip sampling toward cleaner recordings by `snr^alpha`, using each
-    /// clip's noise-floor SNR (never loudness), so soft/breathy ASMR passages
-    /// are preserved. `0.0` = uniform sampling.
+    /// Bias clip sampling toward cleaner clips by `snr^alpha` (noise-floor SNR,
+    /// not loudness). `0` = uniform.
     #[arg(long, default_value_t = 0.0)]
     pub snr_weight: f32,
-    /// Directory for the training log, checkpoints, and the saved weights.
+    /// Directory for the training log and saved weights.
     #[arg(long, default_value = "models/train")]
     pub work_dir: PathBuf,
-    /// Continue a previous run: resume from a generator `.safetensors` written
-    /// by an earlier `rvc train` (e.g. after Ctrl-C) instead of a pretrained
-    /// base. If a matching `<stem>.disc.safetensors` sits next to it (written
-    /// automatically), the discriminator resumes too; otherwise it falls back to
-    /// `--pretrained-d`. Conflicts with `--pretrained-g`.
+    /// Resume from a generator `.safetensors` (+ its `.disc.safetensors`
+    /// sidecar); conflicts with `--pretrained-g`.
     #[arg(
         long,
         alias = "continue",
@@ -274,29 +269,23 @@ pub struct TrainArgs {
         conflicts_with = "pretrained_g"
     )]
     pub resume: Option<PathBuf>,
-    /// Pretrained generator base (`f0G48k.pth`) to warm-start from (strongly
-    /// recommended on a small corpus). Download the `f0G48k.pth`/`f0D48k.pth`
-    /// bases from Hugging Face `lj1995/VoiceConversionWebUI`
-    /// (`assets/pretrained_v2/`) and pass their paths, e.g.
-    /// `models/pretrained/f0G48k.pth`.
+    /// Pretrained generator base (`f0G48k.pth`) to warm-start from
+    /// (HF `lj1995/VoiceConversionWebUI`).
     #[arg(long)]
     pub pretrained_g: Option<PathBuf>,
-    /// Pretrained discriminator base (`f0D48k.pth`) to warm-start from — see
-    /// `--pretrained-g` for where to get it.
+    /// Pretrained discriminator base (`f0D48k.pth`) to warm-start from.
     #[arg(long)]
     pub pretrained_d: Option<PathBuf>,
-    /// ContentVec encoder ONNX [default: auto-downloaded from Hugging Face].
+    /// ContentVec encoder ONNX [default: auto-downloaded].
     #[arg(long)]
     pub content: Option<PathBuf>,
-    /// RMVPE F0 ONNX [default: auto-downloaded from Hugging Face].
+    /// RMVPE F0 ONNX [default: auto-downloaded].
     #[arg(long)]
     pub rmvpe: Option<PathBuf>,
-    /// Cache directory for downloaded feature-extractor assets
-    /// [default: the Hugging Face cache, e.g. ~/.cache/huggingface/hub].
+    /// Cache dir for downloaded feature-extractor assets [default: HF cache].
     #[arg(long)]
     pub cache_dir: Option<PathBuf>,
-    /// Disable the interactive training dashboard (TUI) and log to stderr
-    /// instead. The TUI is auto-disabled when stderr is not a terminal.
+    /// Disable the TUI dashboard and log to stderr (auto-off when not a TTY).
     #[arg(long)]
     pub no_tui: bool,
 }
