@@ -9,4 +9,5 @@ __pycache__/
 
 # Trained + downloaded model assets, training scratch
 /models
+/dataset
 *.onnx
