@@ -25,6 +25,47 @@ pub struct Clip {
     pub gt: Vec<f32>,
     /// Number of aligned frames.
     pub frames: usize,
+    /// Noise-floor SNR (linear): the clip's loud-percentile frame RMS over its
+    /// quiet-percentile (noise-floor) frame RMS. A *ratio*, so a soft-but-clean
+    /// ASMR clip still scores high — unlike a loudness measure, which would
+    /// penalise exactly the breathy passages we want to keep. Used only for
+    /// optional SNR-weighted sampling ([`clip_weights`]).
+    pub snr: f32,
+}
+
+/// Noise-floor SNR of a model-rate waveform: loud-percentile frame RMS divided
+/// by quiet-percentile frame RMS. Frames are `HOP` samples (the training grid).
+fn frame_snr(gt: &[f32]) -> f32 {
+    let mut rms: Vec<f32> = gt
+        .chunks_exact(HOP)
+        .map(|f| (f.iter().map(|s| s * s).sum::<f32>() / HOP as f32).sqrt())
+        .collect();
+    if rms.len() < 8 {
+        return 1.0;
+    }
+    rms.sort_by(|a, b| a.total_cmp(b));
+    let pct = |p: f32| rms[((rms.len() - 1) as f32 * p) as usize];
+    let floor = pct(0.10).max(1e-6); // noise floor (quiet frames)
+    let signal = pct(0.75); // representative "loud" level
+    (signal / floor).max(1.0)
+}
+
+/// Per-clip cumulative sampling weights for `snr^alpha`, or `None` for uniform
+/// sampling (`alpha <= 0`). Returned as a cumulative distribution over clips so
+/// [`sample_batch`] can pick with one binary search.
+pub fn clip_weights(clips: &[Clip], alpha: f32) -> Option<Vec<f32>> {
+    if alpha <= 0.0 {
+        return None;
+    }
+    let mut cum = 0.0f32;
+    let cdf: Vec<f32> = clips
+        .iter()
+        .map(|c| {
+            cum += c.snr.powf(alpha);
+            cum
+        })
+        .collect();
+    (cum > 0.0).then_some(cdf)
 }
 
 /// Decode + extract features for every corpus file.
@@ -69,13 +110,15 @@ pub async fn prepare_clips(
         }
         let gt = gt[..frames * HOP].to_vec();
 
-        tracing::info!("  {}: {} frames", path.display(), frames);
+        let snr = frame_snr(&gt);
+        tracing::info!("  {}: {} frames (snr {:.1})", path.display(), frames, snr);
         clips.push(Clip {
             content: cflat,
             coarse,
             nsff0,
             gt,
             frames,
+            snr,
         });
     }
 
@@ -99,14 +142,28 @@ pub struct Batch {
 }
 
 /// Sample `batch` random `window`-frame windows from the clips.
-pub fn sample_batch(clips: &[Clip], batch: usize, window: usize, rng: &mut Rng) -> Batch {
+///
+/// `cdf`, when `Some`, is a cumulative clip-weight distribution (see
+/// [`clip_weights`]) used to bias which clip each window is drawn from; `None`
+/// samples clips uniformly. Windows within a clip are always uniform.
+pub fn sample_batch(
+    clips: &[Clip],
+    batch: usize,
+    window: usize,
+    rng: &mut Rng,
+    cdf: Option<&[f32]>,
+) -> Batch {
     let mut phone = Vec::with_capacity(batch * window * CONTENT_DIM);
     let mut coarse = Vec::with_capacity(batch * window);
     let mut nsff0 = Vec::with_capacity(batch * window);
     let mut gt = Vec::with_capacity(batch * window * HOP);
 
     for _ in 0..batch {
-        let clip = &clips[rng.below(clips.len())];
+        let idx = match cdf {
+            Some(c) => rng.weighted(c),
+            None => rng.below(clips.len()),
+        };
+        let clip = &clips[idx];
         let start = rng.below(clip.frames - window + 1);
         phone.extend_from_slice(&clip.content[start * CONTENT_DIM..(start + window) * CONTENT_DIM]);
         coarse.extend_from_slice(&clip.coarse[start..start + window]);
@@ -152,5 +209,19 @@ impl Rng {
     /// Uniform integer in `0..n`.
     pub fn below(&mut self, n: usize) -> usize {
         (self.next() % n as u64) as usize
+    }
+
+    /// Uniform `f64` in `[0, 1)`.
+    fn unit(&mut self) -> f64 {
+        (self.next() >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    /// Sample an index from a cumulative weight distribution (`cdf` ascending,
+    /// last element the total). Draws a point in `[0, total)` and returns the
+    /// first bucket whose cumulative weight exceeds it.
+    pub fn weighted(&mut self, cdf: &[f32]) -> usize {
+        let total = *cdf.last().expect("non-empty cdf") as f64;
+        let point = (self.unit() * total) as f32;
+        cdf.partition_point(|&c| c <= point).min(cdf.len() - 1)
     }
 }

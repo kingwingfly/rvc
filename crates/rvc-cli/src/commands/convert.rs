@@ -61,7 +61,10 @@ async fn write_out(
 ) -> Result<()> {
     // `{original_name}_{model_name}.wav`.
     let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
-    let model_name = model.file_stem().and_then(|s| s.to_str()).unwrap_or("model");
+    let model_name = model
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("model");
     let out_path = dir.join(format!("{stem}_{model_name}.wav"));
     let out_stream = stream::iter([Ok::<_, rvc_audio::AudioError>(out)]);
     write_wav_file(&out_path, sr, out_stream)

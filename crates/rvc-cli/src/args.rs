@@ -226,6 +226,39 @@ pub struct TrainArgs {
     /// Speaker id embedded in the generator (single-speaker corpora use 0).
     #[arg(long, default_value_t = 0)]
     pub speaker_id: i64,
+    /// Base AdamW learning rate (before decay).
+    #[arg(long, default_value_t = 1e-4)]
+    pub lr: f64,
+    /// Per-epoch exponential LR-decay factor (`lr * decay^epoch`); `1.0`
+    /// disables decay. Lower it (e.g. 0.99) if `mel_loss` plateaus and shakes
+    /// in the back half of training — a constant LR bounces around the minimum
+    /// instead of settling into it.
+    #[arg(long, default_value_t = 0.999)]
+    pub lr_decay: f64,
+    /// Generator weight EMA decay; the EMA (averaged over the adversarial
+    /// oscillation, so cleaner and less staticky) is what gets saved. `0`
+    /// disables EMA and saves the raw live weights.
+    #[arg(long, default_value_t = 0.999)]
+    pub ema: f64,
+    /// Micro-batches accumulated per optimizer step: raises the *effective*
+    /// batch size without extra VRAM (steadier gradients on a 6 GB GPU). Costs
+    /// ~N× compute per epoch. `1` = off.
+    #[arg(long, default_value_t = 1)]
+    pub grad_accum: usize,
+    /// Discriminator LR multiplier vs. the generator. Set `< 1.0` (e.g. 0.5) if
+    /// the output has buzzy/high-frequency static — a symptom of the
+    /// discriminator overpowering the generator.
+    #[arg(long, default_value_t = 1.0)]
+    pub d_lr_ratio: f64,
+    /// Update the discriminator only every N steps (`1` = every step); another
+    /// lever to rein in an over-eager discriminator.
+    #[arg(long, default_value_t = 1)]
+    pub d_interval: usize,
+    /// Bias clip sampling toward cleaner recordings by `snr^alpha`, using each
+    /// clip's noise-floor SNR (never loudness), so soft/breathy ASMR passages
+    /// are preserved. `0.0` = uniform sampling.
+    #[arg(long, default_value_t = 0.0)]
+    pub snr_weight: f32,
     /// Directory for the training log, checkpoints, and the saved weights.
     #[arg(long, default_value = "models/train")]
     pub work_dir: PathBuf,
