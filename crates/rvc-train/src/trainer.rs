@@ -169,7 +169,6 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
 
     let mut dash = Dashboard::new(
         req.settings.use_tui,
-        total_steps,
         steps_per_epoch,
         req.settings.epochs as usize,
     );

@@ -50,7 +50,6 @@ pub struct Dashboard {
     /// Burn's system probes, shown as text (`None` when the TUI is off).
     cpu: Option<(MetricId, CpuUse)>,
     gpu: Option<(MetricId, CudaMetric)>,
-    total_steps: usize,
     steps_per_epoch: usize,
     total_epochs: usize,
 }
@@ -58,12 +57,7 @@ pub struct Dashboard {
 impl Dashboard {
     /// Build the dashboard. When `enabled`, spawn Burn's TUI (it takes over the
     /// terminal) and register the metrics; otherwise this is inert.
-    pub fn new(
-        enabled: bool,
-        total_steps: usize,
-        steps_per_epoch: usize,
-        total_epochs: usize,
-    ) -> Self {
+    pub fn new(enabled: bool, steps_per_epoch: usize, total_epochs: usize) -> Self {
         let interrupter = Interrupter::new();
         let plots = vec![
             PlotMetric {
@@ -124,7 +118,6 @@ impl Dashboard {
             plots,
             cpu,
             gpu,
-            total_steps,
             steps_per_epoch,
             total_epochs,
         }
@@ -153,19 +146,27 @@ impl Dashboard {
             r.update_train(MetricState::Numeric(entry, NumericEntry::Value(v)));
         }
 
-        let epoch = (step / self.steps_per_epoch.max(1)).min(self.total_epochs.saturating_sub(1));
+        // Burn's TUI progress model expects the *local* `progress` to be the
+        // position within the current epoch and `global_progress` to be the
+        // 1-indexed epoch out of the total. Feeding it the global step counter
+        // (and a 0-indexed epoch) underflows `(epoch - 1)` in Burn's
+        // `calculate_progress`, pinning the total (yellow) bar at 100%.
+        let steps_per_epoch = self.steps_per_epoch.max(1);
+        let epoch = (step / steps_per_epoch).min(self.total_epochs.saturating_sub(1));
+        let in_epoch = Progress {
+            items_processed: step % steps_per_epoch + 1,
+            items_total: steps_per_epoch,
+        };
+        let epochs = Progress {
+            items_processed: epoch + 1,
+            items_total: self.total_epochs,
+        };
 
         // System probes: Burn's metrics ignore the item/metadata and read the
         // machine, so a placeholder metadata is fine.
         let meta = MetricMetadata {
-            progress: Progress {
-                items_processed: step + 1,
-                items_total: self.total_steps,
-            },
-            global_progress: Progress {
-                items_processed: epoch,
-                items_total: self.total_epochs,
-            },
+            progress: in_epoch.clone(),
+            global_progress: epochs.clone(),
             iteration: Some(step),
             lr: Some(lr),
         };
@@ -186,14 +187,8 @@ impl Dashboard {
 
         r.render_train(
             TrainingProgress {
-                progress: Some(Progress {
-                    items_processed: step + 1,
-                    items_total: self.total_steps,
-                }),
-                global_progress: Progress {
-                    items_processed: epoch,
-                    items_total: self.total_epochs,
-                },
+                progress: Some(in_epoch),
+                global_progress: epochs,
                 iteration: Some(step),
             },
             Vec::new(),
