@@ -97,11 +97,6 @@ impl Dashboard {
         }
     }
 
-    /// Whether the TUI is driving the display (vs. plain stderr logging).
-    pub fn is_active(&self) -> bool {
-        self.renderer.is_some()
-    }
-
     /// True once the user asked to stop early (pressed `q` in the TUI).
     pub fn interrupted(&self) -> bool {
         self.interrupter.should_stop()

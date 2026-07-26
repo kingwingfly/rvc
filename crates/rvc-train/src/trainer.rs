@@ -222,7 +222,10 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
         net_g = opt_g.step(lr, net_g, g_grads);
 
         dash.update(step, g_scalar, d_scalar, mel_scalar);
-        if !dash.is_active() && (step % 20 == 0 || step + 1 == total_steps) {
+        // Always log the losses (throttled). With the TUI, `init_logging` routes
+        // tracing to `{work_dir}/train.log` (not stderr), so this stays off the
+        // dashboard while still recording every run's curves.
+        if step % 20 == 0 || step + 1 == total_steps {
             tracing::info!(
                 "step {}/{}  g={:.3} d={:.3} mel={:.3}",
                 step,
