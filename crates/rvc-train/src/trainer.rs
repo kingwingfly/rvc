@@ -346,10 +346,22 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
     Ok(out)
 }
 
-/// Sidecar path for the discriminator checkpoint next to a generator
+/// Sidecar path for the discriminator checkpoint that pairs with a generator
 /// safetensors: `voice.safetensors` -> `voice.disc.safetensors`.
+///
+/// A run also writes the raw (non-EMA) live weights as `voice.raw.safetensors`,
+/// which is the natural thing to `--resume` from. That twin must resolve to the
+/// *same* sidecar as its EMA output, so we drop a trailing `.raw` stem first —
+/// otherwise `--resume voice.raw.safetensors` would look for the non-existent
+/// `voice.raw.disc.safetensors` and the discriminator would silently start fresh.
 fn disc_sidecar_path(generator: &std::path::Path) -> PathBuf {
-    generator.with_extension("disc.safetensors")
+    let base = match generator.file_stem().and_then(|s| s.to_str()) {
+        Some(stem) if stem.ends_with(".raw") => {
+            generator.with_file_name(&stem[..stem.len() - ".raw".len()])
+        }
+        _ => generator.to_path_buf(),
+    };
+    base.with_extension("disc.safetensors")
 }
 
 /// Extract a scalar loss value to `f32` for logging.
@@ -463,4 +475,23 @@ fn save_generator(
     };
     res.map_err(|e| anyhow!("saving {}: {e}", path.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::disc_sidecar_path;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn disc_sidecar_matches_ema_and_raw() {
+        // The EMA output and its raw twin must resolve to the *same* sidecar,
+        // so `--resume voice.raw.safetensors` finds the discriminator saved
+        // next to `voice.safetensors`.
+        let want = PathBuf::from("out/voice.disc.safetensors");
+        assert_eq!(disc_sidecar_path(Path::new("out/voice.safetensors")), want);
+        assert_eq!(
+            disc_sidecar_path(Path::new("out/voice.raw.safetensors")),
+            want
+        );
+    }
 }
