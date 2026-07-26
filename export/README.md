@@ -30,5 +30,11 @@ inputs : phone [1,T,768] f32, phone_lengths [1] i64, pitch [1,T] i64,
 output : audio [1,1,L] f32
 ```
 
+The export uses PyTorch's modern **dynamo** ONNX exporter
+(`torch.onnx.export(..., dynamo=True)` with `dynamic_shapes`), so it is
+warning-free and requires `torch>=2.7`. The sequence length `T` is a single
+shared dynamic dim across `phone`, `pitch`, `pitchf`, `rnd` (and the output
+`L`); the saved model is validated with `onnx.checker` before returning.
+
 Native Burn inference (`rvc convert --backend burn -m voice.safetensors`) needs
 no export — this is only for ONNX Runtime / cross-framework deploy.

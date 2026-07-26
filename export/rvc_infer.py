@@ -264,7 +264,10 @@ class SineGen(nn.Module):
         tmp = tmp % 1
         wrap = (tmp[:, 1:, :] - tmp[:, :-1, :]) < 0
         shift = torch.zeros_like(rad_up)
-        shift[:, 1:, :] = wrap * -1.0
+        # Cast bool→float before the scalar multiply: identical numerically
+        # (True→-1.0, False→0.0) but the dynamo ONNX exporter can't dispatch
+        # aten.mul.Scalar on a bool tensor.
+        shift[:, 1:, :] = wrap.to(rad_up.dtype) * -1.0
         sine = torch.sin(torch.cumsum(rad_up + shift, dim=1) * 2 * math.pi) * self.amp
         uv = F.interpolate((f0 > 0).float().transpose(2, 1), scale_factor=float(upp), mode="nearest").transpose(2, 1)
         noise = uv * 0.003 + (1 - uv) * self.amp / 3
