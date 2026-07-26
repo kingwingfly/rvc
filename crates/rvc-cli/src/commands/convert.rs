@@ -35,7 +35,7 @@ pub async fn run(args: ConvertArgs) -> Result<()> {
         converter.reset();
         let out = tokio::task::block_in_place(|| converter.convert_all(&wav16k))
             .with_context(|| format!("converting {}", input.display()))?;
-        write_out(&args.output_dir, input, model_sr, out).await?;
+        write_out(&args.output_dir, input, &args.models.model, model_sr, out).await?;
     }
     Ok(())
 }
@@ -54,11 +54,14 @@ async fn decode_16k(input: &std::path::Path) -> Result<Vec<f32>> {
 async fn write_out(
     dir: &std::path::Path,
     input: &std::path::Path,
+    model: &std::path::Path,
     sr: u32,
     out: Vec<f32>,
 ) -> Result<()> {
+    // `{original_name}_{model_name}.wav`.
     let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
-    let out_path = dir.join(format!("{stem}.wav"));
+    let model_name = model.file_stem().and_then(|s| s.to_str()).unwrap_or("model");
+    let out_path = dir.join(format!("{stem}_{model_name}.wav"));
     let out_stream = stream::iter([Ok::<_, rvc_audio::AudioError>(out)]);
     write_wav_file(&out_path, sr, out_stream)
         .await

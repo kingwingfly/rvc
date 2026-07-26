@@ -69,7 +69,7 @@ pub struct ConvertArgs {
     /// One or more input audio files (mp3, wav, ...).
     #[arg(required = true)]
     pub input: Vec<PathBuf>,
-    /// Directory to write converted `<stem>.wav` files into.
+    /// Directory to write converted `<stem>_<model>.wav` files into.
     #[arg(short = 'o', long, default_value = ".")]
     pub output_dir: PathBuf,
     /// Pitch shift in semitones.
