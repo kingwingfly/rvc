@@ -261,7 +261,10 @@ pub struct TrainArgs {
     #[arg(long, default_value = "models/train")]
     pub work_dir: PathBuf,
     /// Resume from a generator `.safetensors` (+ its `.disc.safetensors`
-    /// sidecar); conflicts with `--pretrained-g`.
+    /// sidecar). Pass either the EMA output or its `.raw.safetensors` twin —
+    /// the raw (non-EMA) live weights are preferred automatically when present,
+    /// as they pair faithfully with the saved discriminator. Conflicts with
+    /// `--pretrained-g`.
     #[arg(
         long,
         alias = "continue",

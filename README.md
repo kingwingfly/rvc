@@ -132,6 +132,16 @@ rvc train --out models/voice --model-sr 48000 \
   clip1.mp3 clip2.mp3 clip3.mp3
 ```
 
+You can pass either `models/voice.safetensors` (the EMA output) or its
+`models/voice.raw.safetensors` twin — when the raw twin is present it's
+**preferred automatically**. The raw (non-EMA) weights are the real last-step
+generator that co-evolved with the saved discriminator, so `raw-G ↔ live-D` is
+the faithful pairing to continue the adversarial game from; the EMA snapshot is a
+smoothed average that never itself faced the discriminator. The discriminator is
+saved once (the live one — it's training scaffolding, never deployed, so there's
+no EMA variant), and both the EMA and raw generator paths resolve to that same
+`.disc.safetensors` sidecar.
+
 `--resume` conflicts with `--pretrained-g` (the checkpoint replaces the base).
 If the discriminator sidecar is missing it falls back to `--pretrained-d` (pass
 it), else the discriminator starts fresh. Note that optimizer (AdamW) momentum

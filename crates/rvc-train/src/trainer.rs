@@ -41,10 +41,22 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
 
     // ---- Generator: resume a prior run, else warm-start, else scratch -------
     let mut net_g = Synthesizer::<AB>::new(&cfg, &device);
-    if let Some(p) = &req.resume {
-        // Resume from a generator .safetensors written by an earlier run.
+    if let Some(requested) = &req.resume {
+        // Resume from a generator .safetensors written by an earlier run,
+        // preferring the raw (non-EMA) live twin when it exists: it's the actual
+        // last-step generator that co-evolved with the saved discriminator, so
+        // `raw-G <-> live-D` is the faithful GAN-resume pairing (the EMA snapshot
+        // is a smoothed average that never itself faced D).
+        let p = prefer_raw_twin(requested);
+        if p != *requested {
+            tracing::info!(
+                "resume: preferring raw live weights {} over the EMA snapshot {}",
+                p.display(),
+                requested.display()
+            );
+        }
         let res = net_g
-            .load_weights(p)
+            .load_weights(&p)
             .map_err(|e| anyhow!("resuming G from {}: {e}", p.display()))?;
         anyhow::ensure!(
             res.missing.is_empty(),
@@ -364,6 +376,28 @@ fn disc_sidecar_path(generator: &std::path::Path) -> PathBuf {
     base.with_extension("disc.safetensors")
 }
 
+/// Resolve which generator to actually resume from, preferring the raw
+/// (non-EMA) live twin when it exists: `voice.safetensors` -> the sibling
+/// `voice.raw.safetensors`, if present. The raw weights are the real last-step
+/// generator that co-evolved with the saved discriminator, so `raw-G <-> live-D`
+/// is the faithful GAN-resume pairing. A path that is already the raw twin (or
+/// has no sibling twin) is returned unchanged.
+fn prefer_raw_twin(resume: &std::path::Path) -> PathBuf {
+    let already_raw = resume
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .is_some_and(|stem| stem.ends_with(".raw"));
+    if already_raw {
+        return resume.to_path_buf();
+    }
+    let raw = resume.with_extension("raw.safetensors");
+    if raw.exists() {
+        raw
+    } else {
+        resume.to_path_buf()
+    }
+}
+
 /// Extract a scalar loss value to `f32` for logging.
 fn scalar(t: &Tensor<AB, 1>) -> f32 {
     t.clone()
@@ -479,7 +513,7 @@ fn save_generator(
 
 #[cfg(test)]
 mod tests {
-    use super::disc_sidecar_path;
+    use super::{disc_sidecar_path, prefer_raw_twin};
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -493,5 +527,24 @@ mod tests {
             disc_sidecar_path(Path::new("out/voice.raw.safetensors")),
             want
         );
+    }
+
+    #[test]
+    fn prefer_raw_twin_switches_only_when_twin_exists() {
+        let dir = std::env::temp_dir().join(format!("rvc-twin-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ema = dir.join("voice.safetensors");
+        let raw = dir.join("voice.raw.safetensors");
+
+        // No raw twin yet: resuming from the EMA path stays put.
+        assert_eq!(prefer_raw_twin(&ema), ema);
+
+        // Once the raw twin exists, the EMA path resolves to it...
+        std::fs::write(&raw, b"x").unwrap();
+        assert_eq!(prefer_raw_twin(&ema), raw);
+        // ...while an already-raw path is returned unchanged (no double `.raw`).
+        assert_eq!(prefer_raw_twin(&raw), raw);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
