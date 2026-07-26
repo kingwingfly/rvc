@@ -29,6 +29,31 @@ pub struct TrainSettings {
     pub batch_size: usize,
     /// Speaker id embedded in the generator.
     pub speaker_id: i64,
+    /// Base learning rate (AdamW), before decay.
+    pub lr: f64,
+    /// Per-epoch exponential LR decay factor (`lr_epoch = lr * decay^epoch`).
+    /// `1.0` disables decay; smaller settles the late-training oscillation that
+    /// keeps `mel_loss` shaking on a constant LR.
+    pub lr_decay: f64,
+    /// Generator weight EMA decay (`ema = decay*ema + (1-decay)*g` each step).
+    /// The EMA weights — averaged over the adversarial oscillation, so cleaner
+    /// and less staticky — are what gets saved. `0.0` disables EMA (save the raw
+    /// live weights instead).
+    pub ema_decay: f64,
+    /// Micro-batches accumulated per optimizer step. Raises the *effective*
+    /// batch size without extra VRAM (more stable gradients on a small GPU).
+    /// `1` = plain batching.
+    pub grad_accum: usize,
+    /// Discriminator LR multiplier relative to the generator. `< 1.0` weakens an
+    /// over-eager discriminator whose gradients inject high-frequency buzz.
+    pub d_lr_ratio: f64,
+    /// Update the discriminator only every N steps (`1` = every step). Another
+    /// lever to stop the discriminator overpowering the generator.
+    pub d_interval: usize,
+    /// SNR-based clip-sampling bias (`0.0` = uniform). Weights each clip by
+    /// `snr^alpha` (noise-floor SNR, **not** loudness) so cleaner clips are drawn
+    /// more often while soft/breathy passages are preserved.
+    pub snr_weight: f32,
     /// Show Burn's interactive TUI dashboard (the caller must have routed logs
     /// off stderr; disable for non-TTY output).
     pub use_tui: bool,

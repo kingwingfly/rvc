@@ -38,8 +38,12 @@ produces the `phone/phone_lengths/pitch/pitchf/ds/rnd → audio` graph that
 
    **Dashboard & early stop.** On a TTY, `dashboard.rs` drives Burn's
    `TuiMetricsRendererWrapper` directly (our GAN loop doesn't fit Burn's
-   `Learner`): it registers the `g`/`d`/`mel` losses once and pushes a value +
-   progress each step. The renderer shares a Burn `Interrupter` — pressing `q`
+   `Learner`): it registers the metrics once and pushes values + progress each
+   step. Plotted (numeric) metrics are the `g`/`d`/`mel` losses **and the
+   learning rate**; CPU and GPU usage are shown as text lines (reusing Burn's own
+   `CpuUse`/`CudaMetric` system probes, behind the `metrics` feature — NVML for
+   the GPU, so `<used>/<total> Gb`, utilisation, and power). The renderer shares a
+   Burn `Interrupter` — pressing `q`
    flips it and the loop stops and saves. Off-TTY (or `--no-tui`), it logs to
    stderr and **Ctrl-C** (a SIGINT flag threaded through `TrainRequest.stop`)
    stops and saves. When the TUI is on, the CLI routes `tracing` logs to
@@ -52,6 +56,54 @@ produces the `phone/phone_lengths/pitch/pitchf/ds/rnd → audio` graph that
    - Target GPU is 6 GB (RTX 2060) → small batch (≈4), fp16 where stable.
    - Backend: `burn` with the cuda backend at train time; keep the
      model generic over `burn::tensor::backend::Backend`.
+
+### Training-stability controls
+
+The loss *magnitudes* match RVC exactly; these knobs shape the training
+*dynamics* on a small corpus, where a constant-LR GAN tends to converge the
+timbre but leave `mel_loss` plateauing/oscillating in the back half — audible as
+muffled (under-resolved highs) or faintly staticky output. All are `TrainSettings`
+fields with matching `rvc train` flags; two are on by default.
+
+- **Generator weight EMA** (`--ema`, default `0.999`, **on**). The trainer keeps
+  an exponential moving average of the generator weights and **saves the EMA as
+  the model** — averaged over the adversarial oscillation, so cleaner and less
+  prone to shipping a noisy final step. The raw live weights are written
+  alongside as `<out>.raw.safetensors` (for resume/debug); `--ema 0` disables EMA
+  and saves the raw weights as `<out>`. Implemented device-side via a
+  `ModuleVisitor` that collects the live params as rank-erased
+  `TensorPrimitive`s and a `ModuleMapper` that blends `keep·ema + (1-keep)·live`,
+  order-paired by traversal (no CPU round-trip, no `ParamId` dependency).
+
+- **Per-epoch LR decay** (`--lr` / `--lr-decay`, default base `1e-4` × `0.999^epoch`,
+  **on**). Exponential decay applied to *both* optimizers. A constant LR bounces
+  around the minimum instead of settling into it — the decay is what lets the
+  late-training oscillation quiet down. Lower `--lr-decay` (e.g. `0.99`) for a
+  short run where the default barely moves.
+
+- **Gradient accumulation** (`--grad-accum`, default `1`). Sums gradients over N
+  micro-batches before one optimizer step, giving an *effective* batch of
+  `batch × N` at single-micro-batch VRAM (each micro-batch's graph is freed after
+  its backward). Costs ~N× compute per epoch. Accumulation is a `ModuleVisitor`
+  that adds `incoming · (1/N)` into a running `GradientsParams`, matched by
+  `ParamId`; gradients live on the inner (non-autodiff) backend.
+
+- **Discriminator balancing** (`--d-lr-ratio`, `--d-interval`, both no-op by
+  default). If the output has buzzy/high-frequency static — the discriminator
+  overpowering the generator — weaken D with `--d-lr-ratio 0.5` (scales D's LR)
+  or `--d-interval 2` (updates D every other step). Skipped D steps carry the
+  previous `d` loss forward on the dashboard.
+
+- **SNR clip weighting** (`--snr-weight`, default `0.0` = uniform). Biases which
+  clip each training window is drawn from by `snr^alpha`, where `snr` is each
+  clip's **noise-floor SNR** — p75 frame-RMS over p10 frame-RMS (a *ratio*, never
+  absolute loudness), so a soft-but-clean ASMR clip still scores high and the
+  breathy passages the slicer works to preserve are not penalised. `frame_snr`
+  and the cumulative-weight sampling live in `dataset.rs`.
+
+Only the final model is written: `<out>.safetensors` (the EMA when enabled) plus
+`<out>.raw.safetensors` and the `<out>.disc.safetensors` sidecar — there is no
+periodic-checkpoint machinery.
 
 3. **ONNX export** — the one allowed Python step, kept **minimal and standalone**.
    A small self-contained `uv` project (~one torch file) defines the inference

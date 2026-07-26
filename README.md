@@ -100,21 +100,26 @@ rvc train --out models/voice --model-sr 48000 \
   clip1.mp3 clip2.mp3 clip3.mp3
 ```
 
-This writes the generator to `models/voice.safetensors` and, next to it, the
-discriminator checkpoint `models/voice.disc.safetensors` (the sidecar that makes
-`--resume` below resume the adversary too). The shared ContentVec + RMVPE ONNX
-assets (training features + inference) download automatically, or prefetch them:
+This writes the generator to `models/voice.safetensors` (the EMA weights — see
+**Tuning**), the raw final weights to `models/voice.raw.safetensors`, and the
+discriminator sidecar `models/voice.disc.safetensors` (which makes `--resume`
+below resume the adversary too). Only the final model is written — no
+periodic-checkpoint clutter. The shared ContentVec + RMVPE ONNX assets (training
+features + inference) download automatically, or prefetch them:
 
 ```sh
 rvc models download
 ```
 
 **Dashboard & early stop.** On a terminal, training shows Burn's live TUI
-dashboard (loss plots + progress); logs go to `{save-dir}/train/train.log`. 
-Press `q` to stop early — the model is saved. Without a TTY
-(or with `--no-tui`), it logs `g`/`d`/`mel` to stderr and **Ctrl-C** stops and
-saves. Watch **`mel`** for quality — it should fall and plateau; `g`/`d` are
-adversarial and just stay balanced.
+dashboard; logs go to `{save-dir}/train/train.log`. It plots the `g`/`d`/`mel`
+losses **and the learning rate**, and shows **CPU and GPU usage** (GPU memory,
+utilisation, and power via NVML) as text. Press `q` to stop early — the model is
+saved. Without a TTY (or with `--no-tui`), it logs `g`/`d`/`mel`/`lr` to stderr
+and **Ctrl-C** stops and saves. Watch **`mel`** for quality — it should fall then
+plateau; `g`/`d` are adversarial and just stay balanced. A `mel` that plateaus
+*and oscillates* in the back half is normal for a GAN, but see **Tuning** below
+if the audio is muffled or staticky.
 
 **Resume a run (`--resume`).** Stopped early and want to keep going? Point
 `--resume` (alias `--continue`) at the generator `.safetensors` from the earlier
@@ -135,6 +140,34 @@ is not persisted across runs — negligible for short fine-tunes.
 Notes: only 48 kHz is supported today; defaults are `-e 20` epochs and `-b 2`
 (safe on a 6 GB RTX 2060). Fine-tuning a warm-started base on ~30 min of audio
 converges in a few dozen epochs — lean on early stop rather than a big `-e`.
+
+**Tuning (muffled / static / shaking plateau).** The loss magnitudes match RVC
+exactly; these flags shape the training *dynamics* on a small corpus. Two are on
+by default:
+
+- `--ema` (default `0.999`, **on**) — the **saved model is an exponential moving
+  average** of the generator weights, averaged over the adversarial oscillation
+  so it's cleaner and less staticky than the raw final step. The raw weights are
+  still written to `<out>.raw.safetensors`. `--ema 0` saves the raw weights.
+- `--lr-decay` (default `0.999` per epoch, **on**) with `--lr` (default `1e-4`) —
+  exponential LR decay. A constant LR bounces around the minimum; decay lets the
+  late-training oscillation settle. **Lower it (e.g. `0.99`)** if `mel` plateaus
+  and shakes.
+- `--grad-accum` (default `1`) — accumulate N micro-batches per optimizer step
+  for an effective batch of `batch × N` at no extra VRAM (steadier gradients on a
+  6 GB GPU; ~N× slower per epoch). Try `2`–`4`.
+- `--d-lr-ratio` (default `1.0`) / `--d-interval` (default `1`) — rein in an
+  over-eager discriminator if the output has **buzzy, high-frequency static**:
+  set `--d-lr-ratio 0.5` or `--d-interval 2`.
+- `--snr-weight` (default `0.0` = uniform) — bias sampling toward cleaner clips by
+  `snr^alpha`, using each clip's **noise-floor SNR (not loudness)**, so soft/breathy
+  ASMR passages are preserved.
+
+If the static is a steady hiss rather than buzz, it may be baked into the corpus
+(the generator faithfully reproduces recorded hiss); de-hiss the *training* audio
+upstream rather than reaching for these knobs. See
+[`crates/rvc-train/ARCHITECTURE.md`](crates/rvc-train/ARCHITECTURE.md) for the
+implementation.
 
 ### 2. Batch-convert files
 

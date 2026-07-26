@@ -15,4 +15,6 @@ tokio = { workspace = true }
 futures.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
-burn = { version = "0.21", default-features = false, features = ["std", "autodiff", "cuda", "train", "tui"] }
+# `metrics` enables burn-train's sys-metrics (CPU via sysinfo, GPU via NVML) for
+# the dashboard's CPU/GPU usage lines.
+burn = { version = "0.21", default-features = false, features = ["std", "autodiff", "cuda", "train", "tui", "metrics"] }
