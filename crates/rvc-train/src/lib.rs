@@ -185,7 +185,8 @@ fn resolve_backend(req: &TrainRequest) -> Result<TrainBackend> {
         );
     }
     let backend = match req.backend {
-        TrainBackend::Auto => auto_backend(req.devices[0]),
+        TrainBackend::Auto if rvc_core::auto_prefers_libtorch() => TrainBackend::LibTorch,
+        TrainBackend::Auto => TrainBackend::Cuda,
         explicit => explicit,
     };
     Ok(backend)
@@ -249,15 +250,6 @@ fn dispatch(req: &TrainRequest, clips: Vec<dataset::Clip>) -> Result<PathBuf> {
             "this build has no `{other}` training backend \
              (rebuild with `--features {other}`)"
         ),
-    }
-}
-
-/// Resolve `Auto` to a backend that is both compiled in and usable.
-fn auto_backend(_spec: DeviceSpec) -> TrainBackend {
-    if rvc_core::auto_prefers_libtorch() {
-        TrainBackend::LibTorch
-    } else {
-        TrainBackend::Cuda
     }
 }
 

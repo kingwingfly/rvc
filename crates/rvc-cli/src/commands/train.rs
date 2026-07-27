@@ -88,7 +88,7 @@ pub async fn run(args: TrainArgs) -> Result<()> {
         .context("training task panicked")??;
 
     // Print to stderr so it's visible even in TUI mode (logs went to a file).
-    tracing::info!("training complete; generator written to {}", out.display());
-    eprintln!("training complete; generator written to {}", out.display());
+    // stdout, not the log: this is the one line a caller may want to pipe.
+    println!("{}", out.display());
     Ok(())
 }

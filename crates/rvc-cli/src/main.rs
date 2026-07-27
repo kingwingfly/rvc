@@ -38,6 +38,17 @@ async fn main() -> Result<()> {
 /// Initialise tracing. Normally logs to stderr (keeping stdout clean for piped
 /// PCM). For `train` with the dashboard (a TTY and no `--no-tui`), the TUI owns
 /// the terminal, so logs are redirected to `{work_dir}/train.log` instead.
+/// `mm:ss` since start. `tracing_subscriber`'s own uptime timer prints
+/// nanoseconds, which is 12 columns of noise in front of every line.
+struct Elapsed(std::time::Instant);
+
+impl tracing_subscriber::fmt::time::FormatTime for Elapsed {
+    fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
+        let s = self.0.elapsed().as_secs();
+        write!(w, "{:02}:{:02}", s / 60, s % 60)
+    }
+}
+
 fn init_logging(command: &Command) {
     // App logs at `info`, but drop `ort`'s chatty INFO (per-tensor allocation /
     // static-memory-planning spam) to `warn`. Override the whole thing with
@@ -66,8 +77,13 @@ fn init_logging(command: &Command) {
         }
     }
 
+    // Compact on stderr: this is read by a person watching a run, not grepped for
+    // module paths, and elapsed time answers "how long has this been going" better
+    // than a wall-clock date that never changes mid-run.
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(filter)
+        .with_target(false)
+        .with_timer(Elapsed(std::time::Instant::now()))
         .init();
 }

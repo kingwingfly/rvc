@@ -111,7 +111,7 @@ pub async fn prepare_clips(
         let gt = gt[..frames * HOP].to_vec();
 
         let snr = frame_snr(&gt);
-        tracing::info!("  {}: {} frames (snr {:.1})", path.display(), frames, snr);
+        tracing::debug!("  {}: {} frames (snr {:.1})", path.display(), frames, snr);
         clips.push(Clip {
             content: cflat,
             coarse,
@@ -125,6 +125,22 @@ pub async fn prepare_clips(
     anyhow::ensure!(
         !clips.is_empty(),
         "no usable training clips (need >= {min_frames} frames each)"
+    );
+
+    let frames: usize = clips.iter().map(|c| c.frames).sum();
+    let mut snrs: Vec<f32> = clips.iter().map(|c| c.snr).collect();
+    snrs.sort_by(f32::total_cmp);
+    tracing::info!(
+        "corpus: {} clips, {:.1} min audio, snr {:.0}/{:.0}/{:.0} dB (min/median/max){}",
+        clips.len(),
+        (frames * HOP) as f64 / 16_000.0 / 60.0,
+        snrs[0],
+        snrs[snrs.len() / 2],
+        snrs[snrs.len() - 1],
+        match data.len() - clips.len() {
+            0 => String::new(),
+            n => format!("; {n} skipped as too short"),
+        }
     );
     Ok(clips)
 }

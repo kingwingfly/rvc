@@ -43,7 +43,17 @@ impl<B: Backend> DiscriminatorS<B> {
 
     /// `x`: `[batch, 1, time]` → (`score [batch, L]`, feature maps).
     pub fn forward(&self, mut x: Tensor<B, 3>) -> (Tensor<B, 2>, Vec<Tensor<B, 3>>) {
-        x = align_for_scale(x);
+        // Reflect-pad up to a length the whole conv chain divides evenly. Each
+        // `k=41, s=4` layer consumes its input exactly only when `len % 4 == 1`,
+        // so four of them need `len % 256 == 1`. A ragged length works forward,
+        // but burn 0.21's autodiff then hands LibTorch a weight gradient one
+        // kernel too long and it aborts — this is what lets `--backend tch`
+        // train. Costs <1% of a segment and changes no weight shapes.
+        let t = x.dims()[2];
+        let pad = (1 + SCALE_ALIGN - t % SCALE_ALIGN) % SCALE_ALIGN;
+        if pad > 0 && pad < t {
+            x = reflect_pad_last(x, pad);
+        }
         let mut fmap = Vec::with_capacity(self.convs.len() + 1);
         for conv in &self.convs {
             x = leaky_relu(conv.forward(x), LRELU_SLOPE);
@@ -107,28 +117,8 @@ impl<B: Backend> DiscriminatorP<B> {
     }
 }
 
-/// Product of the strides of the four `k=41, s=4` convolutions below.
-///
-/// Each consumes its input exactly only when `len % 4 == 1`, and chaining that
-/// through all four requires `len % 256 == 1`.
-const SCALE_STRIDE_PRODUCT: usize = 4 * 4 * 4 * 4;
-
-/// Reflect-pad `x` up to the next length the whole conv chain divides evenly.
-///
-/// A ragged length works fine forward, but its *backward* is where backends
-/// disagree: burn 0.21's autodiff hands LibTorch a weight gradient one kernel too
-/// long and it aborts, which is what stops `--backend tch` from training. Aligning
-/// here fixes it for every backend at once, costs <1% of a training segment, and
-/// leaves weight shapes — so pretrained warm-start — untouched.
-fn align_for_scale<B: Backend>(x: Tensor<B, 3>) -> Tensor<B, 3> {
-    let t = x.dims()[2];
-    // Smallest `n` with `(t + n) % 256 == 1`.
-    let n = (1 + SCALE_STRIDE_PRODUCT - t % SCALE_STRIDE_PRODUCT) % SCALE_STRIDE_PRODUCT;
-    if n == 0 || n >= t {
-        return x;
-    }
-    reflect_pad_last(x, n)
-}
+/// Product of the strides of `DiscriminatorS`'s four `k=41, s=4` convolutions.
+const SCALE_ALIGN: usize = 4 * 4 * 4 * 4;
 
 /// Reflect-pad the last dim of a `[b, c, t]` tensor by `n` (numpy `reflect`:
 /// mirror without repeating the edge sample).

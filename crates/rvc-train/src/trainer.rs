@@ -149,23 +149,25 @@ pub fn run<AB: AutodiffBackend>(
     // Clip-sampling bias (None = uniform); computed once from each clip's SNR.
     let cdf = clip_weights(&clips, req.settings.snr_weight);
     tracing::info!(
-        "training: {} clips, batch {}x{} accum, {} steps/epoch, {} epochs -> {} steps; \
-         lr {:.1e}->{:.1e} (final {}x), ema window {:.0} steps (decay {:.4}), \
-         d-lr-ratio {} interval {}, snr-weight {}",
-        clips.len(),
-        batch,
-        accum,
-        steps_per_epoch,
+        "run:   {total_steps} steps ({} epochs x {steps_per_epoch}), batch {batch}{}",
         req.settings.epochs,
-        total_steps,
-        base_lr,
+        match accum {
+            1 => String::new(),
+            n => format!(" x{n} accum"),
+        }
+    );
+    tracing::info!(
+        "sched: lr {base_lr:.1e} -> {:.1e}, ema over {:.0} steps{}{}",
         base_lr * lr_final,
-        lr_final,
         ema_window.max(0.0),
-        ema_decay,
-        d_lr_ratio,
-        d_interval,
-        req.settings.snr_weight,
+        match d_lr_ratio {
+            r if (r - 1.0).abs() < f64::EPSILON => String::new(),
+            r => format!(", d-lr x{r}"),
+        },
+        match d_interval {
+            1 => String::new(),
+            n => format!(", d every {n} steps"),
+        }
     );
 
     let mut rng = Rng::new(0x51D_u64.wrapping_mul(req.settings.epochs as u64 + 1));
@@ -213,6 +215,7 @@ pub fn run<AB: AutodiffBackend>(
         req.settings.epochs as usize,
     );
 
+    let started = std::time::Instant::now();
     let mut stopped_early = false;
     let mut last_d = 0.0f32; // carried across steps that skip the D update
     let mut last_step = 0usize; // the last step actually executed, for the tail window
@@ -318,14 +321,14 @@ pub fn run<AB: AutodiffBackend>(
         // tracing to `{work_dir}/train.log` (not stderr), so this stays off the
         // dashboard while still recording every run's curves.
         if step % 20 == 0 || step + 1 == total_steps {
+            let done = step + 1;
+            let per_step = started.elapsed().as_secs_f64() / done as f64;
+            let eta = std::time::Duration::from_secs_f64(per_step * (total_steps - done) as f64);
             tracing::info!(
-                "step {}/{}  lr={:.2e} g={:.3} d={:.3} mel={:.3}",
-                step,
-                total_steps,
-                cur_lr,
-                g_scalar,
-                last_d,
-                mel_scalar
+                "{done:>5}/{total_steps} {:>3}%  g {g_scalar:7.3}  d {last_d:6.3}  \
+                 mel {mel_scalar:7.3}  lr {cur_lr:.1e}  eta {}",
+                done * 100 / total_steps.max(1),
+                human(eta),
             );
         }
 
@@ -373,16 +376,27 @@ pub fn run<AB: AutodiffBackend>(
 
     out.save(ema.as_ref(), &net_g.valid(), &disc.valid())
         .context("saving trained weights")?;
+    tracing::info!(
+        "done:  {} steps in {}{}",
+        last_step + 1,
+        human(started.elapsed()),
+        if stopped_early {
+            " (stopped early)"
+        } else {
+            ""
+        }
+    );
+    tracing::info!("       weights -> {}", out.generator().display());
     if let Some(ck) = &best {
         match best_step {
             Some(step) => tracing::info!(
-                "best checkpoint (mel {best_mel:.3}, step {step}): {}",
+                "       best mel {best_mel:.3} (step {step}) -> {}",
                 ck.generator().display()
             ),
             // A run that contributes no best is invisible otherwise: say plainly
             // that this one added nothing, and whether anything is there at all.
             None if best_mel.is_finite() => tracing::info!(
-                "no new best this run; keeping mel {best_mel:.3} in {}",
+                "       no new best this run; kept mel {best_mel:.3} in {}",
                 ck.generator().display()
             ),
             None => tracing::warn!(
@@ -409,9 +423,9 @@ fn keep_best<AB: AutodiffBackend>(
     if mean.is_nan() || mean >= *best {
         return false;
     }
-    tracing::info!("new best mel {mean:.3} (step {step})");
     match ck.save(ema, &net_g.valid(), &disc.valid()) {
         Ok(()) => {
+            tracing::info!("       best mel {mean:.3} (step {step}) saved");
             *best = mean;
             if let Err(e) = ck.save_meta(BestMeta { mel: mean, step }) {
                 // The weights are the checkpoint; losing the score only costs the
@@ -533,6 +547,16 @@ fn micro_step<AB: AutodiffBackend>(input: MicroIn<'_, AB>) -> MicroOut {
         d,
         g_grads: GradientsParams::from_grads(g_loss.backward(), net_g),
         d_grads,
+    }
+}
+
+/// `1h02m`, `7m30s`, `45s` — short enough to sit inside a progress line.
+fn human(d: std::time::Duration) -> String {
+    let s = d.as_secs();
+    match (s / 3600, (s % 3600) / 60, s % 60) {
+        (0, 0, s) => format!("{s}s"),
+        (0, m, s) => format!("{m}m{s:02}s"),
+        (h, m, _) => format!("{h}h{m:02}m"),
     }
 }
 

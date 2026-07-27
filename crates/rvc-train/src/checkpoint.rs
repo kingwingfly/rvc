@@ -152,7 +152,7 @@ impl Checkpoint {
         }
         let d = self.disc();
         disc.save_safetensors(&d).map_err(|e| failed(&d, e))?;
-        tracing::info!(
+        tracing::debug!(
             "saved {} in {:.1}s",
             g.display(),
             started.elapsed().as_secs_f32()

@@ -1,9 +1,8 @@
-//! Fail the `tch` build early when LibTorch isn't configured.
+//! Fail the `tch` build early, and helpfully, when LibTorch isn't configured.
 //!
 //! `burn-tch` pulls `tch` with `download-libtorch` on, and cargo features are
 //! additive, so we can't switch it off. Left alone it silently downloads a
-//! **CPU-only** LibTorch and every conversion quietly runs on the CPU. Better to
-//! stop and name the variable.
+//! **CPU-only** LibTorch and every conversion quietly runs on the CPU.
 
 use std::path::{Path, PathBuf};
 
@@ -23,16 +22,37 @@ fn main() {
         return;
     }
 
-    let Some(root) = std::env::var_os("LIBTORCH").map(PathBuf::from).or_else(|| {
-        Path::new("/usr/lib/libtorch.so")
-            .exists()
-            .then(|| "/usr".into())
-    }) else {
-        panic!("{MISSING}");
+    // `crates/rvc-core` -> the workspace root, where a downloaded ./libtorch lands.
+    let project_root = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap())
+        .join("../..")
+        .canonicalize()
+        .unwrap_or_default();
+    let in_project = project_root.join("libtorch");
+
+    let Some(root) = std::env::var_os("LIBTORCH")
+        .map(PathBuf::from)
+        // torch-sys only looks at LIBTORCH and /usr, so a project-root install
+        // can't be picked up silently — but we can say so precisely.
+        .or_else(|| in_project.join("lib").is_dir().then(|| in_project.clone()))
+        .or_else(|| {
+            Path::new("/usr/lib/libtorch.so")
+                .exists()
+                .then(|| "/usr".into())
+        })
+    else {
+        panic!("{}", not_found());
     };
 
-    // Advisory only: torch-sys is the authority on what it can use, and an
-    // unfamiliar layout isn't proof of a broken install.
+    if std::env::var_os("LIBTORCH").is_none() && root == in_project {
+        panic!(
+            "Found LibTorch at {}, but the build cannot use it until you say so:\n\n  \
+             export LIBTORCH={}\n",
+            root.display(),
+            root.display()
+        );
+    }
+
+    // Advisory from here down: torch-sys is the authority on what it can use.
     if let Ok(v) = std::fs::read_to_string(root.join("build-version")) {
         let v = v.trim();
         if v.split_once('+').map_or(v, |(v, _)| v) != WANT_VERSION {
@@ -51,16 +71,21 @@ fn main() {
     }
 }
 
-const MISSING: &str = "\
-LibTorch not found, and the `tch` backend needs it. Download it once (~3 GB,
-CUDA-specific, so the choice is yours) and point LIBTORCH at it:
+fn not_found() -> String {
+    format!(
+        "LibTorch not found, and the `tch` backend needs it. It is ~3 GB and
+CUDA-specific, so rvc never downloads it for you:
 
-  wget https://download.pytorch.org/libtorch/cu126/libtorch-shared-with-deps-2.9.0%2Bcu126.zip
-  unzip libtorch-shared-with-deps-2.9.0+cu126.zip     # -> ./libtorch
+  wget https://download.pytorch.org/libtorch/cu126/libtorch-shared-with-deps-{WANT_VERSION}%2Bcu126.zip
+  unzip libtorch-shared-with-deps-{WANT_VERSION}+cu126.zip     # -> ./libtorch
   export LIBTORCH=$PWD/libtorch
 
-Swap cu126 for the CUDA build matching your driver (cu118/cu121/cu124/cu126/cu128).
-The version must be 2.9.0. Or build without it:
+Match cuNNN to your driver (cu118/cu121/cu124/cu126/cu128); the version must be
+{WANT_VERSION}. Searched: $LIBTORCH, ./libtorch at the project root, /usr.
+
+Or build without the backend:
 
   cargo build --no-default-features --features cuda,wgpu
-";
+"
+    )
+}
