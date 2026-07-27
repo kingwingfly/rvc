@@ -24,13 +24,14 @@ path = "src/main.rs"
 # `--no-default-features --features cuda` (then `--backend tch` errors cleanly).
 # One binary, every compute backend; `--backend` picks at run time.
 default = ["cuda", "tch", "wgpu"]
-cuda = ["rvc-core/cuda", "rvc-train/cuda"]
-tch = ["rvc-core/tch", "rvc-train/tch"]
-wgpu = ["rvc-core/wgpu", "rvc-train/wgpu"]
+cuda = ["rvc-core/cuda", "rvc-train/cuda", "burn-kit/cuda"]
+tch = ["rvc-core/tch", "rvc-train/tch", "burn-kit/tch"]
+wgpu = ["rvc-core/wgpu", "rvc-train/wgpu", "burn-kit/wgpu"]
 
 [dependencies]
-rvc-audio.workspace = true
-rvc-hub.workspace = true
+voice-audio.workspace = true
+burn-kit.workspace = true
+voice-hub.workspace = true
 # `burn` feature brings in the native Burn generator backend (BurnGenerator).
 rvc-core = { workspace = true, features = ["burn"] }
 rvc-train.workspace = true

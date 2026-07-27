@@ -54,8 +54,9 @@ Burn on either LibTorch or CubeCL/CUDA or WebGPU — chosen at run time with
 
 | crate | role |
 |-------|------|
-| `rvc-audio` | ffmpeg decode/resample + WAV/raw-PCM I/O, all as `futures::Stream<f32>` |
-| `rvc-hub` | auto-download model assets from Hugging Face |
+| `burn-kit` | Burn plumbing tied to no model: device selection, checkpoint loading |
+| `voice-audio` | ffmpeg decode/resample + WAV/raw-PCM I/O, all as `futures::Stream<f32>` |
+| `voice-hub` | auto-download model assets from Hugging Face |
 | `rvc-core` | the voice-conversion pipeline: feature extraction, DSP, streaming `Converter`, all three generator backends |
 | `burn-rvc` | the RVC v2 network itself (standalone Burn port); no app deps |
 | `rvc-train` | native Rust/Burn adversarial training — see [ARCHITECTURE.md](crates/rvc-train/ARCHITECTURE.md) |

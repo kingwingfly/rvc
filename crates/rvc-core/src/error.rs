@@ -6,9 +6,9 @@ pub enum VcError {
     /// An error from the ONNX Runtime (`ort`) — session build, run, extract.
     #[error("onnxruntime error: {0}")]
     Ort(#[from] ort::Error),
-    /// Audio decode/encode error bubbled up from `rvc-audio`.
+    /// Audio decode/encode error bubbled up from `voice-audio`.
     #[error("audio error: {0}")]
-    Audio(#[from] rvc_audio::AudioError),
+    Audio(#[from] voice_audio::AudioError),
     /// A model produced an output whose shape we could not interpret.
     #[error("unexpected tensor shape {got:?} for {what} (expected axis of size {expected})")]
     Shape {
@@ -31,6 +31,16 @@ pub enum VcError {
     /// don't have is a user mistake, not a bug.
     #[error("device error: {0}")]
     Device(String),
+}
+
+/// Flatten `burn-kit`'s device errors to text rather than nesting them.
+///
+/// A `#[from]` field would also become this variant's `source()`, and the two
+/// print the same sentence — so an `anyhow` chain would say it twice.
+impl From<burn_kit::Error> for VcError {
+    fn from(e: burn_kit::Error) -> Self {
+        Self::Device(e.to_string())
+    }
 }
 
 /// Convenience alias used throughout the crate.

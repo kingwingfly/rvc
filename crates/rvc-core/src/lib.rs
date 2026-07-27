@@ -25,7 +25,6 @@ mod session;
 
 #[cfg(feature = "burn")]
 mod burn_backend;
-mod device;
 
 #[cfg(test)]
 mod model_probe;
@@ -45,16 +44,6 @@ pub use config::{
 };
 pub use convert::{Converter, StreamParams, convert_stream};
 pub use denoise::{DenoiseParams, Denoiser};
-#[cfg(feature = "cuda")]
-pub use device::cuda_device;
-#[cfg(feature = "tch")]
-pub use device::libtorch_device;
-#[cfg(feature = "wgpu")]
-pub use device::wgpu_device;
-pub use device::{
-    AutoBackend, DeviceSpec, auto_backend, guard_init, libtorch_gpu, libtorch_has_cuda,
-    visible_cuda_devices,
-};
 pub use dsp::{f0_to_coarse, shift_pitch, upsample_rows};
 pub use error::{Result, VcError};
 pub use features::{DEFAULT_CHUNK, FeatureExtractor, Features};

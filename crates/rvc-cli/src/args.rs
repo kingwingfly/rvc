@@ -59,7 +59,7 @@ impl From<ComputeBackend> for rvc_train::TrainBackend {
 
 /// Parse `--device` in clap, so a typo is a usage error rather than a late
 /// failure after the model has already been loaded.
-fn parse_device(s: &str) -> Result<rvc_core::DeviceSpec, String> {
+fn parse_device(s: &str) -> Result<burn_kit::DeviceSpec, String> {
     s.parse()
 }
 
@@ -149,7 +149,7 @@ pub struct ConvertArgs {
     /// Compute device: `auto` (fastest visible), `cpu`, `gpu`, `gpu:N`, `mps` or
     /// `vulkan` (`cuda`/`cuda:N` also accepted). The `cuda` backend has GPUs only.
     #[arg(long, default_value = "auto", value_name = "DEVICE", value_parser = parse_device)]
-    pub device: rvc_core::DeviceSpec,
+    pub device: burn_kit::DeviceSpec,
     #[command(flatten)]
     pub denoise: DenoiseOpts,
 }
@@ -172,7 +172,7 @@ pub struct ServeArgs {
     /// Compute device: `auto` (fastest visible), `cpu`, `gpu`, `gpu:N`, `mps` or
     /// `vulkan` (`cuda`/`cuda:N` also accepted). The `cuda` backend has GPUs only.
     #[arg(long, default_value = "auto", value_name = "DEVICE", value_parser = parse_device)]
-    pub device: rvc_core::DeviceSpec,
+    pub device: burn_kit::DeviceSpec,
     #[command(flatten)]
     pub denoise: DenoiseOpts,
 }
@@ -345,7 +345,7 @@ pub struct TrainArgs {
         value_delimiter = ',',
         value_parser = parse_device
     )]
-    pub device: Vec<rvc_core::DeviceSpec>,
+    pub device: Vec<burn_kit::DeviceSpec>,
     /// Directory for the training log and saved weights.
     #[arg(long, default_value = "models/train")]
     pub work_dir: PathBuf,

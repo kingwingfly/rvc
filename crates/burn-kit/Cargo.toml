@@ -1,0 +1,27 @@
+[package]
+name = "burn-kit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Burn plumbing with no model knowledge: device selection and checkpoint loading"
+
+# Everything is opt-in because the two halves are wanted separately: a CLI parses
+# `--device` with no compute backend linked at all, and a network crate loads
+# weights without caring which device they land on.
+[features]
+default = []
+# Checkpoint loading: PyTorch `.pth` and safetensors, with key remapping.
+store = ["dep:burn", "dep:burn-store"]
+# Device resolvers, one per compute backend. Any number may be on at once.
+cuda = ["dep:burn", "burn/cuda"]
+tch = ["dep:burn", "burn/tch", "dep:tch"]
+wgpu = ["dep:burn", "burn/wgpu"]
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+burn = { workspace = true, optional = true }
+burn-store = { workspace = true, optional = true }
+tch = { workspace = true, optional = true }

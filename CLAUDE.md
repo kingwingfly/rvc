@@ -82,11 +82,12 @@ Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper
 
 | crate | role |
 |-------|------|
-| `rvc-audio` | ffmpeg decode/resample + WAV/raw-PCM I/O, all as `futures::Stream<f32>` |
-| `rvc-core` | the voice-conversion pipeline: `FeatureExtractor` (ContentVec + RMVPE), coarse-pitch/upsample/pitch-shift DSP, streaming `Converter` (block/overlap with an **overlapping** crossfade — consecutive kept blocks share `xf_out` output samples so the blend adds, never deletes, audio), an optional post de-hiss stage (`denoise.rs`, `--denoise`), and **all three** generator backends (ort, Burn/LibTorch, Burn/CubeCL) behind one `Generator` trait, plus `device.rs` device selection shared with `rvc-train` |
+| `burn-kit` | Burn plumbing with no model knowledge: `--device` resolution and checkpoint loading, shared by every network crate |
+| `voice-audio` | ffmpeg decode/resample + WAV/raw-PCM I/O, all as `futures::Stream<f32>` |
+| `rvc-core` | the voice-conversion pipeline: `FeatureExtractor` (ContentVec + RMVPE), coarse-pitch/upsample/pitch-shift DSP, streaming `Converter` (block/overlap with an **overlapping** crossfade — consecutive kept blocks share `xf_out` output samples so the blend adds, never deletes, audio), an optional post de-hiss stage (`denoise.rs`, `--denoise`), and **all three** generator backends (ort, Burn/LibTorch, Burn/CubeCL) behind one `Generator` trait |
 | `burn-rvc` | the RVC v2 network itself (standalone Burn port of `SynthesizerTrnMs768NSFsid` + `MultiPeriodDiscriminator`); no app deps |
 | `rvc-train` | native Rust/Burn adversarial training loop (see `crates/rvc-train/ARCHITECTURE.md`) |
-| `rvc-hub` | auto-download ContentVec/RMVPE ONNX from Hugging Face |
+| `voice-hub` | auto-download ContentVec/RMVPE ONNX from Hugging Face |
 | `rvc-cli` | lib **and** the `rvc` binary (clap): `convert`, `serve`, `models`, `train`, `preprocess` |
 | `voice-cli` | the `voice` binary: `rvc-cli`'s subcommands nested under `voice rvc …`, plus the rest of the toolkit |
 
@@ -103,10 +104,10 @@ unavailable, never a fallback. The CubeCL/CUDA generator is still slower than
 realtime for `serve`; `--backend tch` is ~9x faster per file on an RTX 2060 and is
 what `auto` picks for `.safetensors` weights.
 
-Device selection lives in `crates/rvc-core/src/device.rs` (`DeviceSpec`,
-`cuda_device`, `libtorch_device`, `guard_init`) and is shared with `rvc-train`, so
-`convert` and `train` cannot disagree about what `auto` means. Two traps encoded
-there: `LibTorchDevice::default()` is **CPU** (unlike `CudaDevice::default()`), and
+Device selection lives in `crates/burn-kit/src/device.rs` (`DeviceSpec`,
+`cuda_device`, `libtorch_device`, `wgpu_device`, `guard_init`) — a crate that knows
+about no model, so every engine and every subcommand resolves `auto` identically.
+Two traps encoded there: `LibTorchDevice::default()` is **CPU** (unlike `CudaDevice::default()`), and
 constructing `LibTorchDevice::Cuda` on a CPU-only LibTorch is a hard panic baked in
 by `burn-tch`'s build script — so `libtorch_device` is the only place it is built.
 
@@ -120,9 +121,9 @@ one binary, run-time choice. — and `crates/rvc-core/build.rs`
 refuses a `tch` build with no `LIBTORCH`, because `burn-tch` hardcodes
 `tch/download-libtorch` and cargo features are additive, so the silent fallback
 would otherwise be a multi-GB download of a **CPU-only** LibTorch.
-`crates/rvc-cli/build.rs` bakes `$LIBTORCH/lib` into the binary as a `RUNPATH`;
-without it a missing `libtorch.so` aborts in `ld.so` before `main`, on every
-subcommand.
+`crates/{rvc,voice}-cli/build.rs` bake `$LIBTORCH/lib` into the binary as a
+`RUNPATH`; without it a missing `libtorch.so` aborts in `ld.so` before `main`, on
+every subcommand. They are deliberate duplicates — an rpath is per-executable.
 
 ### Weight-compatibility constraint (important when editing `burn-rvc`)
 The Burn modules are kept **weight-compatible with RVC's PyTorch `state_dict`** so
@@ -176,7 +177,7 @@ raw/*.mp3 -o clips/` then `rvc train clips/*.wav ...` slices the corpus into
 clean per-sentence clips first — it removes between-sentence dead-air while
 **preserving soft/breathy ASMR content** (energy is used only to find long
 silent gaps, never to gate quiet-but-present sound). The shared slicer lives in
-`crates/rvc-audio/src/slice.rs` (`SliceOptions`, `slice`); the two tuning knobs
+`crates/voice-audio/src/slice.rs` (`SliceOptions`, `slice`); the two tuning knobs
 are `--silence-db` (energy floor; lower to keep the softest passages) and
 `--min-silence` (how long a quiet gap must last to be a cut, so sentences are
 never split). Training itself is unchanged — it just consumes the cleaned folder.

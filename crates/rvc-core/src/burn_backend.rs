@@ -19,10 +19,10 @@ use burn_rvc::{Synthesizer, SynthesizerConfig};
 
 use crate::backend::Generator;
 use crate::config::{CONTENT_DIM, ConvertParams};
-use crate::device::{DeviceSpec, guard_init};
 use crate::dsp::{f0_to_coarse, shift_pitch};
 use crate::error::{Result, VcError};
 use crate::features::{DEFAULT_CHUNK, FeatureExtractor};
+use burn_kit::{DeviceSpec, guard_init};
 
 /// A loaded native-Burn conversion pipeline on the compute backend `B`.
 pub struct BurnGenerator<B: Backend> {
@@ -135,7 +135,7 @@ pub fn cuda_generator(
 ) -> Result<impl Generator + 'static> {
     use burn::backend::cuda::Cuda;
 
-    let device = crate::device::cuda_device(device)?;
+    let device = burn_kit::cuda_device(device)?;
     guard_init("cuda", || {
         BurnGenerator::<Cuda>::load(content, rmvpe, weights, model_sr, speaker_id, &device)
     })?
@@ -154,7 +154,7 @@ pub fn wgpu_generator(
 ) -> Result<impl Generator + 'static> {
     use burn::backend::wgpu::Wgpu;
 
-    let device = crate::device::wgpu_device(device)?;
+    let device = burn_kit::wgpu_device(device)?;
     guard_init("wgpu", || {
         BurnGenerator::<Wgpu>::load(content, rmvpe, weights, model_sr, speaker_id, &device)
     })?
@@ -172,7 +172,7 @@ pub fn libtorch_generator(
 ) -> Result<impl Generator + 'static> {
     use burn::backend::libtorch::LibTorch;
 
-    let device = crate::device::libtorch_device(device)?;
+    let device = burn_kit::libtorch_device(device)?;
     guard_init("tch", || {
         BurnGenerator::<LibTorch<f32>>::load(content, rmvpe, weights, model_sr, speaker_id, &device)
     })?

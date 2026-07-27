@@ -7,8 +7,8 @@
 //! 16 kHz (the analysis rate), output at the generator's sample rate.
 
 use futures::{Stream, StreamExt};
-use rvc_audio::Samples;
 use tokio::sync::mpsc;
+use voice_audio::Samples;
 
 use crate::backend::Generator;
 use crate::config::{ANALYSIS_SR, ConvertParams};
@@ -239,7 +239,10 @@ pub fn convert_stream<S>(
     mut input: S,
 ) -> impl Stream<Item = Result<Samples>>
 where
-    S: Stream<Item = std::result::Result<Samples, rvc_audio::AudioError>> + Unpin + Send + 'static,
+    S: Stream<Item = std::result::Result<Samples, voice_audio::AudioError>>
+        + Unpin
+        + Send
+        + 'static,
 {
     let (in_tx, mut in_rx) = mpsc::channel::<Samples>(32);
     let (out_tx, mut out_rx) = mpsc::channel::<Result<Samples>>(32);

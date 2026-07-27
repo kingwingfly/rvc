@@ -4,11 +4,11 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use burn_kit::DeviceSpec;
 use rvc_core::{
-    ConvertParams, Converter, DenoiseParams, DeviceSpec, ModelPaths, RvcConfig, RvcModel,
-    StreamParams,
+    ConvertParams, Converter, DenoiseParams, ModelPaths, RvcConfig, RvcModel, StreamParams,
 };
-use rvc_hub::ModelRef;
+use voice_hub::ModelRef;
 
 use crate::args::{InferBackend, ModelOpts};
 
@@ -36,7 +36,7 @@ impl Runtime {
 /// Resolve `--backend` against the weights extension and the hardware present.
 ///
 /// `auto` reads the extension first (`.onnx` → ONNX Runtime), then asks
-/// [`rvc_core::auto_backend`]. An explicit choice is never substituted: if it
+/// [`burn_kit::auto_backend`]. An explicit choice is never substituted: if it
 /// can't run, loading it reports why.
 pub fn resolve_runtime(backend: InferBackend, model: &Path) -> Runtime {
     match backend {
@@ -48,10 +48,10 @@ pub fn resolve_runtime(backend: InferBackend, model: &Path) -> Runtime {
             if model.extension().and_then(|e| e.to_str()) == Some("onnx") {
                 return Runtime::Onnx;
             }
-            match rvc_core::auto_backend() {
-                rvc_core::AutoBackend::LibTorch => Runtime::Tch,
-                rvc_core::AutoBackend::Cuda => Runtime::Cuda,
-                rvc_core::AutoBackend::Wgpu => Runtime::Wgpu,
+            match burn_kit::auto_backend() {
+                burn_kit::AutoBackend::LibTorch => Runtime::Tch,
+                burn_kit::AutoBackend::Cuda => Runtime::Cuda,
+                burn_kit::AutoBackend::Wgpu => Runtime::Wgpu,
             }
         }
     }
@@ -161,13 +161,13 @@ pub async fn resolve_feature_models(opts: &ModelOpts) -> Result<(PathBuf, PathBu
     let cache = opts.cache_dir.as_deref();
     let content = match &opts.content {
         Some(p) => p.clone(),
-        None => rvc_hub::fetch(&rvc_hub::default_contentvec(), cache)
+        None => voice_hub::fetch(&voice_hub::default_contentvec(), cache)
             .await
             .context("failed to fetch ContentVec ONNX (override with --content)")?,
     };
     let rmvpe = match &opts.rmvpe {
         Some(p) => p.clone(),
-        None => rvc_hub::fetch(&rvc_hub::default_rmvpe(), cache)
+        None => voice_hub::fetch(&voice_hub::default_rmvpe(), cache)
             .await
             .context("failed to fetch RMVPE ONNX (override with --rmvpe)")?,
     };
@@ -183,7 +183,7 @@ pub async fn build_rvc_config(opts: &ModelOpts) -> Result<RvcConfig> {
         Some(p) => p.clone(),
         None => {
             tracing::info!("resolving ContentVec ONNX from Hugging Face...");
-            rvc_hub::fetch(&rvc_hub::default_contentvec(), cache)
+            voice_hub::fetch(&voice_hub::default_contentvec(), cache)
                 .await
                 .context("failed to fetch ContentVec ONNX (override with --content)")?
         }
@@ -193,7 +193,7 @@ pub async fn build_rvc_config(opts: &ModelOpts) -> Result<RvcConfig> {
         Some(p) => p.clone(),
         None => {
             tracing::info!("resolving RMVPE ONNX from Hugging Face...");
-            rvc_hub::fetch(&rvc_hub::default_rmvpe(), cache)
+            voice_hub::fetch(&voice_hub::default_rmvpe(), cache)
                 .await
                 .context("failed to fetch RMVPE ONNX (override with --rmvpe)")?
         }

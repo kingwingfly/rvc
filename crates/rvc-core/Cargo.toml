@@ -17,17 +17,19 @@ description = "RVC v2 voice-conversion inference (ort/ONNX) as a streaming Conve
 # one, and both can be on at once: `--backend` then chooses at runtime.
 burn = ["dep:burn", "dep:burn-rvc"]
 # CubeCL/CUDA compute backend for the Burn generator.
-cuda = ["burn", "burn/cuda"]
+cuda = ["burn", "burn/cuda", "burn-kit/cuda"]
 # LibTorch compute backend. Needs a LibTorch install at build time — see
 # `build.rs`, which refuses to let `torch-sys` silently download a CPU-only one.
-tch = ["burn", "burn/tch", "dep:tch"]
+tch = ["burn", "burn/tch", "dep:tch", "burn-kit/tch"]
 # WebGPU compute backend (wgpu → Vulkan/Metal/DX12). Pure Rust: unlike `cuda` and
 # `tch` it needs no vendor toolkit or external library, so it is the portable
 # fallback — and the only Burn backend that runs on AMD/Intel/Apple GPUs.
-wgpu = ["burn", "burn/wgpu"]
+wgpu = ["burn", "burn/wgpu", "burn-kit/wgpu"]
 
 [dependencies]
-rvc-audio.workspace = true
+voice-audio.workspace = true
+# Device selection: shared with every engine so `auto` cannot mean two things.
+burn-kit.workspace = true
 tokio.workspace = true
 futures.workspace = true
 async-stream.workspace = true

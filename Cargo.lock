@@ -841,6 +841,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "burn-kit"
+version = "0.1.0"
+dependencies = [
+ "burn",
+ "burn-store",
+ "tch",
+ "thiserror 2.0.19",
+ "tracing",
+]
+
+[[package]]
 name = "burn-ndarray"
 version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -921,6 +932,7 @@ name = "burn-rvc"
 version = "0.1.0"
 dependencies = [
  "burn",
+ "burn-kit",
  "burn-ndarray",
  "burn-store",
 ]
@@ -6003,32 +6015,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
-name = "rvc-audio"
-version = "0.1.0"
-dependencies = [
- "async-stream",
- "ffmpeg-next",
- "futures",
- "thiserror 2.0.19",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "rvc-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "burn-kit",
  "clap",
  "clap_complete",
  "futures",
- "rvc-audio",
  "rvc-core",
- "rvc-hub",
  "rvc-train",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "voice-audio",
+ "voice-hub",
 ]
 
 [[package]]
@@ -6037,26 +6038,17 @@ version = "0.1.0"
 dependencies = [
  "async-stream",
  "burn",
+ "burn-kit",
  "burn-rvc",
  "futures",
  "ndarray 0.17.2",
  "ort",
  "rustfft",
- "rvc-audio",
  "tch",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "rvc-hub"
-version = "0.1.0"
-dependencies = [
- "hf-hub",
- "thiserror 2.0.19",
- "tokio",
- "tracing",
+ "voice-audio",
 ]
 
 [[package]]
@@ -6065,13 +6057,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "burn",
+ "burn-kit",
  "burn-ndarray",
  "burn-rvc",
  "futures",
- "rvc-audio",
  "rvc-core",
  "tokio",
  "tracing",
+ "voice-audio",
 ]
 
 [[package]]
@@ -7608,6 +7601,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "voice-audio"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "ffmpeg-next",
+ "futures",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "voice-cli"
 version = "0.1.0"
 dependencies = [
@@ -7615,6 +7620,16 @@ dependencies = [
  "clap",
  "rvc-cli",
  "tokio",
+]
+
+[[package]]
+name = "voice-hub"
+version = "0.1.0"
+dependencies = [
+ "hf-hub",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

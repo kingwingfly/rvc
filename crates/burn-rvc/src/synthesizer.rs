@@ -17,8 +17,8 @@ use crate::config::SynthesizerConfig;
 use crate::flow::ResidualCouplingBlock;
 use crate::generator::GeneratorNsf;
 use crate::posterior::PosteriorEncoder;
-use crate::store::load_pytorch_into;
 use crate::text_encoder::TextEncoder;
+use burn_kit::store::load_pytorch_into;
 
 /// Number of coupling layers in the flow.
 const N_FLOWS: usize = 4;

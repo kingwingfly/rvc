@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use futures::{StreamExt, stream};
-use rvc_audio::{DecodeOptions, SliceOptions, decode_paths, slice, write_wav_file};
+use voice_audio::{DecodeOptions, SliceOptions, decode_paths, slice, write_wav_file};
 
 use crate::args::PreprocessArgs;
 
@@ -81,7 +81,7 @@ pub async fn run(args: PreprocessArgs) -> Result<()> {
             }
             kept_secs += clip.len() as f64 / sr as f64;
             let out_path = args.output_dir.join(format!("{base}_{i:03}.wav"));
-            let out_stream = stream::iter([Ok::<_, rvc_audio::AudioError>(clip)]);
+            let out_stream = stream::iter([Ok::<_, voice_audio::AudioError>(clip)]);
             write_wav_file(&out_path, sr, out_stream)
                 .await
                 .with_context(|| format!("writing {}", out_path.display()))?;

@@ -1,5 +1,9 @@
-//! Shared weight-loading helpers: read an RVC `.pth`, remap the flat reference
-//! key names onto our module tree, and upcast the fp16 checkpoint to fp32.
+//! Weight loading: read a checkpoint, remap the reference implementation's key
+//! names onto our module tree, and upcast fp16 to fp32.
+//!
+//! PyTorch `.pth` is what the RVC-lineage projects publish. Hugging Face model
+//! repos ship safetensors instead, which `burn-store` reads through a different
+//! (builder-shaped) API — that loader lands with the first model that needs it.
 
 use std::error::Error;
 use std::path::Path;

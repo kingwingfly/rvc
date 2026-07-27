@@ -11,14 +11,15 @@ description = "Native (Rust) RVC generator training for the rvc toolkit"
 # Compute backends for the training loop, mirroring `rvc-core`'s. `trainer::run`
 # is generic over `AutodiffBackend`, so these only decide what gets linked;
 # `TrainRequest::backend` picks among them at runtime.
-cuda = ["burn/cuda", "rvc-core/cuda"]
-tch = ["burn/tch", "rvc-core/tch"]
-wgpu = ["burn/wgpu", "rvc-core/wgpu"]
+cuda = ["burn/cuda", "rvc-core/cuda", "burn-kit/cuda"]
+tch = ["burn/tch", "rvc-core/tch", "burn-kit/tch"]
+wgpu = ["burn/wgpu", "rvc-core/wgpu", "burn-kit/wgpu"]
 
 [dependencies]
-rvc-audio.workspace = true
+voice-audio.workspace = true
 rvc-core.workspace = true
 burn-rvc.workspace = true
+burn-kit.workspace = true
 tokio = { workspace = true }
 futures.workspace = true
 anyhow.workspace = true

@@ -1,6 +1,6 @@
 //! `rvc train` — native (Rust/burn) RVC generator training.
 //!
-//! Corpus audio is decoded and resampled with `rvc-audio`, content/F0 features
+//! Corpus audio is decoded and resampled with `voice-audio`, content/F0 features
 //! come from the same ONNX extractors the inference path uses (`rvc-core`), and
 //! the generator is trained with `burn`, writing a `.safetensors` file. Deploy
 //! it directly (`rvc convert --backend burn`), or run the standalone `export/`
@@ -38,7 +38,7 @@ pub async fn run(args: TrainArgs) -> Result<()> {
         Some(p) => p.clone(),
         None => {
             tracing::info!("resolving ContentVec ONNX from Hugging Face...");
-            rvc_hub::fetch(&rvc_hub::default_contentvec(), cache)
+            voice_hub::fetch(&voice_hub::default_contentvec(), cache)
                 .await
                 .context("failed to fetch ContentVec ONNX (override with --content)")?
         }
@@ -47,7 +47,7 @@ pub async fn run(args: TrainArgs) -> Result<()> {
         Some(p) => p.clone(),
         None => {
             tracing::info!("resolving RMVPE ONNX from Hugging Face...");
-            rvc_hub::fetch(&rvc_hub::default_rmvpe(), cache)
+            voice_hub::fetch(&voice_hub::default_rmvpe(), cache)
                 .await
                 .context("failed to fetch RMVPE ONNX (override with --rmvpe)")?
         }

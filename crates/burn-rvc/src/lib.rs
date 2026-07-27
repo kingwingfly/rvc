@@ -19,7 +19,6 @@ mod flow;
 mod generator;
 mod nn;
 mod posterior;
-mod store;
 mod synthesizer;
 mod text_encoder;
 mod wavenet;

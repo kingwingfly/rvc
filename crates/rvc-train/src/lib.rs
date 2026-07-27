@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result};
-pub use rvc_core::DeviceSpec;
+pub use burn_kit::DeviceSpec;
 
 /// Which Burn compute backend runs the training loop.
 ///
@@ -178,10 +178,10 @@ pub fn train(req: TrainRequest) -> Result<PathBuf> {
 fn resolve_backend(req: &TrainRequest) -> Result<TrainBackend> {
     anyhow::ensure!(!req.devices.is_empty(), "no --device given");
     let backend = match req.backend {
-        TrainBackend::Auto => match rvc_core::auto_backend() {
-            rvc_core::AutoBackend::LibTorch => TrainBackend::LibTorch,
-            rvc_core::AutoBackend::Cuda => TrainBackend::Cuda,
-            rvc_core::AutoBackend::Wgpu => TrainBackend::Wgpu,
+        TrainBackend::Auto => match burn_kit::auto_backend() {
+            burn_kit::AutoBackend::LibTorch => TrainBackend::LibTorch,
+            burn_kit::AutoBackend::Cuda => TrainBackend::Cuda,
+            burn_kit::AutoBackend::Wgpu => TrainBackend::Wgpu,
         },
         explicit => explicit,
     };
@@ -225,10 +225,10 @@ fn dispatch(req: &TrainRequest, clips: Vec<dataset::Clip>) -> Result<PathBuf> {
             let devices = req
                 .devices
                 .iter()
-                .map(|d| rvc_core::libtorch_device(*d))
-                .collect::<rvc_core::Result<Vec<_>>>()?;
+                .map(|d| burn_kit::libtorch_device(*d))
+                .collect::<burn_kit::Result<Vec<_>>>()?;
             let devices = distinct(devices)?;
-            rvc_core::guard_init("tch", || {
+            burn_kit::guard_init("tch", || {
                 trainer::run::<Autodiff<LibTorch<f32>>>(req, clips, &devices)
             })?
         }
@@ -238,10 +238,10 @@ fn dispatch(req: &TrainRequest, clips: Vec<dataset::Clip>) -> Result<PathBuf> {
             let devices = req
                 .devices
                 .iter()
-                .map(|d| rvc_core::cuda_device(*d))
-                .collect::<rvc_core::Result<Vec<_>>>()?;
+                .map(|d| burn_kit::cuda_device(*d))
+                .collect::<burn_kit::Result<Vec<_>>>()?;
             let devices = distinct(devices)?;
-            rvc_core::guard_init("cuda", || {
+            burn_kit::guard_init("cuda", || {
                 trainer::run::<Autodiff<Cuda>>(req, clips, &devices)
             })?
         }
@@ -251,10 +251,10 @@ fn dispatch(req: &TrainRequest, clips: Vec<dataset::Clip>) -> Result<PathBuf> {
             let devices = req
                 .devices
                 .iter()
-                .map(|d| rvc_core::wgpu_device(*d))
-                .collect::<rvc_core::Result<Vec<_>>>()?;
+                .map(|d| burn_kit::wgpu_device(*d))
+                .collect::<burn_kit::Result<Vec<_>>>()?;
             let devices = distinct(devices)?;
-            rvc_core::guard_init("wgpu", || {
+            burn_kit::guard_init("wgpu", || {
                 trainer::run::<Autodiff<Wgpu>>(req, clips, &devices)
             })?
         }

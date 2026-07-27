@@ -1,15 +1,15 @@
-//! Which compute backend and device the native Burn generator runs on.
+//! Which compute backend and device a Burn model runs on.
 //!
 //! [`DeviceSpec`] is a plain parsed value with no Burn types, so it is available
-//! even without a compute backend compiled in — the CLI needs it either way.
+//! even without a compute backend compiled in — a CLI needs it either way.
 //!
 //! One `--device` spelling drives every backend; each resolver turns it into that
-//! backend's device type, rejecting what it can't do with a plain error. Shared
-//! with `rvc-train` so `convert` and `train` agree on what `auto` means. `auto`
-//! reaches CPU only as a last resort — the decoder is far slower than realtime
-//! there.
+//! backend's device type, rejecting what it can't do with a plain error. Every
+//! engine and every subcommand shares this module, so none of them can disagree
+//! about what `auto` means. `auto` reaches CPU only as a last resort — neural
+//! audio decoding is far slower than realtime there.
 
-use crate::error::{Result, VcError};
+use crate::{Error, Result};
 
 /// A `--device` request, independent of which backend will honour it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -171,7 +171,7 @@ pub fn cuda_device(spec: DeviceSpec) -> Result<burn::backend::cuda::CudaDevice> 
         DeviceSpec::Auto => 0,
         DeviceSpec::Gpu(n) => n,
         other => {
-            return Err(VcError::Device(format!(
+            return Err(Error::Device(format!(
                 "the cuda backend runs only on CUDA devices, not `{other}` \
                  — try `--backend tch --device {other}`, or `--backend wgpu`"
             )));
@@ -181,14 +181,14 @@ pub fn cuda_device(spec: DeviceSpec) -> Result<burn::backend::cuda::CudaDevice> 
     // user a cubecl panic several seconds into loading.
     if let Some(n) = visible_cuda_devices() {
         if n == 0 {
-            return Err(VcError::Device(
+            return Err(Error::Device(
                 "no CUDA device is available (no NVIDIA driver or GPU visible) \
                  — try `--backend tch --device cpu`, or `--backend onnx`"
                     .into(),
             ));
         }
         if index >= n {
-            return Err(VcError::Device(format!(
+            return Err(Error::Device(format!(
                 "device gpu:{index} requested but only {n} CUDA device(s) are visible \
                  (valid: gpu:0..gpu:{})",
                 n - 1
@@ -226,21 +226,21 @@ pub fn libtorch_device(spec: DeviceSpec) -> Result<burn::backend::libtorch::LibT
                 Ok(LibTorchDevice::Cpu)
             }
         }
-        DeviceSpec::Gpu(n) if cuda_n == 0 => Err(VcError::Device(format!(
+        DeviceSpec::Gpu(n) if cuda_n == 0 => Err(Error::Device(format!(
             "device gpu:{n} requested but LibTorch sees no CUDA device — either this \
              LibTorch is a CPU-only build, or no NVIDIA driver/GPU is present. \
              Use `--device cpu`, `--backend wgpu`, or `--backend cuda`"
         ))),
-        DeviceSpec::Gpu(n) if n >= cuda_n => Err(VcError::Device(format!(
+        DeviceSpec::Gpu(n) if n >= cuda_n => Err(Error::Device(format!(
             "device gpu:{n} requested but LibTorch sees {cuda_n} CUDA device(s) \
              (valid: gpu:0..gpu:{})",
             cuda_n - 1
         ))),
         DeviceSpec::Gpu(n) => Ok(LibTorchDevice::Cuda(n)),
-        DeviceSpec::Mps if !tch::utils::has_mps() => Err(VcError::Device(
+        DeviceSpec::Mps if !tch::utils::has_mps() => Err(Error::Device(
             "this LibTorch has no Metal (MPS) support".into(),
         )),
-        DeviceSpec::Vulkan if !tch::utils::has_vulkan() => Err(VcError::Device(
+        DeviceSpec::Vulkan if !tch::utils::has_vulkan() => Err(Error::Device(
             "this LibTorch has no Vulkan support (official builds ship without it)".into(),
         )),
         DeviceSpec::Mps => Ok(LibTorchDevice::Mps),
@@ -279,7 +279,7 @@ pub fn guard_init<T>(backend: &str, f: impl FnOnce() -> T) -> Result<T> {
             .cloned()
             .or_else(|| e.downcast_ref::<&str>().map(|s| (*s).to_string()))
             .unwrap_or_else(|| "unknown panic".into());
-        VcError::Device(format!("the {backend} backend aborted: {msg}"))
+        Error::Device(format!("the {backend} backend aborted: {msg}"))
     })
 }
 

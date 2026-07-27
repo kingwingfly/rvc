@@ -10,8 +10,8 @@ use burn::tensor::backend::Backend;
 use burn_store::{ApplyResult, ModuleSnapshot, SafetensorsStore};
 
 use crate::nn::leaky_relu;
-use crate::store::load_pytorch_into;
 use crate::weightnorm::{WeightNormConv1d, WeightNormConv2d};
+use burn_kit::store::load_pytorch_into;
 
 const LRELU_SLOPE: f64 = 0.1;
 
