@@ -1065,6 +1065,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "burn-whisper"
+version = "0.1.0"
+dependencies = [
+ "burn",
+ "burn-kit",
+ "burn-ndarray",
+ "burn-store",
+]
+
+[[package]]
 name = "bytemuck"
 version = "1.25.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

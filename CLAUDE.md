@@ -67,8 +67,12 @@ cargo build --release --no-default-features --features cuda
 
 # Correctness of the Burn port is checked by loading REAL pretrained weights
 # (there are no unit tests for the network) — reports applied/missing/unused:
-cargo run -p burn-rvc --example load -- <path/to/f0G48k.pth>
+cargo run -p burn-rvc --example load -- <path/to/f0G48k.pth>       # 560/0, 165/0
+cargo run -p burn-whisper --example load -- <path/to/model.safetensors>  # 587/0
 ```
+
+Porting references are cloned under `/.reference` (gitignored) and **read, never
+run** — `openai/whisper`, and RVC-Project tag `2.2.231006` for `burn-rvc`.
 
 Requires **ffmpeg 8.1** dev libraries (and the `ffmpeg` binary for the realtime
 `serve` example). ContentVec + RMVPE ONNX assets auto-download from Hugging Face
@@ -86,6 +90,7 @@ Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper
 | `voice-audio` | ffmpeg decode/resample + WAV/raw-PCM I/O, all as `futures::Stream<f32>` |
 | `rvc-core` | the voice-conversion pipeline: `FeatureExtractor` (ContentVec + RMVPE), coarse-pitch/upsample/pitch-shift DSP, streaming `Converter` (block/overlap with an **overlapping** crossfade — consecutive kept blocks share `xf_out` output samples so the blend adds, never deletes, audio), an optional post de-hiss stage (`denoise.rs`, `--denoise`), and **all three** generator backends (ort, Burn/LibTorch, Burn/CubeCL) behind one `Generator` trait |
 | `burn-rvc` | the RVC v2 network itself (standalone Burn port of `SynthesizerTrnMs768NSFsid` + `MultiPeriodDiscriminator`); no app deps |
+| `burn-whisper` | the Whisper network (standalone Burn port); mirrors HF's `state_dict` layout so `openai/whisper-large-v3-turbo` loads unchanged |
 | `rvc-train` | native Rust/Burn adversarial training loop (see `crates/rvc-train/ARCHITECTURE.md`) |
 | `voice-hub` | auto-download ContentVec/RMVPE ONNX from Hugging Face |
 | `rvc-cli` | lib **and** the `rvc` binary (clap): `convert`, `serve`, `models`, `train`, `preprocess` |

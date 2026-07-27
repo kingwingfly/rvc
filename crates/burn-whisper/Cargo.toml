@@ -1,0 +1,25 @@
+[package]
+name = "burn-whisper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "OpenAI Whisper speech-recognition network in Burn"
+
+[features]
+# Extra compute backends for the *examples* (the weight-coverage harness that
+# stands in for unit tests). Off by default, so the crate's normal build stays
+# backend-free — nothing in `src/` names a backend, and keeping that mechanical
+# is what protects Hugging Face weight compatibility.
+cuda = ["burn/cuda"]
+tch = ["burn/tch"]
+
+[dependencies]
+burn = { version = "0.21", default-features = false, features = ["std"] }
+burn-store.workspace = true
+# Checkpoint loading, shared with every other network crate.
+burn-kit = { workspace = true, features = ["store"] }
+
+[dev-dependencies]
+burn-ndarray = "0.21"

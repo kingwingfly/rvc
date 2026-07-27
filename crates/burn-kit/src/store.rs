@@ -1,9 +1,10 @@
 //! Weight loading: read a checkpoint, remap the reference implementation's key
 //! names onto our module tree, and upcast fp16 to fp32.
 //!
-//! PyTorch `.pth` is what the RVC-lineage projects publish. Hugging Face model
-//! repos ship safetensors instead, which `burn-store` reads through a different
-//! (builder-shaped) API — that loader lands with the first model that needs it.
+//! PyTorch `.pth` is what the RVC-lineage projects publish; Hugging Face model
+//! repos ship safetensors. `burn-store` reads the two through differently shaped
+//! APIs — a snapshot reader and a builder — so the two loaders here do not share
+//! an implementation, only a meaning.
 
 use std::error::Error;
 use std::path::Path;
@@ -12,7 +13,21 @@ use std::rc::Rc;
 use burn::tensor::backend::Backend;
 use burn::tensor::{DType, TensorData};
 use burn_store::pytorch::PytorchReader;
-use burn_store::{ApplyResult, KeyRemapper, ModuleSnapshot, PyTorchToBurnAdapter, TensorSnapshot};
+use burn_store::{
+    ApplyResult, HalfPrecisionAdapter, KeyRemapper, ModuleAdapter, ModuleSnapshot,
+    PyTorchToBurnAdapter, SafetensorsStore, TensorSnapshot,
+};
+
+/// Build the key remapper from `(regex, replacement)` pairs, applied in order.
+fn remapper(remaps: &[(&str, &str)]) -> KeyRemapper {
+    let mut remapper = KeyRemapper::new();
+    for (from, to) in remaps {
+        remapper = remapper
+            .add_pattern(*from, *to)
+            .expect("static remap patterns are valid");
+    }
+    remapper
+}
 
 /// Load a PyTorch checkpoint subtree into `module`.
 ///
@@ -40,19 +55,39 @@ where
         })
         .collect();
 
-    let mut remapper = KeyRemapper::new();
-    for (from, to) in remaps {
-        remapper = remapper
-            .add_pattern(*from, *to)
-            .expect("static remap patterns are valid");
-    }
-    let (snapshots, _) = remapper.remap(snapshots);
+    let (snapshots, _) = remapper(remaps).remap(snapshots);
 
     // Pretrained bases are fp16; upcast to the model's float.
     let snapshots: Vec<TensorSnapshot> = snapshots.into_iter().map(upcast_f16).collect();
 
     // `PyTorchToBurnAdapter` handles Linear transposition and norm param names.
     Ok(module.apply(snapshots, None, Some(Box::new(PyTorchToBurnAdapter)), false))
+}
+
+/// Load a safetensors checkpoint into `module` — the form Hugging Face model
+/// repos ship, and the reason this toolkit prefers first-party repos to
+/// community re-exports of the same weights.
+///
+/// Partial application is allowed so the caller gets an [`ApplyResult`] to
+/// inspect rather than an error: `missing` and `unused` counts are how a port is
+/// checked, and a hard failure would report only the first mismatch.
+pub fn load_safetensors_into<B, M>(
+    module: &mut M,
+    path: &Path,
+    remaps: &[(&str, &str)],
+) -> Result<ApplyResult, Box<dyn Error>>
+where
+    B: Backend,
+    M: ModuleSnapshot<B>,
+{
+    // Both adapters are needed and the store takes one: Hugging Face checkpoints
+    // are routinely fp16 (`torch_dtype: float16`), and their Linear weights still
+    // arrive `[out, in]` where Burn wants `[in, out]`.
+    let mut store = SafetensorsStore::from_file(path)
+        .remap(remapper(remaps))
+        .with_from_adapter(HalfPrecisionAdapter::new().chain(PyTorchToBurnAdapter))
+        .allow_partial(true);
+    Ok(module.load_from(&mut store)?)
 }
 
 /// Upcast an fp16 tensor snapshot to fp32, preserving its path/id.

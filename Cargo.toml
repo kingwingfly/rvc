@@ -6,6 +6,7 @@ members = [
     "crates/voice-hub",
     "crates/rvc-core",
     "crates/burn-rvc",
+    "crates/burn-whisper",
     "crates/rvc-train",
     "crates/rvc-cli",
     "crates/voice-cli",
@@ -32,6 +33,7 @@ rvc-train = { path = "crates/rvc-train" }
 rvc-cli = { path = "crates/rvc-cli", default-features = false }
 burn-rvc = { path = "crates/burn-rvc" }
 burn-kit = { path = "crates/burn-kit" }
+burn-whisper = { path = "crates/burn-whisper" }
 burn = { version = "0.21", default-features = false, features = ["std", "ndarray"] }
 # Checkpoint readers. `burn-kit` owns the loading helpers; `burn-rvc` and every
 # later network crate go through it rather than depending on this directly.

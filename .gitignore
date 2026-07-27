@@ -13,6 +13,9 @@ __pycache__/
 /dataset
 *.onnx
 
+# Upstream repos cloned as porting references, read but never run.
+/.reference
+
 # Agent scratch worktrees
 /.claude/worktrees
 

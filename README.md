@@ -42,7 +42,7 @@ the requirements are the same for both binaries.
 | | status | docs |
 |---|---|---|
 | **`rvc`** — voice conversion (RVC v2) | **works**, inference + native training | [crates/rvc-cli/README.md](crates/rvc-cli/README.md) |
-| **`stt`** — speech recognition (Whisper large-v3-turbo) | in progress | — |
+| **`stt`** — speech recognition (Whisper large-v3-turbo) | network ported; front-end and decode loop next | — |
 | **`tts`** — speech synthesis (GPT-SoVITS v2) | planned, inference + fine-tuning | — |
 | **`translate`** | not started; pipe to any external tool meanwhile | — |
 
@@ -59,6 +59,7 @@ Burn on either LibTorch or CubeCL/CUDA or WebGPU — chosen at run time with
 | `voice-hub` | auto-download model assets from Hugging Face |
 | `rvc-core` | the voice-conversion pipeline: feature extraction, DSP, streaming `Converter`, all three generator backends |
 | `burn-rvc` | the RVC v2 network itself (standalone Burn port); no app deps |
+| `burn-whisper` | the Whisper network (standalone Burn port); loads HF safetensors unchanged |
 | `rvc-train` | native Rust/Burn adversarial training — see [ARCHITECTURE.md](crates/rvc-train/ARCHITECTURE.md) |
 | `rvc-cli` | the `rvc` binary, and the library behind `voice rvc …` |
 | `voice-cli` | the `voice` binary |
