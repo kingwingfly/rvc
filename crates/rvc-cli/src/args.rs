@@ -12,7 +12,7 @@ use clap_complete::Shell;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum InferBackend {
     /// Pick by weights extension (`.onnx` → onnx-runtime) then by what's
-    /// available: LibTorch on CUDA, else CubeCL/CUDA, else LibTorch on CPU.
+    /// available: LibTorch on a GPU, else CubeCL/CUDA, else WebGPU, else CPU.
     #[default]
     Auto,
     /// ONNX Runtime generator (`.onnx`).
@@ -31,7 +31,8 @@ pub enum InferBackend {
 /// Which Burn compute backend runs training (there is no ONNX training path).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum ComputeBackend {
-    /// Fastest available: LibTorch on CUDA, else CubeCL/CUDA, else LibTorch CPU.
+    /// Fastest available: LibTorch on a GPU, else CubeCL/CUDA, else WebGPU,
+    /// else LibTorch on CPU.
     #[default]
     Auto,
     /// CubeCL/CUDA kernels. NVIDIA only.
@@ -130,12 +131,12 @@ pub struct ConvertArgs {
     /// Pitch shift in semitones.
     #[arg(short = 't', long, default_value_t = 0)]
     pub transpose: i32,
-    /// Inference backend: `auto`, `onnx`, `cuda` (aliases `burn`, `burn-cuda`)
-    /// or `tch` (aliases `libtorch`, `burn-tch`).
+    /// Inference backend: `auto`, `onnx`, `cuda` (aliases `burn`, `burn-cuda`),
+    /// `tch` (`libtorch`, `burn-tch`) or `wgpu` (`webgpu`, `burn-wgpu`).
     #[arg(long, value_enum, default_value_t = InferBackend::Auto)]
     pub backend: InferBackend,
-    /// Compute device: `auto` (fastest visible), `cpu`, `cuda`, `cuda:N`, `mps`
-    /// or `vulkan`. `cpu`/`mps`/`vulkan` require `--backend tch`.
+    /// Compute device: `auto` (fastest visible), `cpu`, `gpu`, `gpu:N`, `mps` or
+    /// `vulkan` (`cuda`/`cuda:N` also accepted). The `cuda` backend has GPUs only.
     #[arg(long, default_value = "auto", value_name = "DEVICE", value_parser = parse_device)]
     pub device: rvc_core::DeviceSpec,
     #[command(flatten)]
@@ -152,13 +153,13 @@ pub struct ServeArgs {
     /// Samples per input read chunk from stdin (16 kHz mono f32le).
     #[arg(long, default_value_t = 1600)]
     pub chunk: usize,
-    /// Inference backend: `auto`, `onnx`, `cuda` (aliases `burn`, `burn-cuda`)
-    /// or `tch` (aliases `libtorch`, `burn-tch`). Note: the CubeCL/CUDA
-    /// generator is currently slower than realtime for `serve`.
+    /// Inference backend: `auto`, `onnx`, `cuda` (aliases `burn`, `burn-cuda`),
+    /// `tch` (`libtorch`, `burn-tch`) or `wgpu` (`webgpu`, `burn-wgpu`). Prefer
+    /// `tch` or `onnx` here — `cuda` does not keep up with realtime.
     #[arg(long, value_enum, default_value_t = InferBackend::Auto)]
     pub backend: InferBackend,
-    /// Compute device: `auto` (fastest visible), `cpu`, `cuda`, `cuda:N`, `mps`
-    /// or `vulkan`. `cpu`/`mps`/`vulkan` require `--backend tch`.
+    /// Compute device: `auto` (fastest visible), `cpu`, `gpu`, `gpu:N`, `mps` or
+    /// `vulkan` (`cuda`/`cuda:N` also accepted). The `cuda` backend has GPUs only.
     #[arg(long, default_value = "auto", value_name = "DEVICE", value_parser = parse_device)]
     pub device: rvc_core::DeviceSpec,
     #[command(flatten)]
@@ -282,8 +283,8 @@ pub struct TrainArgs {
     /// Number of training epochs; stop early with `q` or Ctrl-C (saves).
     #[arg(short = 'e', long, default_value_t = 5)]
     pub epochs: u32,
-    /// Mini-batch size (keep small for a 6 GB GPU).
-    #[arg(short = 'b', long, default_value_t = 2)]
+    /// Mini-batch size (lower it if a 6 GB GPU runs out of memory).
+    #[arg(short = 'b', long, default_value_t = 4)]
     pub batch_size: usize,
     /// Speaker id embedded in the generator (single-speaker: 0).
     #[arg(long, default_value_t = 0)]
@@ -317,13 +318,14 @@ pub struct TrainArgs {
     /// final ones.
     #[arg(long)]
     pub no_save_best: bool,
-    /// Compute backend: `auto`, `cuda` (alias `burn-cuda`) or `tch`
-    /// (aliases `libtorch`, `burn-tch`). Saved weights are identical either way.
+    /// Compute backend: `auto`, `cuda` (alias `burn-cuda`), `tch` (`libtorch`,
+    /// `burn-tch`) or `wgpu` (`webgpu`, `burn-wgpu`). All three train, and the
+    /// saved weights are the same whichever you pick.
     #[arg(long, value_enum, default_value_t = ComputeBackend::Auto)]
     pub backend: ComputeBackend,
     /// Compute device(s): `auto`, `cpu`, `gpu`, `gpu:N`, `mps`, `vulkan`
-    /// (`cuda`/`cuda:N` are accepted spellings of `gpu`). Repeat or comma-separate
-    /// for data-parallel training across devices — the first is the master.
+    /// (`cuda`/`cuda:N` are accepted spellings of `gpu`). Comma-separate for
+    /// data-parallel training across devices — the first is the master.
     #[arg(
         long,
         alias = "devices",

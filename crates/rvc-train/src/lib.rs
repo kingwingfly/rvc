@@ -185,8 +185,11 @@ fn resolve_backend(req: &TrainRequest) -> Result<TrainBackend> {
         );
     }
     let backend = match req.backend {
-        TrainBackend::Auto if rvc_core::auto_prefers_libtorch() => TrainBackend::LibTorch,
-        TrainBackend::Auto => TrainBackend::Cuda,
+        TrainBackend::Auto => match rvc_core::auto_backend() {
+            rvc_core::AutoBackend::LibTorch => TrainBackend::LibTorch,
+            rvc_core::AutoBackend::Cuda => TrainBackend::Cuda,
+            rvc_core::AutoBackend::Wgpu => TrainBackend::Wgpu,
+        },
         explicit => explicit,
     };
     Ok(backend)

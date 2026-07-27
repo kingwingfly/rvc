@@ -36,8 +36,8 @@ impl Runtime {
 /// Resolve `--backend` against the weights extension and the hardware present.
 ///
 /// `auto` reads the extension first (`.onnx` → ONNX Runtime), then asks
-/// [`rvc_core::auto_prefers_libtorch`]. An explicit choice is never substituted:
-/// if it can't run, loading it reports why.
+/// [`rvc_core::auto_backend`]. An explicit choice is never substituted: if it
+/// can't run, loading it reports why.
 pub fn resolve_runtime(backend: InferBackend, model: &Path) -> Runtime {
     match backend {
         InferBackend::Onnx => Runtime::Onnx,
@@ -48,10 +48,10 @@ pub fn resolve_runtime(backend: InferBackend, model: &Path) -> Runtime {
             if model.extension().and_then(|e| e.to_str()) == Some("onnx") {
                 return Runtime::Onnx;
             }
-            if rvc_core::auto_prefers_libtorch() {
-                Runtime::Tch
-            } else {
-                Runtime::Cuda
+            match rvc_core::auto_backend() {
+                rvc_core::AutoBackend::LibTorch => Runtime::Tch,
+                rvc_core::AutoBackend::Cuda => Runtime::Cuda,
+                rvc_core::AutoBackend::Wgpu => Runtime::Wgpu,
             }
         }
     }

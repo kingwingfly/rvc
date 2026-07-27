@@ -21,7 +21,7 @@ conversion step.
 Neither runtime is bundled or downloaded. Point at your own:
 
 ```sh
-export ORT_DYLIB_PATH=/usr/lib/libonnxruntime.so   # required
+export ORT_DYLIB_PATH=/absolute/path/to/libonnxruntime.so   # required if not installed system-wide
 ```
 
 ONNX Runtime is loaded dynamically, so this is a **run-time** variable — the same
@@ -39,7 +39,7 @@ is built. **Version must be 2.9.0** — that is what the `tch 0.22` bindings are
 generated against, and a distro PyTorch is usually too new.
 
 ```sh
-# cuNNN must match your driver: cu118 / cu121 / cu124 / cu126 / cu128
+# libTorch 2.9.0 currently includes binary distributions with CUDA 12.6, 12.8 or 13.0 runtimes. 
 wget https://download.pytorch.org/libtorch/cu126/libtorch-shared-with-deps-2.9.0%2Bcu126.zip
 unzip libtorch-shared-with-deps-2.9.0+cu126.zip     # -> ./libtorch
 export LIBTORCH=$PWD/libtorch
@@ -58,7 +58,6 @@ the binary.
 ## Install
 
 ```sh
-export ORT_DYLIB_PATH=/usr/lib/libonnxruntime.so
 export LIBTORCH=$PWD/libtorch      # omit to build without the tch backend
 cargo build --release              # -> target/release/rvc
 ```
@@ -83,7 +82,7 @@ time. `rvc train` takes the same flag, minus `onnx` (there is no ONNX training p
 | `cuda` | `burn`, `burn-cuda` | native Burn, CubeCL/CUDA kernels | NVIDIA only |
 | `tch` | `libtorch`, `burn-tch` | native Burn, LibTorch | CUDA, MPS, Vulkan, CPU |
 | `wgpu` | `webgpu`, `burn-wgpu` | native Burn, WebGPU | any Vulkan/Metal/DX12 GPU |
-| `auto` *(default)* | | for `convert`/`serve`: `.onnx` weights → `onnx`, else LibTorch on CUDA, else CubeCL/CUDA, else LibTorch on CPU. For `train`: always `cuda`. | |
+| `auto` *(default)* | | for `convert`/`serve`: `.onnx` weights → `onnx`, else LibTorch on CUDA, else CubeCL/CUDA, else LibTorch on CPU. For `train`: always `libtorch`, else CubeCL/CUDA, else CPU. | |
 
 `--device` picks *which* device inside the chosen backend: `auto` (default),
 `cpu`, `cuda`, `cuda:N`, `mps`, `vulkan`. Multiple GPUs are addressed by index
@@ -95,12 +94,6 @@ never a silent fallback; only `auto` substitutes.
 
 `wgpu` needs no vendor toolkit and runs on AMD, Intel and Apple GPUs, so it is
 the portable fallback where neither CUDA nor LibTorch is available.
-
-**Known issue:** training sometimes aborts at process *exit* (`corrupted
-double-linked list`) after the weights are written. It affects the CubeCL/CUDA
-path too, so it is not backend-specific, and the saved checkpoints are complete
-when it happens — but it does mean a non-zero exit code, so check for the output
-file rather than `$?` in scripts.
 
 ```sh
 rvc convert -m models/voice.safetensors --backend tch  --device cuda:0 -o out/ in.mp3
@@ -281,7 +274,7 @@ score is kept in the `.best.json` sidecar and read back on the next run, so
 resuming can only *improve* on the best you already have rather than overwrite it
 with wherever the new run happens to start. Pass `--no-save-best` to skip it.
 
-Notes: only 48 kHz is supported today; defaults are `-e 5` epochs and `-b 2`
+Notes: only 48 kHz is supported today; defaults are `-e 5` epochs and `-b 4`
 (safe on a 6 GB RTX 2060). One epoch is one pass over the corpus and can be slow
 on the native Burn/CUDA trainer — lean on early stop (`q`/Ctrl-C, which saves)
 rather than a big `-e`.
@@ -296,7 +289,7 @@ schedule and EMA **auto-scale to the run length**, so they stay sensible at any
   run, averaging out the adversarial oscillation so it's cleaner than the raw
   final step. EMA is a *saved snapshot only* — it does **not** slow learning. The
   raw weights are always also written to `<out>.raw.safetensors`; `--ema-frac 0`
-  saves only those.
+  saves only raws.
 - `--lr-final` (default `0.1`, **on**) with `--lr` (default `1e-4`) — the LR
   decays exponentially from `--lr` to `--lr × --lr-final` over the whole run. A
   constant LR bounces around the minimum; decay lets the late-training oscillation
@@ -322,7 +315,7 @@ implementation.
 Native Burn inference needs **no export**: `rvc convert`/`serve` run a trained
 `.safetensors` directly on the GPU. Export only matters when you want to run the
 generator under **ONNX Runtime** — notably realtime `serve`, which is faster on
-ORT than the Burn (CUDA) backend today — or to deploy the model in another
+ORT than the CubeCL/CUDA backend today — or to deploy the model in another
 framework.
 
 `export/` is the toolkit's **only Python**: a small, self-contained `uv` project
@@ -354,17 +347,24 @@ Setup and details: [`export/README.md`](export/README.md).
 ### 3. Batch-convert files
 
 ```sh
-# Burn generator (native) — pass the trained .safetensors
+# Native Burn generator — pass the trained .safetensors
 rvc convert -m models/voice.safetensors --model-sr 48000 -o out/  input1.mp3 input2.mp3
 
 # ONNX Runtime generator — pass a .onnx (built by the Export step above)
 rvc convert -m models/voice.onnx --model-sr 48000 -o out/  input1.mp3 input2.mp3
+
+# Force a compute backend and device
+rvc convert -m models/voice.safetensors --model-sr 48000 \
+  --backend tch --device gpu:0 -o out/  input1.mp3
 ```
 
 Writes `out/input1_voice.wav`, `out/input2_voice.wav` (named
-`<input>_<model>.wav`) in the target timbre. `--backend`
-(`auto`/`burn`/`onnx`) picks the generator; `auto` chooses by file extension
-(`.onnx` → ONNX Runtime, else Burn). The Burn generator runs on the GPU (CUDA).
+`<input>_<model>.wav`) in the target timbre.
+
+`--backend` picks the generator: `auto` (default), `onnx`, `cuda`, `tch` or
+`wgpu` — see [Compute backends & devices](#compute-backends--devices) for the
+aliases and what each needs. `auto` takes `.onnx` weights to ONNX Runtime and
+anything else to the fastest native backend available.
 
 Add `--denoise` to strip steady background **hiss** from the output — a
 conservative spectral suppressor that removes the constant noise floor while
@@ -389,10 +389,10 @@ ffmpeg -f alsa -i default -f f32le -ar 16000 -ac 1 - \
   | ffplay -f f32le -ar 48000 -
 ```
 
-`serve` takes the same `--backend` flag as `convert`; both runtimes stream
-through the same `Converter`. Use ONNX Runtime for realtime — the Burn (CUDA)
-generator works but is currently slower than onnx. Logs go to stderr, so
-stdout carries only PCM.
+`serve` takes the same `--backend` and `--device` flags as `convert`; every
+runtime streams through the same `Converter`. For realtime, prefer `--backend
+tch` or `onnx`: `cuda` (CubeCL) is ~9x slower per block and does not keep up.
+Logs go to stderr, so stdout carries only PCM.
 
 `serve` also takes `--denoise` (same conservative de-hiss as `convert`, ~21 ms
 extra latency). Or denoise downstream with ffmpeg:
@@ -485,9 +485,6 @@ LD_LIBRARY_PATH=$PWD/libtorch/lib \
   feature-matching + LSGAN) on cuda. Verified end-to-end on a real clip —
   losses decrease and the saved `.safetensors` round-trips through
   `rvc convert`.
-- **Inference works on all three backends**, and both `convert` and `serve` run
-  the native Burn generator on LibTorch or CubeCL/CUDA, or ONNX Runtime, through
-  one shared `Converter` (`--backend`). One binary carries them all.
 - **Three compute backends, one binary**: CubeCL/CUDA, LibTorch and WebGPU, all
   for both inference and training, picked at run time with `--backend`. LibTorch
   is ~9× faster per file than CubeCL/CUDA on an RTX 2060 and is what `auto`
