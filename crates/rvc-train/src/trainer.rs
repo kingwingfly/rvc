@@ -1,6 +1,6 @@
 //! The RVC fine-tuning loop (Burn autodiff on CUDA).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 
 use anyhow::{Context, Result, anyhow};
@@ -12,6 +12,7 @@ use burn::tensor::{Int, Tensor, TensorData, TensorPrimitive};
 use burn_rvc::{MultiPeriodDiscriminator, Synthesizer, SynthesizerConfig};
 
 use crate::TrainRequest;
+use crate::checkpoint::Checkpoint;
 use crate::dashboard::Dashboard;
 use crate::dataset::{CONTENT_DIM, Clip, HOP, Rng, clip_weights, sample_batch};
 use crate::losses::{disc_loss, feature_matching, gen_adv, kl, mel_l1};
@@ -20,7 +21,7 @@ use crate::spectral::{Spectral, SpectralConfig};
 /// Autodiff GPU backend.
 type AB = Autodiff<Cuda>;
 /// Inner (non-autodiff) backend — gradients and the saved/EMA weights live here.
-type IB = Cuda;
+pub(crate) type IB = Cuda;
 
 const SEGMENT_FRAMES: usize = 36; // 17280 samples / 480 hop
 /// Context window (frames) fed to enc_q/flow each step; clips must be at least
@@ -41,20 +42,9 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
 
     // ---- Generator: resume a prior run, else warm-start, else scratch -------
     let mut net_g = Synthesizer::<AB>::new(&cfg, &device);
-    if let Some(requested) = &req.resume {
-        // Resume from a generator .safetensors written by an earlier run,
-        // preferring the raw (non-EMA) live twin when it exists: it's the actual
-        // last-step generator that co-evolved with the saved discriminator, so
-        // `raw-G <-> live-D` is the faithful GAN-resume pairing (the EMA snapshot
-        // is a smoothed average that never itself faced D).
-        let p = prefer_raw_twin(requested);
-        if p != *requested {
-            tracing::info!(
-                "resume: preferring raw live weights {} over the EMA snapshot {}",
-                p.display(),
-                requested.display()
-            );
-        }
+    let resume = req.resume.as_deref().map(Checkpoint::new);
+    if let Some(ck) = &resume {
+        let p = ck.resume_from();
         let res = net_g
             .load_weights(&p)
             .map_err(|e| anyhow!("resuming G from {}: {e}", p.display()))?;
@@ -83,11 +73,7 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
 
     // ---- Discriminator: resume from the sidecar if present, else warm-start -
     let mut disc = MultiPeriodDiscriminator::<AB>::new(&device);
-    let disc_resume = req
-        .resume
-        .as_deref()
-        .map(disc_sidecar_path)
-        .filter(|p| p.exists());
+    let disc_resume = resume.as_ref().map(Checkpoint::disc).filter(|p| p.exists());
     if let Some(p) = &disc_resume {
         let res = disc
             .load_safetensors(p)
@@ -108,7 +94,7 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
             res.missing.len()
         );
         tracing::info!("warm-started discriminator from {}", p.display());
-    } else if req.resume.is_some() {
+    } else if resume.is_some() {
         tracing::warn!(
             "resuming without a discriminator checkpoint or --pretrained-d: \
              the discriminator starts fresh (adversarial training will lag)"
@@ -174,22 +160,20 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
     let sid = req.settings.speaker_id;
     let seg_len = SEGMENT_FRAMES * HOP;
 
-    // Generator weight EMA (kept on the inner backend). The saved model is the
-    // EMA — averaged over the adversarial oscillation, so cleaner. `None` when
-    // disabled (`--ema-frac 0`), in which case the raw live weights are saved.
+    // Generator weight EMA (kept on the inner backend): averaged over the
+    // adversarial oscillation, so cleaner than any single step, and what every
+    // checkpoint deploys. `None` when disabled (`--ema-frac 0`).
     let mut ema: Option<Synthesizer<IB>> = (ema_decay > 0.0).then(|| net_g.valid());
 
-    let out = req.out.with_extension("safetensors");
+    let out = Checkpoint::new(&req.out);
 
-    // "Best" checkpointing (on unless `--no-save-best`): the per-step mel is noisy enough
-    // that its single-step minimum is mostly luck, so we compare the *mean* over a
-    // window sized to give ~20 evaluations over a run of any length. Each hit
-    // rewrites a full G + D pair, so keeping the count bounded also keeps the I/O
-    // negligible next to the compute.
-    let best_path = req.settings.save_best.then(|| best_path(&out));
+    // Best-so-far checkpointing (on unless `--no-save-best`). The per-step mel is
+    // noisy enough that its minimum is mostly luck, so we compare the *mean* over
+    // a window sized to give ~20 evaluations over a run of any length — which also
+    // bounds the writes.
+    let best = req.settings.save_best.then(|| out.best());
     let best_window = (total_steps / 20).max(1);
     let mut best_mel = f32::INFINITY;
-    let mut best_step: Option<usize> = None;
     let (mut win_sum, mut win_n) = (0.0f32, 0usize);
 
     let mut dash = Dashboard::new(
@@ -334,34 +318,13 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
             );
         }
 
-        // Snapshot the best-so-far weights. What we save is what a deploy would
-        // use (the EMA when enabled), even though the mel we score is the live
-        // generator's — the EMA trails it, which is the point.
-        if let Some(p) = &best_path {
+        if let Some(ck) = &best {
             win_sum += mel_scalar;
             win_n += 1;
-            if win_n >= best_window {
+            if win_n == best_window {
                 let mean = win_sum / win_n as f32;
-                win_sum = 0.0;
-                win_n = 0;
-                if mean.is_finite() && mean < best_mel {
-                    match save_checkpoint(ema.as_ref(), &net_g, &disc, p) {
-                        // Only claim the new best once it's actually on disk, so
-                        // a failed write doesn't block a later (slightly worse)
-                        // minimum from being saved.
-                        Ok(()) => {
-                            best_mel = mean;
-                            best_step = Some(step);
-                            tracing::info!(
-                                "new best mel {:.3} at step {}; saved {}",
-                                mean,
-                                step,
-                                p.display()
-                            );
-                        }
-                        Err(e) => tracing::warn!("could not save best checkpoint: {e:#}"),
-                    }
-                }
+                (win_sum, win_n) = (0.0, 0);
+                keep_best(ck, &mut best_mel, mean, ema.as_ref(), &net_g, &disc);
             }
         }
     }
@@ -372,119 +335,42 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
         tracing::info!("stopped early; saving current weights");
     }
 
-    // Save the fine-tuned generator (inference-backend weights). With EMA on,
-    // the saved model is the EMA — averaged over the adversarial oscillation, so
-    // cleaner and less staticky than the raw final step.
-    save_generator(ema.as_ref(), &net_g, &out).with_context(|| "saving trained weights")?;
-    if ema.is_some() {
-        tracing::info!("saved EMA generator to {}", out.display());
-        // Keep the raw (non-EMA) live weights alongside for resume/debug.
-        let raw = out.with_extension("raw.safetensors");
-        if let Err(e) = net_g.valid().save_safetensors(&raw) {
-            tracing::warn!("could not write raw weights {}: {e}", raw.display());
-        }
-    } else {
-        tracing::info!("saved generator to {}", out.display());
+    // Judge the partial window an early stop (or a ragged tail) leaves behind:
+    // when a run is cut short that window is the likeliest best, and dropping it
+    // would mean a stopped-early run produced no best checkpoint at all.
+    if let (Some(ck), true) = (&best, win_n > 0) {
+        let mean = win_sum / win_n as f32;
+        keep_best(ck, &mut best_mel, mean, ema.as_ref(), &net_g, &disc);
     }
 
-    // Save the discriminator alongside it so a later `--continue <out>` resumes
-    // the adversary too (a best-effort sidecar; a failure here must not discard
-    // the generator we already wrote).
-    let disc_out = disc_sidecar_path(&out);
-    match disc.valid().save_safetensors(&disc_out) {
-        Ok(()) => tracing::info!("saved discriminator checkpoint to {}", disc_out.display()),
-        Err(e) => tracing::warn!(
-            "could not save discriminator checkpoint {}: {e} (resume will fall back to --pretrained-d)",
-            disc_out.display()
-        ),
-    }
-
-    if let (Some(p), Some(step)) = (&best_path, best_step) {
+    out.save(ema.as_ref(), &net_g.valid(), &disc.valid())
+        .context("saving trained weights")?;
+    if let (Some(ck), true) = (&best, best_mel.is_finite()) {
         tracing::info!(
-            "best checkpoint: mel {:.3} (step {}) at {} (+ {})",
-            best_mel,
-            step,
-            p.display(),
-            disc_sidecar_path(p).display()
-        );
-    } else if best_path.is_some() {
-        tracing::warn!(
-            "no best checkpoint was written (the run was too short to complete a window)"
+            "best checkpoint (mel {best_mel:.3}): {}",
+            ck.generator().display()
         );
     }
-    Ok(out)
+    Ok(out.generator())
 }
 
-/// Sidecar path for the discriminator checkpoint that pairs with a generator
-/// safetensors: `voice.safetensors` -> `voice.disc.safetensors`.
-///
-/// A run also writes the raw (non-EMA) live weights as `voice.raw.safetensors`,
-/// which is the natural thing to `--resume` from. That twin must resolve to the
-/// *same* sidecar as its EMA output, so we drop a trailing `.raw` stem first —
-/// otherwise `--resume voice.raw.safetensors` would look for the non-existent
-/// `voice.raw.disc.safetensors` and the discriminator would silently start fresh.
-fn disc_sidecar_path(generator: &std::path::Path) -> PathBuf {
-    let base = match generator.file_stem().and_then(|s| s.to_str()) {
-        Some(stem) if stem.ends_with(".raw") => {
-            generator.with_file_name(&stem[..stem.len() - ".raw".len()])
-        }
-        _ => generator.to_path_buf(),
-    };
-    base.with_extension("disc.safetensors")
-}
-
-/// Path of the *best* checkpoint that pairs with a run's output weights:
-/// `models/voice.safetensors` -> `models/checkpoint/voice.best.safetensors`.
-///
-/// It lives in its own `checkpoint/` subdirectory so it never collides with the
-/// final output, and keeps the run's suffix so [`disc_sidecar_path`] yields the
-/// matching `voice.best.disc.safetensors` — i.e. `--resume` accepts it as-is.
-fn best_path(out: &Path) -> PathBuf {
-    let dir = out.parent().unwrap_or(Path::new(".")).join("checkpoint");
-    let name = out.file_stem().and_then(|s| s.to_str()).unwrap_or("voice");
-    let suffix = out
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("safetensors");
-    dir.join(format!("{name}.best.{suffix}"))
-}
-
-/// Save a generator + discriminator pair to `path` and its `.disc` sidecar.
-///
-/// Unlike the end-of-run save this is all-or-nothing: a half-written pair is
-/// worse than none, since the two are only useful together on `--resume`.
-fn save_checkpoint(
+/// Save `ck` when `mean` beats `best`. `best` advances only once the whole family
+/// is on disk, so a failed write can't block a later minimum from being saved.
+fn keep_best(
+    ck: &Checkpoint,
+    best: &mut f32,
+    mean: f32,
     ema: Option<&Synthesizer<IB>>,
     net_g: &Synthesizer<AB>,
     disc: &MultiPeriodDiscriminator<AB>,
-    path: &Path,
-) -> Result<()> {
-    save_generator(ema, net_g, path)?;
-    let d = disc_sidecar_path(path);
-    disc.valid()
-        .save_safetensors(&d)
-        .map_err(|e| anyhow!("saving {}: {e}", d.display()))
-}
-
-/// Resolve which generator to actually resume from, preferring the raw
-/// (non-EMA) live twin when it exists: `voice.safetensors` -> the sibling
-/// `voice.raw.safetensors`, if present. The raw weights are the real last-step
-/// generator that co-evolved with the saved discriminator, so `raw-G <-> live-D`
-/// is the faithful GAN-resume pairing. A path that is already the raw twin (or
-/// has no sibling twin) is returned unchanged.
-fn prefer_raw_twin(resume: &std::path::Path) -> PathBuf {
-    let already_raw = resume
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .is_some_and(|stem| stem.ends_with(".raw"));
-    if already_raw {
-        return resume.to_path_buf();
+) {
+    if mean.is_nan() || mean >= *best {
+        return;
     }
-    let raw = resume.with_extension("raw.safetensors");
-    if raw.exists() {
-        raw
-    } else {
-        resume.to_path_buf()
+    tracing::info!("new best mel {mean:.3}");
+    match ck.save(ema, &net_g.valid(), &disc.valid()) {
+        Ok(()) => *best = mean,
+        Err(e) => tracing::warn!("could not save best checkpoint: {e:#}"),
     }
 }
 
@@ -581,80 +467,9 @@ fn ema_update(ema: Synthesizer<IB>, net_g: &Synthesizer<AB>, keep: f64) -> Synth
         prims: collect.prims,
         keep,
     };
-    ema.map(&mut blend)
-}
-
-/// Save the generator: the EMA weights if present, else the raw live weights.
-fn save_generator(
-    ema: Option<&Synthesizer<IB>>,
-    net_g: &Synthesizer<AB>,
-    path: &Path,
-) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    let res = match ema {
-        Some(e) => e.save_safetensors(path),
-        None => net_g.valid().save_safetensors(path),
-    };
-    res.map_err(|e| anyhow!("saving {}: {e}", path.display()))?;
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{best_path, disc_sidecar_path, prefer_raw_twin};
-    use std::path::{Path, PathBuf};
-
-    #[test]
-    fn best_checkpoint_lands_in_the_checkpoint_dir_with_a_sidecar() {
-        let best = best_path(Path::new("models/voice.safetensors"));
-        assert_eq!(
-            best,
-            PathBuf::from("models/checkpoint/voice.best.safetensors")
-        );
-        // It must be resumable as-is: its sidecar is the *best* discriminator,
-        // not the final run's.
-        assert_eq!(
-            disc_sidecar_path(&best),
-            PathBuf::from("models/checkpoint/voice.best.disc.safetensors")
-        );
-        // A bare output name (no directory) still gets a checkpoint dir.
-        assert_eq!(
-            best_path(Path::new("voice.safetensors")),
-            PathBuf::from("checkpoint/voice.best.safetensors")
-        );
-    }
-
-    #[test]
-    fn disc_sidecar_matches_ema_and_raw() {
-        // The EMA output and its raw twin must resolve to the *same* sidecar,
-        // so `--resume voice.raw.safetensors` finds the discriminator saved
-        // next to `voice.safetensors`.
-        let want = PathBuf::from("out/voice.disc.safetensors");
-        assert_eq!(disc_sidecar_path(Path::new("out/voice.safetensors")), want);
-        assert_eq!(
-            disc_sidecar_path(Path::new("out/voice.raw.safetensors")),
-            want
-        );
-    }
-
-    #[test]
-    fn prefer_raw_twin_switches_only_when_twin_exists() {
-        let dir = std::env::temp_dir().join(format!("rvc-twin-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let ema = dir.join("voice.safetensors");
-        let raw = dir.join("voice.raw.safetensors");
-
-        // No raw twin yet: resuming from the EMA path stays put.
-        assert_eq!(prefer_raw_twin(&ema), ema);
-
-        // Once the raw twin exists, the EMA path resolves to it...
-        std::fs::write(&raw, b"x").unwrap();
-        assert_eq!(prefer_raw_twin(&ema), raw);
-        // ...while an already-raw path is returned unchanged (no double `.raw`).
-        assert_eq!(prefer_raw_twin(&raw), raw);
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
+    let blended = ema.map(&mut blend);
+    // Pairing is positional, so a `map`/`visit` order drift would silently blend
+    // the wrong weights together. Leftovers prove the two disagreed on the count.
+    assert!(blend.prims.is_empty(), "ema source overflow");
+    blended
 }

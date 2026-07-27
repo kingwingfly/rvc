@@ -106,21 +106,38 @@ fields with matching `rvc train` flags; two are on by default.
   breathy passages the slicer works to preserve are not penalised. `frame_snr`
   and the cumulative-weight sampling live in `dataset.rs`.
 
-The final model is `<out>.safetensors` (the EMA when enabled) plus
-`<out>.raw.safetensors` and the `<out>.disc.safetensors` sidecar. There is no
-*periodic*-checkpoint machinery; there is one extra snapshot:
+### Checkpoints
 
-- **Best checkpoint** (**on**; `--no-save-best` disables). Writes the generator and
-  its discriminator to `<out-dir>/checkpoint/<name>.best[.disc].safetensors`
-  whenever the `mel` loss hits a new minimum, so a run that drifts late still
-  leaves its best model behind. The comparison is on the *mean* mel over a window
-  of `total_steps/20` steps — the per-step loss is noisy enough that its single-step
-  minimum is luck — which also bounds the run to ~20 full G+D writes. The G/D pair
-  is saved together and only counts as the new best once both land, so `--resume`
-  on it always finds the *matching* discriminator (`best_path`/`save_checkpoint`
-  in `trainer.rs`; the `.best` stem feeds the existing `disc_sidecar_path`).
-  What's saved is what a deploy uses (the EMA when enabled), even though the mel
-  scored is the live generator's.
+`checkpoint.rs` owns everything about saved weights. A checkpoint is one family
+of files sharing a stem, and *every* save writes the same family:
+
+```
+<out>.safetensors        the deployable generator — the EMA when it's on
+<out>.raw.safetensors    its raw (non-EMA) live twin        [only with EMA on]
+<out>.disc.safetensors   the discriminator that co-evolved with that twin
+```
+
+`Checkpoint::new` accepts any spelling of a family (with or without the suffix,
+generator or raw twin) and `resume_from` picks the twin when it exists, so
+`--resume` continues from the `raw-G ↔ live-D` pairing that actually played the
+adversarial game rather than from the EMA, which never itself faced D. Members
+are built from the *stem* rather than `Path::with_extension` — that only sees the
+last dot, and on `voice.best.raw.safetensors` it would strip `.best` along with
+`.raw` and point resume at a different run's discriminator.
+
+There is no *periodic*-checkpoint machinery; there is one extra snapshot:
+
+- **Best checkpoint** (**on**; `--no-save-best` disables). `Checkpoint::best()` is
+  the same family under `<out-dir>/checkpoint/` with a `.best` stem, written
+  whenever the `mel` loss hits a new minimum — so a run that drifts late still
+  leaves its best model behind, and that model deploys and resumes exactly like
+  the final one. The comparison is on the *mean* mel over a window of
+  `total_steps/20` steps (the per-step loss is noisy enough that its single-step
+  minimum is luck), which also bounds the run to ~20 checkpoint writes. A family
+  counts as the new best only once all its files land, so a failed write can't
+  leave a generator paired with a stale discriminator. What's saved is what a
+  deploy uses (the EMA), even though the mel scored is the live generator's —
+  which is exactly why the raw twin matters: it's the G that faced the D beside it.
 
 3. **ONNX export** — the one allowed Python step, kept **minimal and standalone**.
    A small self-contained `uv` project (~one torch file) defines the inference

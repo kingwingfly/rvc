@@ -6,6 +6,7 @@
 //! pretrained bases, and save the result as safetensors. Deploy either directly
 //! (`rvc convert --backend burn`) or via the ONNX export helper.
 
+mod checkpoint;
 mod dashboard;
 mod dataset;
 mod losses;
