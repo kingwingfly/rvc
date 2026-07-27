@@ -147,6 +147,23 @@ If the discriminator sidecar is missing it falls back to `--pretrained-d` (pass
 it), else the discriminator starts fresh. Note that optimizer (AdamW) momentum
 is not persisted across runs — negligible for short fine-tunes.
 
+**The best checkpoint (on by default).** A run that drifts in its last stretch
+would otherwise lose its best model, so whenever the `mel` loss reaches a new low
+the trainer snapshots the generator **and** its discriminator next to the output:
+
+```sh
+rvc train --out models/voice …  # -> models/checkpoint/voice.best.safetensors
+                                #    models/checkpoint/voice.best.disc.safetensors
+```
+
+The pair is a normal checkpoint — deploy it with `rvc convert -m
+models/checkpoint/voice.best.safetensors`, or `--resume` from it (its sidecar is
+the *matching* discriminator, not the final run's). What's compared is the mean
+`mel` over a window sized to give ~20 evaluations across the run, not a single
+step, since the per-step loss is noisy enough that its minimum is mostly luck;
+what's written is the same thing the final save writes (the EMA when enabled).
+Pass `--no-save-best` to skip it (saves ~20 extra weight writes over a run).
+
 Notes: only 48 kHz is supported today; defaults are `-e 5` epochs and `-b 2`
 (safe on a 6 GB RTX 2060). One epoch is one pass over the corpus and can be slow
 on the native Burn/CUDA trainer — lean on early stop (`q`/Ctrl-C, which saves)

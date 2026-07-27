@@ -106,9 +106,21 @@ fields with matching `rvc train` flags; two are on by default.
   breathy passages the slicer works to preserve are not penalised. `frame_snr`
   and the cumulative-weight sampling live in `dataset.rs`.
 
-Only the final model is written: `<out>.safetensors` (the EMA when enabled) plus
-`<out>.raw.safetensors` and the `<out>.disc.safetensors` sidecar — there is no
-periodic-checkpoint machinery.
+The final model is `<out>.safetensors` (the EMA when enabled) plus
+`<out>.raw.safetensors` and the `<out>.disc.safetensors` sidecar. There is no
+*periodic*-checkpoint machinery; there is one extra snapshot:
+
+- **Best checkpoint** (**on**; `--no-save-best` disables). Writes the generator and
+  its discriminator to `<out-dir>/checkpoint/<name>.best[.disc].safetensors`
+  whenever the `mel` loss hits a new minimum, so a run that drifts late still
+  leaves its best model behind. The comparison is on the *mean* mel over a window
+  of `total_steps/20` steps — the per-step loss is noisy enough that its single-step
+  minimum is luck — which also bounds the run to ~20 full G+D writes. The G/D pair
+  is saved together and only counts as the new best once both land, so `--resume`
+  on it always finds the *matching* discriminator (`best_path`/`save_checkpoint`
+  in `trainer.rs`; the `.best` stem feeds the existing `disc_sidecar_path`).
+  What's saved is what a deploy uses (the EMA when enabled), even though the mel
+  scored is the live generator's.
 
 3. **ONNX export** — the one allowed Python step, kept **minimal and standalone**.
    A small self-contained `uv` project (~one torch file) defines the inference

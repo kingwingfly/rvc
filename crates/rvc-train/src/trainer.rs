@@ -179,6 +179,19 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
     // disabled (`--ema-frac 0`), in which case the raw live weights are saved.
     let mut ema: Option<Synthesizer<IB>> = (ema_decay > 0.0).then(|| net_g.valid());
 
+    let out = req.out.with_extension("safetensors");
+
+    // "Best" checkpointing (on unless `--no-save-best`): the per-step mel is noisy enough
+    // that its single-step minimum is mostly luck, so we compare the *mean* over a
+    // window sized to give ~20 evaluations over a run of any length. Each hit
+    // rewrites a full G + D pair, so keeping the count bounded also keeps the I/O
+    // negligible next to the compute.
+    let best_path = req.settings.save_best.then(|| best_path(&out));
+    let best_window = (total_steps / 20).max(1);
+    let mut best_mel = f32::INFINITY;
+    let mut best_step: Option<usize> = None;
+    let (mut win_sum, mut win_n) = (0.0f32, 0usize);
+
     let mut dash = Dashboard::new(
         req.settings.use_tui,
         steps_per_epoch,
@@ -320,6 +333,37 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
                 mel_scalar
             );
         }
+
+        // Snapshot the best-so-far weights. What we save is what a deploy would
+        // use (the EMA when enabled), even though the mel we score is the live
+        // generator's — the EMA trails it, which is the point.
+        if let Some(p) = &best_path {
+            win_sum += mel_scalar;
+            win_n += 1;
+            if win_n >= best_window {
+                let mean = win_sum / win_n as f32;
+                win_sum = 0.0;
+                win_n = 0;
+                if mean.is_finite() && mean < best_mel {
+                    match save_checkpoint(ema.as_ref(), &net_g, &disc, p) {
+                        // Only claim the new best once it's actually on disk, so
+                        // a failed write doesn't block a later (slightly worse)
+                        // minimum from being saved.
+                        Ok(()) => {
+                            best_mel = mean;
+                            best_step = Some(step);
+                            tracing::info!(
+                                "new best mel {:.3} at step {}; saved {}",
+                                mean,
+                                step,
+                                p.display()
+                            );
+                        }
+                        Err(e) => tracing::warn!("could not save best checkpoint: {e:#}"),
+                    }
+                }
+            }
+        }
     }
 
     // Close the TUI (restores the terminal) before we log/save.
@@ -331,7 +375,6 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
     // Save the fine-tuned generator (inference-backend weights). With EMA on,
     // the saved model is the EMA — averaged over the adversarial oscillation, so
     // cleaner and less staticky than the raw final step.
-    let out = req.out.with_extension("safetensors");
     save_generator(ema.as_ref(), &net_g, &out).with_context(|| "saving trained weights")?;
     if ema.is_some() {
         tracing::info!("saved EMA generator to {}", out.display());
@@ -355,6 +398,20 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
             disc_out.display()
         ),
     }
+
+    if let (Some(p), Some(step)) = (&best_path, best_step) {
+        tracing::info!(
+            "best checkpoint: mel {:.3} (step {}) at {} (+ {})",
+            best_mel,
+            step,
+            p.display(),
+            disc_sidecar_path(p).display()
+        );
+    } else if best_path.is_some() {
+        tracing::warn!(
+            "no best checkpoint was written (the run was too short to complete a window)"
+        );
+    }
     Ok(out)
 }
 
@@ -374,6 +431,39 @@ fn disc_sidecar_path(generator: &std::path::Path) -> PathBuf {
         _ => generator.to_path_buf(),
     };
     base.with_extension("disc.safetensors")
+}
+
+/// Path of the *best* checkpoint that pairs with a run's output weights:
+/// `models/voice.safetensors` -> `models/checkpoint/voice.best.safetensors`.
+///
+/// It lives in its own `checkpoint/` subdirectory so it never collides with the
+/// final output, and keeps the run's suffix so [`disc_sidecar_path`] yields the
+/// matching `voice.best.disc.safetensors` — i.e. `--resume` accepts it as-is.
+fn best_path(out: &Path) -> PathBuf {
+    let dir = out.parent().unwrap_or(Path::new(".")).join("checkpoint");
+    let name = out.file_stem().and_then(|s| s.to_str()).unwrap_or("voice");
+    let suffix = out
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("safetensors");
+    dir.join(format!("{name}.best.{suffix}"))
+}
+
+/// Save a generator + discriminator pair to `path` and its `.disc` sidecar.
+///
+/// Unlike the end-of-run save this is all-or-nothing: a half-written pair is
+/// worse than none, since the two are only useful together on `--resume`.
+fn save_checkpoint(
+    ema: Option<&Synthesizer<IB>>,
+    net_g: &Synthesizer<AB>,
+    disc: &MultiPeriodDiscriminator<AB>,
+    path: &Path,
+) -> Result<()> {
+    save_generator(ema, net_g, path)?;
+    let d = disc_sidecar_path(path);
+    disc.valid()
+        .save_safetensors(&d)
+        .map_err(|e| anyhow!("saving {}: {e}", d.display()))
 }
 
 /// Resolve which generator to actually resume from, preferring the raw
@@ -513,8 +603,28 @@ fn save_generator(
 
 #[cfg(test)]
 mod tests {
-    use super::{disc_sidecar_path, prefer_raw_twin};
+    use super::{best_path, disc_sidecar_path, prefer_raw_twin};
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn best_checkpoint_lands_in_the_checkpoint_dir_with_a_sidecar() {
+        let best = best_path(Path::new("models/voice.safetensors"));
+        assert_eq!(
+            best,
+            PathBuf::from("models/checkpoint/voice.best.safetensors")
+        );
+        // It must be resumable as-is: its sidecar is the *best* discriminator,
+        // not the final run's.
+        assert_eq!(
+            disc_sidecar_path(&best),
+            PathBuf::from("models/checkpoint/voice.best.disc.safetensors")
+        );
+        // A bare output name (no directory) still gets a checkpoint dir.
+        assert_eq!(
+            best_path(Path::new("voice.safetensors")),
+            PathBuf::from("checkpoint/voice.best.safetensors")
+        );
+    }
 
     #[test]
     fn disc_sidecar_matches_ema_and_raw() {

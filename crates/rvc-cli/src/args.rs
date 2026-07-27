@@ -257,6 +257,11 @@ pub struct TrainArgs {
     /// not loudness). `0` = uniform.
     #[arg(long, default_value_t = 0.0)]
     pub snr_weight: f32,
+    /// Don't keep the best-so-far (lowest mel) weights in
+    /// `<out-dir>/checkpoint/<name>.best[.disc].safetensors`; save only the
+    /// final ones.
+    #[arg(long)]
+    pub no_save_best: bool,
     /// Directory for the training log and saved weights.
     #[arg(long, default_value = "models/train")]
     pub work_dir: PathBuf,

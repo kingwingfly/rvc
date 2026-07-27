@@ -58,6 +58,12 @@ pub struct TrainSettings {
     /// `snr^alpha` (noise-floor SNR, **not** loudness) so cleaner clips are drawn
     /// more often while soft/breathy passages are preserved.
     pub snr_weight: f32,
+    /// Also keep a *best* checkpoint (on by default; `rvc train --no-save-best`):
+    /// whenever the windowed-mean `mel` loss hits a new minimum, write the
+    /// generator and its discriminator sidecar to
+    /// `<out-dir>/checkpoint/<name>.best[.disc].safetensors`. `false` = only the
+    /// final weights are written.
+    pub save_best: bool,
     /// Show Burn's interactive TUI dashboard (the caller must have routed logs
     /// off stderr; disable for non-TTY output).
     pub use_tui: bool,

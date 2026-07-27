@@ -74,6 +74,7 @@ pub async fn run(args: TrainArgs) -> Result<()> {
             d_lr_ratio: args.d_lr_ratio,
             d_interval: args.d_interval,
             snr_weight: args.snr_weight,
+            save_best: !args.no_save_best,
             use_tui,
         },
         stop,
