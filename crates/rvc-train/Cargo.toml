@@ -26,3 +26,7 @@ tracing.workspace = true
 # `metrics` enables burn-train's sys-metrics (CPU via sysinfo, GPU via NVML) for
 # the dashboard's CPU/GPU usage lines.
 burn = { workspace = true, features = ["autodiff", "train", "tui", "metrics"] }
+
+[dev-dependencies]
+# CPU backend so the data-parallel plumbing can be tested without a GPU.
+burn-ndarray = "0.21"
