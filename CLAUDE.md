@@ -4,13 +4,44 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`rvc` is a pure-Rust RVC v2 voice-conversion toolkit: it retimbres a source voice
-into a trained target voice while preserving content + F0 pitch (so breathy/expressive
+`voice` is a pure-Rust speech toolkit whose engines compose over Unix pipes:
+`voice -(stt)-> text -(translate)-> text -(tts)-> voice -(rvc)-> voice`. Only the
+`rvc` stage exists today.
+
+`rvc` is RVC v2 voice conversion: it retimbres a source voice into a trained
+target voice while preserving content + F0 pitch (so breathy/expressive
 vocalizations survive by construction). Inference runs on **three interchangeable
 generator backends** — ONNX Runtime (`ort`), and native Burn on either LibTorch
 (`burn-tch`, ~9x faster), CubeCL/CUDA or WebGPU — and training is native Rust/Burn
-on any of the three. The only Python is a standalone `.safetensors → ONNX` exporter
-under `export/`.
+on any of the three.
+
+### Three rules that are easy to break silently
+
+**No Python.** Not for users, not for developers, not for setup. New models are
+**ported to Burn** and load their original Hugging Face weights directly, training
+loops included — never wrapped in a Python process, a `uv` project, or a
+preprocessing script. Reading a cloned upstream repo as a porting reference is
+fine; running or shipping it is not. This is not a style preference: driving the
+RVC Python repo directly was tried and abandoned because it was unmaintainable
+for the authors and unusable for anyone else. The single `.safetensors → ONNX`
+exporter under `export/` is the last exception, gains no new responsibilities,
+and should eventually go.
+
+**Two binaries.** `rvc` (`crates/rvc-cli`) is voice conversion on its own;
+`voice` (`crates/voice-cli`) is the whole toolkit and hosts the same subcommands
+as `voice rvc …`. `rvc-cli` is a **library as well as a binary** and `voice-cli`
+depends on it, so an argument is defined exactly once — never copy a flag between
+them. `rvc-cli::args::RvcCommand` is `#[command(flatten)]`ed by `rvc` and nested
+by `voice`. User-facing strings in shared code must not name a binary
+("train one with the `train` subcommand", not "`rvc train`").
+
+**No engine depends on another engine.** Voice conversion, recognition and
+synthesis are siblings. Anything two of them need moves to a neutral crate first.
+
+### Naming conventions
+Network crates are named after the **model** (`burn-rvc`, reads like
+`burn_dinov3`) and hold no app dependencies. App crates are named after the
+**job** (`rvc-core` is the voice-conversion pipeline, not one model).
 
 ## Build / run / verify
 
@@ -19,7 +50,8 @@ under `export/`.
 export ORT_DYLIB_PATH=/usr/lib/libonnxruntime.so
 export LIBTORCH=$PWD/libtorch   # must be exactly 2.9.0 (what tch 0.22 targets)
 
-cargo build --release           # ort + both Burn compute backends, one binary
+cargo build --release           # both binaries: `rvc` and `voice`
+cargo build --release -p rvc-cli   # just `rvc`
 cargo check -p rvc-core  --features cuda,tch
 cargo check -p rvc-train --features cuda,tch    # where the trait bounds bite
 cargo clippy --workspace        # workspace is kept clippy-clean
@@ -27,7 +59,8 @@ cargo fmt
 
 # `--backend auto|onnx|cuda|tch` (aliases: burn/burn-cuda, libtorch/burn-tch);
 # `--device auto|cpu|cuda|cuda:N|mps|vulkan`. Both default to auto.
-cargo run -p rvc-cli -- convert -m models/voice.safetensors --model-sr 48000 -o out/ in.mp3
+cargo run -p rvc-cli   --      convert -m models/voice.safetensors --model-sr 48000 -o out/ in.mp3
+cargo run -p voice-cli -- rvc  convert -m models/voice.safetensors --model-sr 48000 -o out/ in.mp3
 
 # No LibTorch on the machine? Drop it (then `--backend tch` errors cleanly):
 cargo build --release --no-default-features --features cuda
@@ -54,7 +87,8 @@ Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper
 | `burn-rvc` | the RVC v2 network itself (standalone Burn port of `SynthesizerTrnMs768NSFsid` + `MultiPeriodDiscriminator`); no app deps |
 | `rvc-train` | native Rust/Burn adversarial training loop (see `crates/rvc-train/ARCHITECTURE.md`) |
 | `rvc-hub` | auto-download ContentVec/RMVPE ONNX from Hugging Face |
-| `rvc-cli` | the `rvc` binary (clap): `convert`, `serve`, `models`, `train`, `preprocess` |
+| `rvc-cli` | lib **and** the `rvc` binary (clap): `convert`, `serve`, `models`, `train`, `preprocess` |
+| `voice-cli` | the `voice` binary: `rvc-cli`'s subcommands nested under `voice rvc …`, plus the rest of the toolkit |
 
 ### Three runtimes, one path (the key abstraction)
 Everything downstream of the generator is shared: the same `FeatureExtractor`, the
@@ -89,12 +123,6 @@ would otherwise be a multi-GB download of a **CPU-only** LibTorch.
 `crates/rvc-cli/build.rs` bakes `$LIBTORCH/lib` into the binary as a `RUNPATH`;
 without it a missing `libtorch.so` aborts in `ld.so` before `main`, on every
 subcommand.
-
-### Naming: `burn-rvc` vs `rvc-core`
-Deliberately different. `burn-rvc` is named after the **model** (RVC v2) and is a
-self-contained network crate (reads like `burn_dinov3`). `rvc-core` is the app's
-**voice-conversion pipeline** (feature extraction + backends + streaming), not tied
-to one model.
 
 ### Weight-compatibility constraint (important when editing `burn-rvc`)
 The Burn modules are kept **weight-compatible with RVC's PyTorch `state_dict`** so

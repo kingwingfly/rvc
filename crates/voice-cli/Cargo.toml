@@ -1,0 +1,28 @@
+[package]
+name = "voice-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "voice — speech toolkit CLI: recognition, synthesis and voice conversion"
+
+[[bin]]
+name = "voice"
+path = "src/main.rs"
+
+# Forwarded verbatim to `rvc-cli`, which owns the backend wiring. Keeping the
+# feature names identical means one documented escape hatch works for both
+# binaries: `--no-default-features --features cuda` on a machine with no
+# LibTorch install.
+[features]
+default = ["cuda", "tch", "wgpu"]
+cuda = ["rvc-cli/cuda"]
+tch = ["rvc-cli/tch"]
+wgpu = ["rvc-cli/wgpu"]
+
+[dependencies]
+rvc-cli.workspace = true
+tokio = { workspace = true }
+clap.workspace = true
+anyhow.workspace = true

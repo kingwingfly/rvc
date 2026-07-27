@@ -7,6 +7,13 @@ repository.workspace = true
 rust-version.workspace = true
 description = "rvc — CLI for RVC voice conversion"
 
+# A library as well as a binary: the `voice` tool hosts these same subcommands
+# under `voice rvc …`, and does it by depending on this crate rather than by
+# copying a single argument definition.
+[lib]
+name = "rvc_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "rvc"
 path = "src/main.rs"

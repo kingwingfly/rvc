@@ -71,18 +71,29 @@ pub struct Cli {
     pub command: Command,
 }
 
+/// The voice-conversion subcommands, defined once and worn two ways: `rvc`
+/// flattens them at its top level (`rvc convert`), `voice` nests them under an
+/// `rvc` subcommand (`voice rvc convert`).
 #[derive(Debug, Subcommand)]
-pub enum Command {
+pub enum RvcCommand {
     /// Batch-convert audio files into the target timbre (WAV output).
     Convert(ConvertArgs),
     /// Realtime Unix filter: raw f32le mono PCM on stdin -> stdout.
     Serve(ServeArgs),
-    /// Download/prefetch shared ONNX assets from Hugging Face.
-    Models(ModelsArgs),
     /// Train an RVC generator on a corpus (native Rust / burn).
     Train(TrainArgs),
     /// Slice a corpus into clean per-sentence training clips (dead-air removed).
     Preprocess(PreprocessArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    // Boxed because `TrainArgs` alone is ~320 bytes against 72 for the next
+    // largest variant, and clippy is right that every parse shouldn't pay it.
+    #[command(flatten)]
+    Rvc(Box<RvcCommand>),
+    /// Download/prefetch shared ONNX assets from Hugging Face.
+    Models(ModelsArgs),
     /// Print a shell completion script (bash, zsh, fish, powershell, elvish).
     Completions(CompletionsArgs),
 }

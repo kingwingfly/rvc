@@ -80,7 +80,7 @@ pub async fn build_converter(
     let (content, rmvpe) = resolve_feature_models(opts).await?;
     anyhow::ensure!(
         opts.model.exists(),
-        "generator weights not found: {} (train one with `rvc train`)",
+        "generator weights not found: {} (train one with the `train` subcommand)",
         opts.model.display()
     );
     tracing::info!(
@@ -141,7 +141,7 @@ pub async fn build_converter(
         // Only reachable on a `--no-default-features` build.
         #[allow(unreachable_patterns)]
         other => anyhow::bail!(
-            "this `rvc` was built without the {} backend \
+            "this binary was built without the {} backend \
              (rebuild with `--features {}`)",
             other.label(),
             match other {
@@ -201,7 +201,7 @@ pub async fn build_rvc_config(opts: &ModelOpts) -> Result<RvcConfig> {
 
     anyhow::ensure!(
         opts.model.exists(),
-        "generator model not found: {} (train one with `rvc train`)",
+        "generator model not found: {} (train one with the `train` subcommand)",
         opts.model.display()
     );
 

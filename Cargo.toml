@@ -7,6 +7,7 @@ members = [
     "crates/burn-rvc",
     "crates/rvc-train",
     "crates/rvc-cli",
+    "crates/voice-cli",
 ]
 
 [workspace.package]
@@ -22,6 +23,10 @@ rvc-audio = { path = "crates/rvc-audio" }
 rvc-hub = { path = "crates/rvc-hub" }
 rvc-core = { path = "crates/rvc-core" }
 rvc-train = { path = "crates/rvc-train" }
+# No default features: `voice-cli` re-declares the same backend feature names and
+# forwards them, so one `--no-default-features --features cuda` works for both
+# binaries. (Cargo forbids a member overriding an inherited `default-features`.)
+rvc-cli = { path = "crates/rvc-cli", default-features = false }
 burn-rvc = { path = "crates/burn-rvc" }
 burn = { version = "0.21", default-features = false, features = ["std", "ndarray"] }
 # Only for capability probes `burn-tch` does not re-export (`Cuda::device_count`,
