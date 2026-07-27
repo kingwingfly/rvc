@@ -102,12 +102,6 @@ never a silent fallback; only `auto` substitutes.
 `wgpu` needs no vendor toolkit and runs on AMD, Intel and Apple GPUs, so it is
 the portable fallback where neither CUDA nor LibTorch is available.
 
-**Known issue:** training sometimes aborts at process *exit* with `corrupted
-double-linked list`, **after** the weights are written. It happens on all three
-backends, so it is not specific to any one, and the saved checkpoints are
-complete when it fires — but the exit code is not, so check for the output file
-rather than `$?` in scripts. Not yet root-caused.
-
 ```sh
 rvc convert -m models/voice.safetensors --backend tch  --device cuda:0 -o out/ in.mp3
 rvc train clips/*.wav -o models/voice   --backend cuda --device cuda:0
@@ -550,7 +544,5 @@ LD_LIBRARY_PATH=$PWD/libtorch/lib \
 - Multi-GPU training that is actually *faster*: thread-per-device dispatch, and
   persistent replicas with all-reduce (`burn-collective`) instead of copying the
   master's weights out every step. The data-parallel path itself already works.
-- Track down the intermittent exit-time abort after training (affects CubeCL and
-  WebGPU; weights are already written when it fires).
 - Index/retrieval blend + `protect` for even tighter timbre match.
 - TTS (text → voice) — deferred.
