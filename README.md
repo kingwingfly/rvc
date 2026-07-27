@@ -82,18 +82,31 @@ time. `rvc train` takes the same flag, minus `onnx` (there is no ONNX training p
 | `cuda` | `burn`, `burn-cuda` | native Burn, CubeCL/CUDA kernels | NVIDIA only |
 | `tch` | `libtorch`, `burn-tch` | native Burn, LibTorch | CUDA, MPS, Vulkan, CPU |
 | `wgpu` | `webgpu`, `burn-wgpu` | native Burn, WebGPU | any Vulkan/Metal/DX12 GPU |
-| `auto` *(default)* | | for `convert`/`serve`: `.onnx` weights → `onnx`, else LibTorch on CUDA, else CubeCL/CUDA, else LibTorch on CPU. For `train`: always `libtorch`, else CubeCL/CUDA, else CPU. | |
+| `auto` *(default)* | | `.onnx` weights → `onnx` (inference only), else the first of: LibTorch on a GPU, CubeCL/CUDA, WebGPU, LibTorch on CPU | |
 
 `--device` picks *which* device inside the chosen backend: `auto` (default),
-`cpu`, `cuda`, `cuda:N`, `mps`, `vulkan`. Multiple GPUs are addressed by index
-(`--device cuda:1`). `cpu`/`mps`/`vulkan` need `--backend tch` — the CubeCL
-backend only has CUDA.
+`cpu`, `gpu`, `gpu:N`, `mps`, `vulkan` (`cuda`/`cuda:N` are accepted spellings of
+`gpu`). Multiple GPUs are addressed by index (`--device gpu:1`). `cuda` is the
+only backend with no CPU device; LibTorch and WebGPU both have one.
+
+`auto` picks the same way for `convert`, `serve` and `train`, and never picks a
+backend it can tell won't run. It cannot always tell: with LibTorch linked its
+device count settles the question, but in a build without it (`--features
+cuda,wgpu`) nothing here can probe, and WebGPU is preferred because it also runs
+on NVIDIA while CubeCL fails on anything else. Name a backend explicitly to
+override.
 
 Naming a backend or device that isn't available is an **error with a reason**,
 never a silent fallback; only `auto` substitutes.
 
 `wgpu` needs no vendor toolkit and runs on AMD, Intel and Apple GPUs, so it is
 the portable fallback where neither CUDA nor LibTorch is available.
+
+**Known issue:** training sometimes aborts at process *exit* with `corrupted
+double-linked list`, **after** the weights are written. It happens on all three
+backends, so it is not specific to any one, and the saved checkpoints are
+complete when it fires — but the exit code is not, so check for the output file
+rather than `$?` in scripts. Not yet root-caused.
 
 ```sh
 rvc convert -m models/voice.safetensors --backend tch  --device cuda:0 -o out/ in.mp3
@@ -274,8 +287,9 @@ score is kept in the `.best.json` sidecar and read back on the next run, so
 resuming can only *improve* on the best you already have rather than overwrite it
 with wherever the new run happens to start. Pass `--no-save-best` to skip it.
 
-Notes: only 48 kHz is supported today; defaults are `-e 5` epochs and `-b 4`
-(safe on a 6 GB RTX 2060). One epoch is one pass over the corpus and can be slow
+Notes: only 48 kHz is supported today; defaults are `-e 5` epochs and `-b 4`.
+Batch size is **per device**, so a multi-device run multiplies it — lower `-b` if
+a 6 GB card runs out of memory. One epoch is one pass over the corpus and can be slow
 on the native Burn/CUDA trainer — lean on early stop (`q`/Ctrl-C, which saves)
 rather than a big `-e`.
 

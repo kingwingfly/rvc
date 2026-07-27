@@ -177,13 +177,6 @@ pub fn train(req: TrainRequest) -> Result<PathBuf> {
 /// backend was never going to run is a poor trade.
 fn resolve_backend(req: &TrainRequest) -> Result<TrainBackend> {
     anyhow::ensure!(!req.devices.is_empty(), "no --device given");
-    // Duplicates would silently double a device's share of the batch.
-    for (i, d) in req.devices.iter().enumerate() {
-        anyhow::ensure!(
-            !req.devices[..i].contains(d),
-            "device {d} is listed twice in --devices"
-        );
-    }
     let backend = match req.backend {
         TrainBackend::Auto => match rvc_core::auto_backend() {
             rvc_core::AutoBackend::LibTorch => TrainBackend::LibTorch,
@@ -199,6 +192,22 @@ fn resolve_backend(req: &TrainRequest) -> Result<TrainBackend> {
 ///
 /// An *explicit* backend is never silently substituted: asking for one this
 /// build lacks, or a device it cannot see, is an error with a reason.
+/// Reject a device list with repeats, *after* resolution.
+///
+/// Checking the `--device` strings is not enough: `auto,gpu:0` are different specs
+/// that name device 0 twice, and on WebGPU `auto`, `vulkan` and `mps` all resolve
+/// to the default adapter. A repeat would silently double that device's share of
+/// the batch and its memory — which looks like training working.
+fn distinct<D: PartialEq + std::fmt::Debug>(devices: Vec<D>) -> Result<Vec<D>> {
+    for (i, d) in devices.iter().enumerate() {
+        anyhow::ensure!(
+            !devices[..i].contains(d),
+            "--device lists {d:?} more than once (different spellings can name one device)"
+        );
+    }
+    Ok(devices)
+}
+
 fn dispatch(req: &TrainRequest, clips: Vec<dataset::Clip>) -> Result<PathBuf> {
     let backend = resolve_backend(req)?;
     let list = req
@@ -218,6 +227,7 @@ fn dispatch(req: &TrainRequest, clips: Vec<dataset::Clip>) -> Result<PathBuf> {
                 .iter()
                 .map(|d| rvc_core::libtorch_device(*d))
                 .collect::<rvc_core::Result<Vec<_>>>()?;
+            let devices = distinct(devices)?;
             rvc_core::guard_init("tch", || {
                 trainer::run::<Autodiff<LibTorch<f32>>>(req, clips, &devices)
             })?
@@ -230,6 +240,7 @@ fn dispatch(req: &TrainRequest, clips: Vec<dataset::Clip>) -> Result<PathBuf> {
                 .iter()
                 .map(|d| rvc_core::cuda_device(*d))
                 .collect::<rvc_core::Result<Vec<_>>>()?;
+            let devices = distinct(devices)?;
             rvc_core::guard_init("cuda", || {
                 trainer::run::<Autodiff<Cuda>>(req, clips, &devices)
             })?
@@ -242,6 +253,7 @@ fn dispatch(req: &TrainRequest, clips: Vec<dataset::Clip>) -> Result<PathBuf> {
                 .iter()
                 .map(|d| rvc_core::wgpu_device(*d))
                 .collect::<rvc_core::Result<Vec<_>>>()?;
+            let devices = distinct(devices)?;
             rvc_core::guard_init("wgpu", || {
                 trainer::run::<Autodiff<Wgpu>>(req, clips, &devices)
             })?
@@ -292,21 +304,14 @@ mod tests {
     }
 
     #[test]
-    fn a_repeated_device_is_rejected() {
-        // Listing one twice would silently double its share of the batch, which
-        // looks like training working and quietly isn't.
-        let r = req(
-            &[DeviceSpec::Gpu(0), DeviceSpec::Gpu(0)],
-            TrainBackend::Cuda,
-        );
-        let err = resolve_backend(&r).unwrap_err().to_string();
-        assert!(err.contains("twice"), "{err}");
-
-        let ok = req(
-            &[DeviceSpec::Gpu(0), DeviceSpec::Gpu(1)],
-            TrainBackend::Cuda,
-        );
-        assert_eq!(resolve_backend(&ok).unwrap(), TrainBackend::Cuda);
+    fn a_repeated_device_is_rejected_after_resolution() {
+        // Checking the `--device` strings would miss it: `auto` and `gpu:0` are
+        // different specs naming one device, and on WebGPU `auto`, `vulkan` and
+        // `mps` all collapse to the default adapter. A repeat would silently
+        // double that device's share of the batch — and its memory.
+        assert!(distinct(vec![0, 1, 2]).is_ok());
+        let err = distinct(vec![0, 1, 0]).unwrap_err().to_string();
+        assert!(err.contains("more than once"), "{err}");
     }
 
     #[test]

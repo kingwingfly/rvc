@@ -80,6 +80,22 @@ pub fn visible_cuda_devices() -> Option<usize> {
     }
 }
 
+/// Whether LibTorch can see a GPU of *any* kind — CUDA, Metal or Vulkan — or
+/// `None` when LibTorch isn't linked.
+///
+/// The only cheap "does this host have a GPU" answer available: CubeCL and WebGPU
+/// both find out by trying, and both panic when the answer is no.
+pub fn libtorch_gpu() -> Option<bool> {
+    #[cfg(feature = "tch")]
+    {
+        Some(tch::Cuda::device_count() > 0 || tch::utils::has_mps() || tch::utils::has_vulkan())
+    }
+    #[cfg(not(feature = "tch"))]
+    {
+        None
+    }
+}
+
 /// Whether the linked LibTorch was *built* with CUDA (`None` if not linked).
 ///
 /// Distinct from [`visible_cuda_devices`], and the distinction is what `auto`
@@ -106,40 +122,43 @@ pub enum AutoBackend {
 }
 
 /// What `auto` should run on, decided once so inference and training can't drift
-/// apart. Only ever returns a backend this build actually contains, and never
-/// errors — `auto` is a request for whatever works.
-///
-/// Preference order: LibTorch on a GPU (measured ~9x faster than CubeCL here),
-/// CubeCL/CUDA, WebGPU (portable, and the only one that reaches AMD/Intel/Apple),
-/// then LibTorch on CPU, which is the sole CPU device on offer.
+/// apart. Only ever returns a backend this build contains, and never a backend
+/// that is knowably unusable — `auto` is a request for whatever works.
 pub fn auto_backend() -> AutoBackend {
     let (tch, cuda, wgpu) = (
         cfg!(feature = "tch"),
         cfg!(feature = "cuda"),
         cfg!(feature = "wgpu"),
     );
-    // `None` when LibTorch isn't linked, in which case nothing here can probe for
-    // a GPU and the CUDA/WebGPU paths have to just try.
-    let seen = visible_cuda_devices();
 
-    if tch && seen.is_some_and(|n| n > 0) {
+    // LibTorch on a GPU is the fastest path measured here (~9x CubeCL), and the
+    // only one that can be asked in advance whether a GPU exists.
+    if tch && libtorch_gpu() == Some(true) {
         return AutoBackend::LibTorch;
     }
-    // A CPU-only LibTorch reporting zero devices says nothing about the machine,
-    // so CubeCL still deserves a try; `guard_init` turns its panic into an error.
-    let cuda_plausible = seen.is_none() || libtorch_has_cuda() == Some(false);
-    if cuda && cuda_plausible {
+    // When LibTorch is linked its CUDA count is authoritative for CubeCL too:
+    // same driver, same devices.
+    if cuda && visible_cuda_devices().is_some_and(|n| n > 0) {
         return AutoBackend::Cuda;
     }
-    // A CUDA-capable LibTorch that sees no device means no NVIDIA GPU — but
-    // WebGPU may still find a Vulkan/Metal one.
+    // LibTorch linked and seeing nothing means this host has no GPU it can reach.
+    // WebGPU covers DX12 and the Vulkan that official LibTorch builds omit, but it
+    // panics when there is no adapter at all — so CPU wins here. Slow beats broken.
+    if tch && libtorch_gpu() == Some(false) {
+        return AutoBackend::LibTorch;
+    }
+    // Nothing was probeable, so guess. WebGPU is the safer guess than CubeCL: it
+    // runs on NVIDIA as well, whereas CubeCL fails on anything that isn't NVIDIA.
     if wgpu {
         return AutoBackend::Wgpu;
+    }
+    if cuda {
+        return AutoBackend::Cuda;
     }
     if tch {
         return AutoBackend::LibTorch;
     }
-    // Nothing compiled in that can run: say CUDA and let the caller report it.
+    // Nothing compiled in that can run; the caller reports that.
     AutoBackend::Cuda
 }
 

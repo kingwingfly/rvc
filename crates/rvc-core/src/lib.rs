@@ -52,7 +52,8 @@ pub use device::libtorch_device;
 #[cfg(feature = "wgpu")]
 pub use device::wgpu_device;
 pub use device::{
-    AutoBackend, DeviceSpec, auto_backend, guard_init, libtorch_has_cuda, visible_cuda_devices,
+    AutoBackend, DeviceSpec, auto_backend, guard_init, libtorch_gpu, libtorch_has_cuda,
+    visible_cuda_devices,
 };
 pub use dsp::{f0_to_coarse, shift_pitch, upsample_rows};
 pub use error::{Result, VcError};
