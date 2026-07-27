@@ -5,21 +5,55 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use rvc_core::{
-    BurnGenerator, ConvertParams, Converter, DenoiseParams, ModelPaths, RvcConfig, RvcModel,
+    ConvertParams, Converter, DenoiseParams, DeviceSpec, ModelPaths, RvcConfig, RvcModel,
     StreamParams,
 };
 use rvc_hub::ModelRef;
 
 use crate::args::{InferBackend, ModelOpts};
 
-/// Decide whether the Burn (native) generator runs, given the `--backend` flag
-/// and the weights extension (`auto` → `.onnx` uses ONNX Runtime, else Burn).
-pub fn use_burn_backend(backend: InferBackend, model: &Path) -> bool {
-    let onnx_model = model.extension().and_then(|e| e.to_str()) == Some("onnx");
+/// The generator runtime a `--backend` choice resolves to for given weights.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Runtime {
+    Onnx,
+    Cuda,
+    Tch,
+    Wgpu,
+}
+
+impl Runtime {
+    /// The name to log, so a run says which of the three actually ran.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Onnx => "onnx",
+            Self::Cuda => "burn-cuda",
+            Self::Tch => "burn-tch",
+            Self::Wgpu => "burn-wgpu",
+        }
+    }
+}
+
+/// Resolve `--backend` against the weights extension and the hardware present.
+///
+/// `auto` reads the extension first (`.onnx` → ONNX Runtime), then asks
+/// [`rvc_core::auto_prefers_libtorch`]. An explicit choice is never substituted:
+/// if it can't run, loading it reports why.
+pub fn resolve_runtime(backend: InferBackend, model: &Path) -> Runtime {
     match backend {
-        InferBackend::Auto => !onnx_model,
-        InferBackend::Burn => true,
-        InferBackend::Onnx => false,
+        InferBackend::Onnx => Runtime::Onnx,
+        InferBackend::Cuda => Runtime::Cuda,
+        InferBackend::Tch => Runtime::Tch,
+        InferBackend::Wgpu => Runtime::Wgpu,
+        InferBackend::Auto => {
+            if model.extension().and_then(|e| e.to_str()) == Some("onnx") {
+                return Runtime::Onnx;
+            }
+            if rvc_core::auto_prefers_libtorch() {
+                Runtime::Tch
+            } else {
+                Runtime::Cuda
+            }
+        }
     }
 }
 
@@ -29,35 +63,95 @@ pub fn use_burn_backend(backend: InferBackend, model: &Path) -> bool {
 pub async fn build_converter(
     opts: &ModelOpts,
     backend: InferBackend,
+    device: DeviceSpec,
     transpose: i32,
     params: StreamParams,
     denoise: Option<DenoiseParams>,
 ) -> Result<Converter> {
     let conv_params = ConvertParams { transpose };
-    if use_burn_backend(backend, &opts.model) {
-        let (content, rmvpe) = resolve_feature_models(opts).await?;
-        anyhow::ensure!(
-            opts.model.exists(),
-            "generator weights not found: {} (train one with `rvc train`)",
-            opts.model.display()
-        );
-        tracing::info!("loading Burn generator from {}", opts.model.display());
-        let generator = tokio::task::block_in_place(|| {
-            BurnGenerator::load(
-                &content,
-                &rmvpe,
-                &opts.model,
-                opts.model_sr,
-                opts.speaker_id,
-            )
-        })
-        .context("failed to load Burn generator")?;
-        Ok(Converter::new(generator, params, conv_params).with_denoise(denoise))
-    } else {
+    let runtime = resolve_runtime(backend, &opts.model);
+
+    if runtime == Runtime::Onnx {
         let cfg = build_rvc_config(opts).await?;
         let model = RvcModel::load(cfg).context("failed to load RVC models")?;
-        Ok(Converter::new(model, params, conv_params).with_denoise(denoise))
+        return Ok(Converter::new(model, params, conv_params).with_denoise(denoise));
     }
+
+    let (content, rmvpe) = resolve_feature_models(opts).await?;
+    anyhow::ensure!(
+        opts.model.exists(),
+        "generator weights not found: {} (train one with `rvc train`)",
+        opts.model.display()
+    );
+    tracing::info!(
+        "loading Burn generator from {} ({}, device {device})",
+        opts.model.display(),
+        runtime.label()
+    );
+
+    // Each arm erases into the same non-generic `Converter` — that type erasure
+    // is what makes the backend a run-time choice.
+    let converter = match runtime {
+        #[cfg(feature = "cuda")]
+        Runtime::Cuda => {
+            let g = tokio::task::block_in_place(|| {
+                rvc_core::cuda_generator(
+                    &content,
+                    &rmvpe,
+                    &opts.model,
+                    opts.model_sr,
+                    opts.speaker_id,
+                    device,
+                )
+            })
+            .context("failed to load the Burn generator on the CubeCL/CUDA backend")?;
+            Converter::new(g, params, conv_params)
+        }
+        #[cfg(feature = "wgpu")]
+        Runtime::Wgpu => {
+            let g = tokio::task::block_in_place(|| {
+                rvc_core::wgpu_generator(
+                    &content,
+                    &rmvpe,
+                    &opts.model,
+                    opts.model_sr,
+                    opts.speaker_id,
+                    device,
+                )
+            })
+            .context("failed to load the Burn generator on the WebGPU backend")?;
+            Converter::new(g, params, conv_params)
+        }
+        #[cfg(feature = "tch")]
+        Runtime::Tch => {
+            let g = tokio::task::block_in_place(|| {
+                rvc_core::libtorch_generator(
+                    &content,
+                    &rmvpe,
+                    &opts.model,
+                    opts.model_sr,
+                    opts.speaker_id,
+                    device,
+                )
+            })
+            .context("failed to load the Burn generator on the LibTorch backend")?;
+            Converter::new(g, params, conv_params)
+        }
+        Runtime::Onnx => unreachable!("handled above"),
+        // Only reachable on a `--no-default-features` build.
+        #[allow(unreachable_patterns)]
+        other => anyhow::bail!(
+            "this `rvc` was built without the {} backend \
+             (rebuild with `--features {}`)",
+            other.label(),
+            match other {
+                Runtime::Tch => "tch",
+                Runtime::Wgpu => "wgpu",
+                _ => "cuda",
+            }
+        ),
+    };
+    Ok(converter.with_denoise(denoise))
 }
 
 /// Resolve the ContentVec and RMVPE ONNX paths (downloading when not provided).

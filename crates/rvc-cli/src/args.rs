@@ -6,15 +6,60 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 
 /// Which generator backend runs inference.
-#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+///
+/// `burn` stays an alias of `cuda` so invocations written before the Burn
+/// generator gained a second compute backend keep working.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum InferBackend {
-    /// Pick by weights extension: `.onnx` → onnx-runtime, else Burn.
+    /// Pick by weights extension (`.onnx` → onnx-runtime) then by what's
+    /// available: LibTorch on CUDA, else CubeCL/CUDA, else LibTorch on CPU.
     #[default]
     Auto,
-    /// Native Burn generator (`.pth`/`.safetensors`).
-    Burn,
     /// ONNX Runtime generator (`.onnx`).
     Onnx,
+    /// Native Burn generator, CubeCL/CUDA compute (`.pth`/`.safetensors`).
+    #[value(name = "cuda", alias = "burn", alias = "burn-cuda")]
+    Cuda,
+    /// Native Burn generator, LibTorch compute — CUDA, MPS, Vulkan or CPU.
+    #[value(name = "tch", alias = "libtorch", alias = "burn-tch")]
+    Tch,
+    /// Native Burn generator, WebGPU compute — any Vulkan/Metal/DX12 GPU.
+    #[value(name = "wgpu", alias = "webgpu", alias = "burn-wgpu")]
+    Wgpu,
+}
+
+/// Which Burn compute backend runs training (there is no ONNX training path).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum ComputeBackend {
+    /// Fastest available: LibTorch on CUDA, else CubeCL/CUDA, else LibTorch CPU.
+    #[default]
+    Auto,
+    /// CubeCL/CUDA kernels. NVIDIA only.
+    #[value(name = "cuda", alias = "burn-cuda")]
+    Cuda,
+    /// LibTorch (tch) — CUDA, MPS, Vulkan or CPU.
+    #[value(name = "tch", alias = "libtorch", alias = "burn-tch")]
+    Tch,
+    /// WebGPU (wgpu) — any Vulkan/Metal/DX12 GPU, no vendor toolkit.
+    #[value(name = "wgpu", alias = "webgpu", alias = "burn-wgpu")]
+    Wgpu,
+}
+
+impl From<ComputeBackend> for rvc_train::TrainBackend {
+    fn from(b: ComputeBackend) -> Self {
+        match b {
+            ComputeBackend::Auto => Self::Auto,
+            ComputeBackend::Cuda => Self::Cuda,
+            ComputeBackend::Tch => Self::LibTorch,
+            ComputeBackend::Wgpu => Self::Wgpu,
+        }
+    }
+}
+
+/// Parse `--device` in clap, so a typo is a usage error rather than a late
+/// failure after the model has already been loaded.
+fn parse_device(s: &str) -> Result<rvc_core::DeviceSpec, String> {
+    s.parse()
 }
 
 /// rvc — RVC voice conversion toolkit (ONNX Runtime + native Burn).
@@ -85,9 +130,14 @@ pub struct ConvertArgs {
     /// Pitch shift in semitones.
     #[arg(short = 't', long, default_value_t = 0)]
     pub transpose: i32,
-    /// Inference backend (default: auto by `-m` extension).
+    /// Inference backend: `auto`, `onnx`, `cuda` (aliases `burn`, `burn-cuda`)
+    /// or `tch` (aliases `libtorch`, `burn-tch`).
     #[arg(long, value_enum, default_value_t = InferBackend::Auto)]
     pub backend: InferBackend,
+    /// Compute device: `auto` (fastest visible), `cpu`, `cuda`, `cuda:N`, `mps`
+    /// or `vulkan`. `cpu`/`mps`/`vulkan` require `--backend tch`.
+    #[arg(long, default_value = "auto", value_name = "DEVICE", value_parser = parse_device)]
+    pub device: rvc_core::DeviceSpec,
     #[command(flatten)]
     pub denoise: DenoiseOpts,
 }
@@ -102,10 +152,15 @@ pub struct ServeArgs {
     /// Samples per input read chunk from stdin (16 kHz mono f32le).
     #[arg(long, default_value_t = 1600)]
     pub chunk: usize,
-    /// Inference backend (default: auto by `-m` extension). Note: the Burn
-    /// (GPU/cuda) generator is currently slower than realtime for `serve`.
+    /// Inference backend: `auto`, `onnx`, `cuda` (aliases `burn`, `burn-cuda`)
+    /// or `tch` (aliases `libtorch`, `burn-tch`). Note: the CubeCL/CUDA
+    /// generator is currently slower than realtime for `serve`.
     #[arg(long, value_enum, default_value_t = InferBackend::Auto)]
     pub backend: InferBackend,
+    /// Compute device: `auto` (fastest visible), `cpu`, `cuda`, `cuda:N`, `mps`
+    /// or `vulkan`. `cpu`/`mps`/`vulkan` require `--backend tch`.
+    #[arg(long, default_value = "auto", value_name = "DEVICE", value_parser = parse_device)]
+    pub device: rvc_core::DeviceSpec,
     #[command(flatten)]
     pub denoise: DenoiseOpts,
 }
@@ -262,6 +317,14 @@ pub struct TrainArgs {
     /// final ones.
     #[arg(long)]
     pub no_save_best: bool,
+    /// Compute backend: `auto`, `cuda` (alias `burn-cuda`) or `tch`
+    /// (aliases `libtorch`, `burn-tch`). Saved weights are identical either way.
+    #[arg(long, value_enum, default_value_t = ComputeBackend::Auto)]
+    pub backend: ComputeBackend,
+    /// Compute device: `auto` (fastest visible), `cpu`, `cuda`, `cuda:N`, `mps`
+    /// or `vulkan`. `cpu`/`mps`/`vulkan` require `--backend tch`.
+    #[arg(long, default_value = "auto", value_name = "DEVICE", value_parser = parse_device)]
+    pub device: rvc_core::DeviceSpec,
     /// Directory for the training log and saved weights.
     #[arg(long, default_value = "models/train")]
     pub work_dir: PathBuf,

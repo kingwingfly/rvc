@@ -37,8 +37,15 @@ produces the `phone/phone_lengths/pitch/pitchf/ds/rnd → audio` graph that
    (`spectral.rs`) is `n_fft=2048`, `hop=480`, 128 Slaney mels, center=False.
 
    **Dashboard & early stop.** On a TTY, `dashboard.rs` drives Burn's
-   `TuiMetricsRendererWrapper` directly (our GAN loop doesn't fit Burn's
-   `Learner`): it registers the metrics once and pushes values + progress each
+   `TuiMetricsRendererWrapper` directly, because our GAN loop cannot use Burn's
+   `Learner`: `TrainStep::step` takes `&self` and returns one `GradientsParams`
+   for one `Optimizer`, whereas a GAN needs two models, two optimizers at
+   different LRs, and D updated *between* the two backward passes so G's
+   adversarial loss sees the updated D. (`MultiGradientsParams` is not a way
+   around this — it accumulates one parameter across *devices*, not across
+   models.) The cost of opting out is that `Learner`'s multi-device strategies
+   are unavailable, which is why training is single-device. The dashboard
+   registers the metrics once and pushes values + progress each
    step. Plotted (numeric) metrics are the `g`/`d`/`mel` losses **and the
    learning rate**; CPU and GPU usage are shown as text lines (reusing Burn's own
    `CpuUse`/`CudaMetric` system probes, behind the `metrics` feature — NVML for
@@ -180,6 +187,30 @@ complete and the toolkit no longer needs it. The pretrained warm-start bases
 
 ## Backend
 
-`burn` with the `ndarray` backend by default (CPU, always compiles); a `cuda`
-feature selects the GPU backend for the RTX 2060 at train time. The model is
-generic over `burn::tensor::backend::Backend` / `AutodiffBackend`.
+`trainer::run<AB: AutodiffBackend>(req, clips, &AB::Device)` is generic over the
+compute backend; `lib.rs::dispatch` instantiates the concrete one from
+`TrainRequest::backend` at run time. Two cargo features (`tch`, `cuda`) decide what
+is linked; the CLI enables both.
+
+**Only `Autodiff<Cuda>` can train today.** `burn 0.21` panics in the backward pass of
+a *grouped, strided* `conv1d` whose padded input length is not a multiple of the
+stride — the weight gradient comes back too long and LibTorch's strict `copy_`
+rejects it. `DiscriminatorS` is precisely that shape (`k=41, s=4, groups=4..256` over
+a 17280-sample segment), so every step hits it. `resolve_backend` rejects
+`--backend tch` *before* the corpus is decoded. Ungrouped, or grouped-and-evenly-
+divisible, or CubeCL/CUDA: all fine — see `examples/convgrad.rs`, whose minimal case
+is `conv1d(16 -> 64, k=4, s=2, p=1, groups=4)` on length 101. The genericity is kept
+because fixing this upstream turns it back into a one-line dispatch arm.
+
+`AB::InnerBackend` is where gradients, the EMA and every saved weight live.
+`AutodiffBackend` guarantees `InnerBackend: Backend<Device = Self::Device>`, so a
+single `device` value serves the whole loop — there is no second device to thread
+through. The bound really is just `AB: AutodiffBackend`: `GradientsParams::{remove,
+register}` are bound on plain `Backend`, `AdamW` implements `SimpleOptimizer<B>` for
+any `B: Backend`, and the `Module` derive emits a concrete
+`type InnerModule = Synthesizer<B::InnerBackend>` that rustc normalises without help.
+
+Device selection is `rvc_core::DeviceSpec` (`--device auto|cpu|cuda|cuda:N|mps|vulkan`),
+shared with the inference path so `auto` means the same thing in both. One run uses
+one device: there is no data-parallel training (see the `Learner` note above — the
+multi-device strategies live inside it).

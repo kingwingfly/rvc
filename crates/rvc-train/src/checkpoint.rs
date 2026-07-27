@@ -25,7 +25,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, anyhow};
 use burn_rvc::{MultiPeriodDiscriminator, Synthesizer};
 
-use crate::trainer::IB;
+use burn::tensor::backend::Backend;
 
 const SUFFIX: &str = "safetensors";
 
@@ -131,11 +131,11 @@ impl Checkpoint {
     ///
     /// Reports what landed and how long it took (a full family is hundreds of MB,
     /// so it's worth seeing in the log); callers report *why* they saved.
-    pub fn save(
+    pub fn save<B: Backend>(
         &self,
-        ema: Option<&Synthesizer<IB>>,
-        live: &Synthesizer<IB>,
-        disc: &MultiPeriodDiscriminator<IB>,
+        ema: Option<&Synthesizer<B>>,
+        live: &Synthesizer<B>,
+        disc: &MultiPeriodDiscriminator<B>,
     ) -> Result<()> {
         let started = Instant::now();
         if !self.dir.as_os_str().is_empty() {

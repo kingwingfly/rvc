@@ -7,6 +7,14 @@ repository.workspace = true
 rust-version.workspace = true
 description = "Native (Rust) RVC generator training for the rvc toolkit"
 
+[features]
+# Compute backends for the training loop, mirroring `rvc-core`'s. `trainer::run`
+# is generic over `AutodiffBackend`, so these only decide what gets linked;
+# `TrainRequest::backend` picks among them at runtime.
+cuda = ["burn/cuda", "rvc-core/cuda"]
+tch = ["burn/tch", "rvc-core/tch"]
+wgpu = ["burn/wgpu", "rvc-core/wgpu"]
+
 [dependencies]
 rvc-audio.workspace = true
 rvc-core.workspace = true
@@ -17,4 +25,4 @@ anyhow.workspace = true
 tracing.workspace = true
 # `metrics` enables burn-train's sys-metrics (CPU via sysinfo, GPU via NVML) for
 # the dashboard's CPU/GPU usage lines.
-burn = { version = "0.21", default-features = false, features = ["std", "autodiff", "cuda", "train", "tui", "metrics"] }
+burn = { workspace = true, features = ["autodiff", "train", "tui", "metrics"] }

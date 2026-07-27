@@ -6,19 +6,16 @@ use rvc_audio::{DecodeOptions, decode_paths, write_wav_file};
 use rvc_core::{ANALYSIS_SR, StreamParams};
 
 use crate::args::ConvertArgs;
-use crate::commands::common::{build_converter, use_burn_backend};
+use crate::commands::common::{build_converter, resolve_runtime};
 
 pub async fn run(args: ConvertArgs) -> Result<()> {
-    let backend_label = if use_burn_backend(args.backend, &args.models.model) {
-        "burn"
-    } else {
-        "onnx"
-    };
+    let backend_label = resolve_runtime(args.backend, &args.models.model).label();
 
     // One loaded model (GPU/ORT init is expensive), reused across files.
     let mut converter = build_converter(
         &args.models,
         args.backend,
+        args.device,
         args.transpose,
         StreamParams::batch(),
         args.denoise.params(),

@@ -12,3 +12,12 @@ __pycache__/
 /models
 /dataset
 *.onnx
+
+# Agent scratch worktrees
+/.claude/worktrees
+
+# LibTorch, for the `tch` backend. Never vendored: it is ~3 GB and
+# platform/CUDA-specific, so each machine downloads its own and points
+# LIBTORCH at it (see the LibTorch section of the README).
+/libtorch
+/libtorch*.zip

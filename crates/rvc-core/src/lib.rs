@@ -25,6 +25,8 @@ mod session;
 
 #[cfg(feature = "burn")]
 mod burn_backend;
+#[cfg(feature = "burn")]
+mod device;
 
 #[cfg(test)]
 mod model_probe;
@@ -32,12 +34,28 @@ mod model_probe;
 pub use backend::Generator;
 #[cfg(feature = "burn")]
 pub use burn_backend::BurnGenerator;
+#[cfg(feature = "cuda")]
+pub use burn_backend::cuda_generator;
+#[cfg(feature = "tch")]
+pub use burn_backend::libtorch_generator;
+#[cfg(feature = "wgpu")]
+pub use burn_backend::wgpu_generator;
 pub use config::{
     ANALYSIS_SR, CONTENT_DIM, CONTENT_HOP, ConvertParams, F0_HOP, GeneratorIo, ModelPaths,
     RMVPE_BINS, RvcConfig,
 };
 pub use convert::{Converter, StreamParams, convert_stream};
 pub use denoise::{DenoiseParams, Denoiser};
+#[cfg(feature = "cuda")]
+pub use device::cuda_device;
+#[cfg(feature = "tch")]
+pub use device::libtorch_device;
+#[cfg(feature = "wgpu")]
+pub use device::wgpu_device;
+#[cfg(feature = "burn")]
+pub use device::{
+    DeviceSpec, auto_prefers_libtorch, guard_init, libtorch_has_cuda, visible_cuda_devices,
+};
 pub use dsp::{f0_to_coarse, shift_pitch, upsample_rows};
 pub use error::{Result, VcError};
 pub use features::{DEFAULT_CHUNK, FeatureExtractor, Features};

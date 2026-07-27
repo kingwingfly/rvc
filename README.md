@@ -1,16 +1,17 @@
 # rvc — RVC voice conversion toolkit
 
 Retimbre any voice recording into a voice you like. **Voice conversion (VC)**
-runs as pure-Rust inference (RVC v2) — native Burn (GPU) or ONNX Runtime — with a
-streaming Unix-filter CLI, and training is a native Rust (burn) pipeline: no
-Python in the toolkit except the single weight → ONNX conversion step.
+runs as pure-Rust inference (RVC v2) — native Burn on either LibTorch or
+CubeCL/CUDA, or ONNX Runtime — with a streaming Unix-filter CLI, and training is a
+native Rust (burn) pipeline: no Python in the toolkit except the single
+weight → ONNX conversion step.
 
 ## Architecture
 
 | crate | role |
 |-------|------|
 | `rvc-audio` | ffmpeg (8.1) mp3/wav decode, resample, WAV/raw-PCM I/O — all as `futures::Stream` of mono `f32` |
-| `rvc-core` | the voice-conversion pipeline: ContentVec + RMVPE feature extraction, and **both** generator backends (ONNX Runtime via `ort`, and native Burn behind the `burn` feature) behind one `Generator` trait; `Stream`-in → `Stream`-out `Converter`; reusable `FeatureExtractor` |
+| `rvc-core` | the voice-conversion pipeline: ContentVec + RMVPE feature extraction, and **every** generator backend (ONNX Runtime via `ort`; native Burn on LibTorch or CubeCL/CUDA, behind the `tch`/`cuda` features) behind one `Generator` trait; `Stream`-in → `Stream`-out `Converter`; reusable `FeatureExtractor` |
 | `burn-rvc` | the RVC v2 network itself, a standalone Burn port of `SynthesizerTrnMs768NSFsid` |
 | `rvc-hub` | auto-download ContentVec/RMVPE ONNX from Hugging Face |
 | `rvc-train` | native (Rust/burn) RVC generator training — see `crates/rvc-train/ARCHITECTURE.md` |
@@ -26,14 +27,107 @@ Python in the toolkit except the single weight → ONNX conversion step.
   ```
   The CUDA execution provider is tried first, then CPU. A 6 GB GPU is enough for
   inference. (Built against the ORT 1.24 API; newer runtimes work too.)
+- **LibTorch** (only for `--backend tch`): like ONNX Runtime, never bundled or
+  downloaded. Fetch it once and point `LIBTORCH` at it before building:
+  ```sh
+  # cuNNN must match your driver: cu118/cu121/cu124/cu126/cu128. Version must be 2.9.0.
+  wget https://download.pytorch.org/libtorch/cu126/libtorch-shared-with-deps-2.9.0%2Bcu126.zip
+  unzip libtorch-shared-with-deps-2.9.0+cu126.zip     # -> ./libtorch
+  export LIBTORCH=$PWD/libtorch
+  ```
+  That is the only step. The built binary finds LibTorch on its own — no
+  `LD_LIBRARY_PATH`, ever. It searches, in order: the `LIBTORCH` you built with,
+  `libtorch/` beside the binary, and `libtorch/` in the current directory. So
+  keeping `./libtorch` in your project directory is enough even if you move the
+  binary or rebuild elsewhere.
+
+  A distro PyTorch is usually too new (2.13 removed an API the bindings call).
+  Don't want LibTorch at all? `cargo build --release --no-default-features
+  --features cuda,wgpu` — then `--backend tch` reports that it wasn't built in.
+
 - **ffmpeg 8.1** dev libraries (for `rvc-audio`) and the `ffmpeg` binary (for
   piping raw PCM in the realtime example).
 
 ## Build
 
 ```sh
+export ORT_DYLIB_PATH=/usr/lib/libonnxruntime.so
+export LIBTORCH=$PWD/libtorch          # see Prerequisites; omit with --no-default-features
 cargo build --release
 ```
+
+## Compute backends & devices
+
+One `rvc` binary carries all three generator runtimes; `--backend` chooses at run
+time. `rvc train` takes the same flag, but **only `cuda` works today** — see Training
+below.
+
+| `--backend` | aliases | runtime | devices |
+|---|---|---|---|
+| `onnx` | | ONNX Runtime (`ort`) | CUDA EP, else CPU |
+| `cuda` | `burn`, `burn-cuda` | native Burn, CubeCL/CUDA kernels | NVIDIA only |
+| `tch` | `libtorch`, `burn-tch` | native Burn, LibTorch | CUDA, MPS, Vulkan, CPU |
+| `wgpu` | `webgpu`, `burn-wgpu` | native Burn, WebGPU — **experimental, off by default** | any Vulkan/Metal/DX12 GPU |
+| `auto` *(default)* | | for `convert`/`serve`: `.onnx` weights → `onnx`, else LibTorch on CUDA, else CubeCL/CUDA, else LibTorch on CPU. For `train`: always `cuda`. | |
+
+`--device` picks *which* device inside the chosen backend: `auto` (default),
+`cpu`, `cuda`, `cuda:N`, `mps`, `vulkan`. Multiple GPUs are addressed by index
+(`--device cuda:1`). `cpu`/`mps`/`vulkan` need `--backend tch` — the CubeCL
+backend only has CUDA.
+
+Naming a backend or device that isn't available is an **error with a reason**,
+never a silent fallback; only `auto` substitutes.
+
+`wgpu` needs `--features wgpu` and is **experimental**: its kernels and gradients
+are correct (it is the only backend besides CUDA that passes the whole
+`convgrad` probe, so it could train), but the process aborts with heap corruption
+at exit whenever ONNX Runtime is loaded in the same process — which `convert` and
+`train` always do, for ContentVec and RMVPE. Pure wgpu compute exits cleanly, so
+the fault is in the interaction, not the port. Until that's resolved it stays out
+of the default build.
+
+```sh
+rvc convert -m models/voice.safetensors --backend tch  --device cuda:0 -o out/ in.mp3
+rvc train clips/*.wav -o models/voice   --backend cuda --device cuda:0
+```
+
+### Inference speed (RTX 2060, 48 kHz, 8 files, 3 runs)
+
+| backend | first file | warm median | 8 files total |
+|---|---|---|---|
+| `tch` (LibTorch) | 0.58 s | **0.24 s** | 6.0 s |
+| `cuda` (CubeCL) | 3.76 s | 2.28 s | 23.8 s |
+
+**LibTorch is ~9× faster per file in steady state.** The gap is not CubeCL
+JIT warm-up: the first file is 6.5× faster too. That is why `auto` prefers it.
+Timings are the CLI's own per-file log deltas, which start after the model is
+loaded; the first file is listed separately because CubeCL compiles kernels on
+first use.
+
+### Training: CUDA only
+
+`rvc train --backend tch` **exits immediately with an explanation**. `burn 0.21`'s
+autodiff panics in the backward pass of a *grouped, strided* `conv1d` whose padded
+input length isn't a multiple of the stride — and the discriminator's scale branch
+(`k=41, s=4, groups=4..256` over a 17280-sample segment) is exactly that shape, so
+every step would hit it. Ungrouped convs are fine, grouped-and-evenly-divisible are
+fine, and CubeCL/CUDA is fine on all of them, so this is a `burn-tch` backward bug
+rather than a flaw in the port. Inference has no backward pass, which is why
+`--backend tch` converts happily.
+
+Minimal repro — `conv1d(16→64, k=4, s=2, p=1, groups=4)` on length 101:
+
+```sh
+LD_LIBRARY_PATH=$LIBTORCH/lib \
+  cargo run -p rvc-train --example convgrad --features tch,cuda
+```
+
+**Multi-GPU:** device *selection* only — one run uses one device. There is no
+data-parallel training: Burn's multi-device machinery lives inside `Learner`,
+which the GAN loop cannot use (it needs two models and two optimizers, with D
+updated *between* the two backward passes). For batch throughput, run several
+`rvc convert` processes with different `--device cuda:N`; splitting one stream
+across GPUs would break the overlap-crossfade that carries state between blocks.
 
 ## Use
 
@@ -317,9 +411,15 @@ rvc completions fish > ~/.config/fish/completions/rvc.fish
   feature-matching + LSGAN) on cuda. Verified end-to-end on a real clip —
   losses decrease and the saved `.safetensors` round-trips through
   `rvc convert`.
-- **Inference works on both backends**, and both `convert` and `serve` run
-  either the native Burn generator (GPU) or ONNX Runtime through one shared
-  `Converter` (`--backend`).
+- **Inference works on all three backends**, and both `convert` and `serve` run
+  the native Burn generator on LibTorch or CubeCL/CUDA, or ONNX Runtime, through
+  one shared `Converter` (`--backend`). One binary carries them all.
+- **LibTorch backend** (`--backend tch`) covers **inference** on CUDA, MPS, Vulkan
+  or CPU, and is ~9× faster per file than the CubeCL/CUDA backend on an RTX 2060.
+  It is the `auto` default for `.safetensors` weights. **Training stays on
+  CubeCL/CUDA**: LibTorch's autodiff cannot run the discriminator's grouped
+  strided convolutions (see *Training: CUDA only*), and `--backend tch` refuses
+  up front rather than failing mid-run.
 - **Live training dashboard**: Burn's TUI shows loss plots + progress; `q` (or
   Ctrl-C without the TUI) stops early and saves.
 
@@ -331,6 +431,12 @@ rvc completions fish > ~/.config/fish/completions/rvc.fish
 ## Roadmap
 
 - 40 kHz training.
-- Faster Burn (CUDA) inference so `serve` is realtime on the native backend.
+- Faster CubeCL/CUDA inference so `serve` is realtime on that backend too
+  (`--backend tch` is the faster native path today).
+- Data-parallel multi-GPU training — needs the master-device gradient
+  accumulation that `Learner` provides and this GAN loop cannot use.
+- Training on LibTorch, once burn's grouped-strided `conv1d` backward is fixed
+  upstream: the trainer is already generic over the backend, so it is a one-line
+  dispatch arm.
 - Index/retrieval blend + `protect` for even tighter timbre match.
 - TTS (text → voice) — deferred.

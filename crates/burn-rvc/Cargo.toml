@@ -7,6 +7,14 @@ repository.workspace = true
 rust-version.workspace = true
 description = "RVC v2 (Retrieval-based Voice Conversion) neural network in Burn"
 
+[features]
+# Extra compute backends for the *examples* (the weight-coverage harness that
+# stands in for unit tests). Off by default, so the crate's normal build stays
+# backend-free — nothing in `src/` names a backend, and keeping that mechanical
+# is what protects warm-start compatibility and the ONNX exporter.
+cuda = ["burn/cuda"]
+tch = ["burn/tch"]
+
 [dependencies]
 burn = { version = "0.21", default-features = false, features = ["std"] }
 burn-store = { version = "0.21", default-features = false, features = ["std", "pytorch", "safetensors"] }

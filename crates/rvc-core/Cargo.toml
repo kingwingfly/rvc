@@ -11,7 +11,20 @@ description = "RVC v2 voice-conversion inference (ort/ONNX) as a streaming Conve
 # The native Burn generator backend (`.pth`/`.safetensors`), a peer to the
 # default ONNX-Runtime path. Off by default so `rvc-core` stays a lean ort crate
 # for consumers (e.g. `rvc-train`) that only need the shared `FeatureExtractor`.
+#
+# `burn` alone gives the *generic* `BurnGenerator<B>` and no concrete compute
+# backend — deliberate, so a consumer picks what it links. `cuda`/`tch` each add
+# one, and both can be on at once: `--backend` then chooses at runtime.
 burn = ["dep:burn", "dep:burn-rvc"]
+# CubeCL/CUDA compute backend for the Burn generator.
+cuda = ["burn", "burn/cuda"]
+# LibTorch compute backend. Needs a LibTorch install at build time — see
+# `build.rs`, which refuses to let `torch-sys` silently download a CPU-only one.
+tch = ["burn", "burn/tch", "dep:tch"]
+# WebGPU compute backend (wgpu → Vulkan/Metal/DX12). Pure Rust: unlike `cuda` and
+# `tch` it needs no vendor toolkit or external library, so it is the portable
+# fallback — and the only Burn backend that runs on AMD/Intel/Apple GPUs.
+wgpu = ["burn", "burn/wgpu"]
 
 [dependencies]
 rvc-audio.workspace = true
@@ -23,5 +36,6 @@ ndarray.workspace = true
 rustfft.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-burn = { workspace = true, features = ["cuda"], optional = true }
+burn = { workspace = true, optional = true }
 burn-rvc = { workspace = true, optional = true }
+tch = { workspace = true, optional = true }

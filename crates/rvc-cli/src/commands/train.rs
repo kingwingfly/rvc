@@ -77,6 +77,8 @@ pub async fn run(args: TrainArgs) -> Result<()> {
             save_best: !args.no_save_best,
             use_tui,
         },
+        backend: args.backend.into(),
+        device: args.device,
         stop,
     };
 

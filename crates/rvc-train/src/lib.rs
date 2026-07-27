@@ -2,9 +2,15 @@
 //!
 //! Pipeline: decode the corpus and extract ContentVec + RMVPE features (reusing
 //! the ONNX extractors the inference path uses), then adversarially fine-tune
-//! the [`burn_rvc`] generator on the GPU (CUDA), warm-started from the public
-//! pretrained bases, and save the result as safetensors. Deploy either directly
-//! (`rvc convert --backend burn`) or via the ONNX export helper.
+//! the [`burn_rvc`] generator on a GPU, warm-started from the public pretrained
+//! bases, and save the result as safetensors. Deploy either directly
+//! (`rvc convert --backend cuda`) or via the ONNX export helper.
+//!
+//! The loop is generic over the Burn compute backend ([`trainer::run`]); this
+//! module picks the concrete one from [`TrainRequest::backend`]. In practice
+//! that is always CubeCL/CUDA today — LibTorch cannot run the backward pass, see
+//! [`TCH_TRAINING_UNSUPPORTED`] — but the genericity is what lets that change
+//! with a one-line dispatch arm once the upstream bug is fixed.
 
 mod checkpoint;
 mod dashboard;
@@ -18,6 +24,37 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result};
+pub use rvc_core::DeviceSpec;
+
+/// Which Burn compute backend runs the training loop.
+///
+/// Both can be linked into one binary; this is the run-time choice. Nothing
+/// about the saved weights depends on it — but see
+/// [`TCH_TRAINING_UNSUPPORTED`]: only CubeCL/CUDA can train at present.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TrainBackend {
+    /// Whatever can actually train. Today that is always [`Self::Cuda`]:
+    /// LibTorch is faster for inference but cannot run the backward pass.
+    #[default]
+    Auto,
+    /// CubeCL/CUDA kernels. NVIDIA only.
+    Cuda,
+    /// LibTorch (tch): CUDA, MPS, Vulkan or CPU.
+    LibTorch,
+    /// WebGPU (wgpu → Vulkan/Metal/DX12). Vendor-neutral, no toolkit needed.
+    Wgpu,
+}
+
+impl std::fmt::Display for TrainBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Auto => "auto",
+            Self::Cuda => "cuda",
+            Self::LibTorch => "tch",
+            Self::Wgpu => "wgpu",
+        })
+    }
+}
 
 /// Generator hyperparameters.
 #[derive(Debug, Clone)]
@@ -93,6 +130,10 @@ pub struct TrainRequest {
     pub pretrained_d: Option<PathBuf>,
     /// Generator hyperparameters.
     pub settings: TrainSettings,
+    /// Compute backend for the training loop.
+    pub backend: TrainBackend,
+    /// Which device that backend should use (`DeviceSpec::Auto` = fastest).
+    pub device: DeviceSpec,
     /// Early-stop flag: set it (e.g. from a SIGINT handler) to stop after the
     /// current step and save the model. In the TUI, `q` stops too.
     pub stop: Arc<AtomicBool>,
@@ -109,6 +150,8 @@ pub fn train(req: TrainRequest) -> Result<PathBuf> {
         "native training currently supports only --model-sr 48000 (got {})",
         req.settings.sample_rate
     );
+    // Reject an unusable backend before the corpus is decoded, not after.
+    resolve_backend(&req)?;
     std::fs::create_dir_all(&req.work_dir)
         .with_context(|| format!("creating work dir {}", req.work_dir.display()))?;
 
@@ -127,5 +170,88 @@ pub fn train(req: TrainRequest) -> Result<PathBuf> {
         trainer::WINDOW_FRAMES,
     ))?;
 
-    trainer::run(&req, clips)
+    dispatch(&req, clips)
+}
+
+/// The backend a request resolves to, rejecting one that cannot work.
+///
+/// Separate from [`dispatch`] so `train` can call it *before* decoding the
+/// corpus: feature extraction takes minutes, and finding out afterwards that the
+/// backend was never going to run is a poor trade.
+fn resolve_backend(req: &TrainRequest) -> Result<TrainBackend> {
+    let backend = match req.backend {
+        TrainBackend::Auto => auto_backend(req.device),
+        explicit => explicit,
+    };
+    anyhow::ensure!(
+        backend != TrainBackend::LibTorch,
+        "{TCH_TRAINING_UNSUPPORTED}"
+    );
+    Ok(backend)
+}
+
+/// Instantiate the resolved compute backend and hand off to [`trainer::run`].
+///
+/// An *explicit* backend is never silently substituted: asking for one this
+/// build lacks, or a device it cannot see, is an error with a reason.
+fn dispatch(req: &TrainRequest, clips: Vec<dataset::Clip>) -> Result<PathBuf> {
+    let backend = resolve_backend(req)?;
+    tracing::info!("training backend: {backend} (device {})", req.device);
+
+    match backend {
+        TrainBackend::LibTorch => anyhow::bail!(TCH_TRAINING_UNSUPPORTED),
+        #[cfg(feature = "cuda")]
+        TrainBackend::Cuda => {
+            use burn::backend::{Autodiff, cuda::Cuda};
+            let device = rvc_core::cuda_device(req.device)?;
+            rvc_core::guard_init("cuda", || {
+                trainer::run::<Autodiff<Cuda>>(req, clips, &device)
+            })?
+        }
+        #[cfg(feature = "wgpu")]
+        TrainBackend::Wgpu => {
+            use burn::backend::{Autodiff, wgpu::Wgpu};
+            let device = rvc_core::wgpu_device(req.device)?;
+            rvc_core::guard_init("wgpu", || {
+                trainer::run::<Autodiff<Wgpu>>(req, clips, &device)
+            })?
+        }
+        // `Auto` is resolved above, so reaching here means the chosen backend was
+        // compiled out — which only happens on a `--no-default-features` build.
+        #[allow(unreachable_patterns)]
+        other => anyhow::bail!(
+            "this build has no `{other}` training backend \
+             (rebuild with `--features {other}`)"
+        ),
+    }
+}
+
+/// Why LibTorch cannot train, as of `burn 0.21` / `burn-tch 0.21`.
+///
+/// `Autodiff<LibTorch>` panics in `conv1d`'s backward whenever a convolution is
+/// **grouped** *and* its padded input length is not a multiple of the stride:
+/// the weight gradient comes back one or more kernel-taps too long, and
+/// LibTorch's strict `copy_` rejects it. `MultiPeriodDiscriminator`'s scale
+/// branch is exactly that shape (`k=41, s=4, groups=4..256` over a 17280-sample
+/// segment), so every training step hits it.
+///
+/// Minimal repro, in `examples/convgrad.rs`:
+/// `conv1d(16 -> 64, k=4, s=2, p=1, groups=4)` on length 101. Ungrouped is fine,
+/// grouped-but-evenly-divisible is fine, and CubeCL/CUDA is fine on all of them —
+/// so this is a `burn-tch` backward bug, not a flaw in the port. Inference is
+/// unaffected (no backward pass), which is why `--backend tch` converts happily.
+pub const TCH_TRAINING_UNSUPPORTED: &str = "\
+the LibTorch (tch) backend cannot train: burn 0.21's autodiff panics in the \
+backward pass of grouped strided conv1d, which the discriminator uses on every \
+step (see `cargo run -p rvc-train --example convgrad --features tch,cuda`).\n\
+Use `--backend cuda` to train; `--backend tch` is still the fastest choice for \
+`rvc convert` and `rvc serve`.";
+
+/// Resolve `Auto` to a backend that is both compiled in and usable.
+///
+/// Unlike inference, this never prefers LibTorch: it cannot run a backward pass
+/// (see [`TCH_TRAINING_UNSUPPORTED`]). Kept as a separate decision from
+/// `rvc_core::auto_prefers_libtorch` for exactly that reason.
+fn auto_backend(_spec: DeviceSpec) -> TrainBackend {
+    TrainBackend::Cuda
 }

@@ -4,33 +4,38 @@
 //! generator is the [`burn_rvc`] port. Mirrors [`RvcModel::convert_segment`]'s
 //! DSP: content features are upsampled ×2 to the F0 rate (inside
 //! [`FeatureExtractor::extract_aligned`]), F0 is pitch-shifted, then the two are
-//! aligned and fed to [`Synthesizer::infer`]. Runs on the GPU (CUDA);
-//! the HiFiGAN decoder is far too slow on CPU.
+//! aligned and fed to [`Synthesizer::infer`]. Wants a GPU: the HiFiGAN decoder
+//! is far too slow on CPU.
+//!
+//! Generic over the Burn compute backend, so one binary carries all of them and
+//! `--backend` chooses at run time. The concrete constructors at the bottom keep
+//! every Burn type inside this crate.
 
 use std::path::Path;
 
-use burn::backend::cuda::{Cuda, CudaDevice};
+use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
 use burn_rvc::{Synthesizer, SynthesizerConfig};
 
 use crate::backend::Generator;
 use crate::config::{CONTENT_DIM, ConvertParams};
+use crate::device::{DeviceSpec, guard_init};
 use crate::dsp::{f0_to_coarse, shift_pitch};
 use crate::error::{Result, VcError};
 use crate::features::{DEFAULT_CHUNK, FeatureExtractor};
 
-/// The GPU (CUDA) backend.
-type B = Cuda;
-
-/// A loaded native-Burn conversion pipeline.
-pub struct BurnGenerator {
+/// A loaded native-Burn conversion pipeline on the compute backend `B`.
+pub struct BurnGenerator<B: Backend> {
     extractor: FeatureExtractor,
     model: Synthesizer<B>,
+    /// Resolved once at load: `B::Device::default()` per segment would silently
+    /// fall to device 0 — and for LibTorch, whose default is `Cpu`, off the GPU.
+    device: B::Device,
     model_sr: u32,
     speaker_id: i64,
 }
 
-impl BurnGenerator {
+impl<B: Backend> BurnGenerator<B> {
     /// Load the feature extractors and the generator weights
     /// (`.pth`/`.safetensors`).
     pub fn load(
@@ -39,13 +44,14 @@ impl BurnGenerator {
         weights: &Path,
         model_sr: u32,
         speaker_id: i64,
+        device: &B::Device,
     ) -> Result<Self> {
         let cfg = match model_sr {
             40_000 => SynthesizerConfig::v2_40k(),
             _ => SynthesizerConfig::v2_48k(),
         };
-        let device = CudaDevice::default();
-        let mut model = Synthesizer::<B>::new(&cfg, &device);
+        tracing::info!("burn backend: {}", B::name(device));
+        let mut model = Synthesizer::<B>::new(&cfg, device);
         let res = model.load_weights(weights).map_err(|e| {
             VcError::Burn(format!(
                 "loading generator weights {}: {e}",
@@ -70,13 +76,14 @@ impl BurnGenerator {
         Ok(Self {
             extractor,
             model,
+            device: device.clone(),
             model_sr,
             speaker_id,
         })
     }
 }
 
-impl Generator for BurnGenerator {
+impl<B: Backend> Generator for BurnGenerator<B> {
     fn output_sr(&self) -> u32 {
         self.model_sr
     }
@@ -99,11 +106,11 @@ impl Generator for BurnGenerator {
             phone_flat.extend_from_slice(row);
         }
 
-        let device = CudaDevice::default();
+        let device = &self.device;
         let phone =
-            Tensor::<B, 3>::from_data(TensorData::new(phone_flat, [1, n, CONTENT_DIM]), &device);
-        let pitch = Tensor::<B, 2, Int>::from_data(TensorData::new(coarse, [1, n]), &device);
-        let nsff0 = Tensor::<B, 2>::from_data(TensorData::new(pitchf, [1, n]), &device);
+            Tensor::<B, 3>::from_data(TensorData::new(phone_flat, [1, n, CONTENT_DIM]), device);
+        let pitch = Tensor::<B, 2, Int>::from_data(TensorData::new(coarse, [1, n]), device);
+        let nsff0 = Tensor::<B, 2>::from_data(TensorData::new(pitchf, [1, n]), device);
 
         let audio = self.model.infer(phone, pitch, nsff0, self.speaker_id);
         audio
@@ -111,4 +118,62 @@ impl Generator for BurnGenerator {
             .into_vec::<f32>()
             .map_err(|e| VcError::Burn(format!("reading generator output: {e:?}")))
     }
+}
+
+/// Load the Burn generator on CubeCL/CUDA.
+///
+/// Returns an opaque [`Generator`], which is what lets `rvc-cli` pick a backend
+/// at run time without depending on `burn`.
+#[cfg(feature = "cuda")]
+pub fn cuda_generator(
+    content: &Path,
+    rmvpe: &Path,
+    weights: &Path,
+    model_sr: u32,
+    speaker_id: i64,
+    device: DeviceSpec,
+) -> Result<impl Generator + 'static> {
+    use burn::backend::cuda::Cuda;
+
+    let device = crate::device::cuda_device(device)?;
+    guard_init("cuda", || {
+        BurnGenerator::<Cuda>::load(content, rmvpe, weights, model_sr, speaker_id, &device)
+    })?
+}
+
+/// Load the Burn generator on WebGPU — the portable option: no vendor toolkit,
+/// and the only one that runs on AMD, Intel or Apple GPUs.
+#[cfg(feature = "wgpu")]
+pub fn wgpu_generator(
+    content: &Path,
+    rmvpe: &Path,
+    weights: &Path,
+    model_sr: u32,
+    speaker_id: i64,
+    device: DeviceSpec,
+) -> Result<impl Generator + 'static> {
+    use burn::backend::wgpu::Wgpu;
+
+    let device = crate::device::wgpu_device(device)?;
+    guard_init("wgpu", || {
+        BurnGenerator::<Wgpu>::load(content, rmvpe, weights, model_sr, speaker_id, &device)
+    })?
+}
+
+/// Load the Burn generator on the LibTorch backend.
+#[cfg(feature = "tch")]
+pub fn libtorch_generator(
+    content: &Path,
+    rmvpe: &Path,
+    weights: &Path,
+    model_sr: u32,
+    speaker_id: i64,
+    device: DeviceSpec,
+) -> Result<impl Generator + 'static> {
+    use burn::backend::libtorch::LibTorch;
+
+    let device = crate::device::libtorch_device(device)?;
+    guard_init("tch", || {
+        BurnGenerator::<LibTorch<f32>>::load(content, rmvpe, weights, model_sr, speaker_id, &device)
+    })?
 }

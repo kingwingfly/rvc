@@ -1,13 +1,17 @@
-//! The RVC fine-tuning loop (Burn autodiff on CUDA).
+//! The RVC fine-tuning loop (Burn autodiff), generic over the compute backend.
+//!
+//! `AB` runs the loop; `AB::InnerBackend` holds gradients, the EMA and every
+//! saved weight. `AutodiffBackend` guarantees both share a device type, so one
+//! `device` serves the whole loop. [`crate::train`] picks `AB` at run time.
 
+use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 
 use anyhow::{Context, Result, anyhow};
-use burn::backend::Autodiff;
-use burn::backend::cuda::{Cuda, CudaDevice};
 use burn::module::{AutodiffModule, Module, ModuleMapper, ModuleVisitor, Param};
 use burn::optim::{AdamWConfig, GradientsParams, Optimizer};
+use burn::tensor::backend::{AutodiffBackend, Backend};
 use burn::tensor::{Int, Tensor, TensorData, TensorPrimitive};
 use burn_rvc::{MultiPeriodDiscriminator, Synthesizer, SynthesizerConfig};
 
@@ -18,11 +22,6 @@ use crate::dataset::{CONTENT_DIM, Clip, HOP, Rng, clip_weights, sample_batch};
 use crate::losses::{disc_loss, feature_matching, gen_adv, kl, mel_l1};
 use crate::spectral::{Spectral, SpectralConfig};
 
-/// Autodiff GPU backend.
-type AB = Autodiff<Cuda>;
-/// Inner (non-autodiff) backend — gradients and the saved/EMA weights live here.
-pub(crate) type IB = Cuda;
-
 const SEGMENT_FRAMES: usize = 36; // 17280 samples / 480 hop
 /// Context window (frames) fed to enc_q/flow each step; clips must be at least
 /// this long.
@@ -32,16 +31,19 @@ const C_KL: f64 = 1.0;
 const FM_WEIGHT: f64 = 2.0;
 
 /// Run fine-tuning and return the path to the saved (safetensors) weights.
-pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
+pub fn run<AB: AutodiffBackend>(
+    req: &TrainRequest,
+    clips: Vec<Clip>,
+    device: &AB::Device,
+) -> Result<PathBuf> {
     anyhow::ensure!(
         req.settings.sample_rate == 48_000,
         "native training currently supports only --model-sr 48000"
     );
-    let device = CudaDevice::default();
     let cfg = SynthesizerConfig::v2_48k();
 
     // ---- Generator: resume a prior run, else warm-start, else scratch -------
-    let mut net_g = Synthesizer::<AB>::new(&cfg, &device);
+    let mut net_g = Synthesizer::<AB>::new(&cfg, device);
     let resume = req.resume.as_deref().map(Checkpoint::new);
     if let Some(ck) = &resume {
         let p = ck.resume_from();
@@ -72,7 +74,7 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
     }
 
     // ---- Discriminator: resume from the sidecar if present, else warm-start -
-    let mut disc = MultiPeriodDiscriminator::<AB>::new(&device);
+    let mut disc = MultiPeriodDiscriminator::<AB>::new(device);
     let disc_resume = resume.as_ref().map(Checkpoint::disc).filter(|p| p.exists());
     if let Some(p) = &disc_resume {
         let res = disc
@@ -101,7 +103,7 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
         );
     }
 
-    let spectral = Spectral::<AB>::new(&SpectralConfig::v2_48k(), &device);
+    let spectral = Spectral::<AB>::new(&SpectralConfig::v2_48k(), device);
 
     let mut opt_g = AdamWConfig::new()
         .with_beta_1(0.8)
@@ -163,7 +165,7 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
     // Generator weight EMA (kept on the inner backend): averaged over the
     // adversarial oscillation, so cleaner than any single step, and what every
     // checkpoint deploys. `None` when disabled (`--ema-frac 0`).
-    let mut ema: Option<Synthesizer<IB>> = (ema_decay > 0.0).then(|| net_g.valid());
+    let mut ema: Option<Synthesizer<AB::InnerBackend>> = (ema_decay > 0.0).then(|| net_g.valid());
 
     let out = Checkpoint::new(&req.out);
 
@@ -234,19 +236,17 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
 
             let phone = Tensor::<AB, 3>::from_data(
                 TensorData::new(data.phone, [b, WINDOW_FRAMES, CONTENT_DIM]),
-                &device,
+                device,
             );
             let pitch = Tensor::<AB, 2, Int>::from_data(
                 TensorData::new(data.coarse, [b, WINDOW_FRAMES]),
-                &device,
+                device,
             );
-            let nsff0 = Tensor::<AB, 2>::from_data(
-                TensorData::new(data.nsff0, [b, WINDOW_FRAMES]),
-                &device,
-            );
+            let nsff0 =
+                Tensor::<AB, 2>::from_data(TensorData::new(data.nsff0, [b, WINDOW_FRAMES]), device);
             let gt = Tensor::<AB, 2>::from_data(
                 TensorData::new(data.gt, [b, WINDOW_FRAMES * HOP]),
-                &device,
+                device,
             );
 
             // enc_q input spectrogram (a constant w.r.t. autodiff).
@@ -407,12 +407,12 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
 /// only once the whole family is on disk, so a failed write can't block a later
 /// minimum from being saved; the score sidecar is written last for the same
 /// reason — a later run must not inherit a best whose weights never landed.
-fn keep_best(
+fn keep_best<AB: AutodiffBackend>(
     ck: &Checkpoint,
     best: &mut f32,
     mean: f32,
     step: usize,
-    ema: Option<&Synthesizer<IB>>,
+    ema: Option<&Synthesizer<AB::InnerBackend>>,
     net_g: &Synthesizer<AB>,
     disc: &MultiPeriodDiscriminator<AB>,
 ) -> bool {
@@ -438,7 +438,7 @@ fn keep_best(
 }
 
 /// Extract a scalar loss value to `f32` for logging.
-fn scalar(t: &Tensor<AB, 1>) -> f32 {
+fn scalar<AB: AutodiffBackend>(t: &Tensor<AB, 1>) -> f32 {
     t.clone()
         .into_data()
         .to_vec::<f32>()
@@ -446,45 +446,48 @@ fn scalar(t: &Tensor<AB, 1>) -> f32 {
         .unwrap_or(f32::NAN)
 }
 
-/// A [`ModuleVisitor`] that sums `incoming` (scaled) into `acc`, matching
-/// gradients by [`ParamId`]. Gradients live on the inner backend [`IB`] even
-/// though the module is autodiff-wrapped, so lookups use `IB`.
-struct GradAccum {
+/// Sums `incoming` (scaled) into `acc`, matched by `ParamId`. Gradients live on
+/// `AB::InnerBackend` even though the module is autodiff-wrapped, which is why
+/// the lookups below name it.
+struct GradAccum<AB> {
     acc: GradientsParams,
     incoming: GradientsParams,
     scale: f32,
+    /// `AB` appears only in the trait we implement, never in a field.
+    _ab: PhantomData<AB>,
 }
 
-impl ModuleVisitor<AB> for GradAccum {
+impl<AB: AutodiffBackend> ModuleVisitor<AB> for GradAccum<AB> {
     fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<AB, D>>) {
         let id = param.id;
-        if let Some(g) = self.incoming.remove::<IB, D>(id) {
+        if let Some(g) = self.incoming.remove::<AB::InnerBackend, D>(id) {
             let g = if (self.scale - 1.0).abs() > f32::EPSILON {
                 g.mul_scalar(self.scale)
             } else {
                 g
             };
-            let merged = match self.acc.remove::<IB, D>(id) {
+            let merged = match self.acc.remove::<AB::InnerBackend, D>(id) {
                 Some(a) => a + g,
                 None => g,
             };
-            self.acc.register::<IB, D>(id, merged);
+            self.acc.register::<AB::InnerBackend, D>(id, merged);
         }
     }
 }
 
 /// Add `incoming * scale` into `acc`, param by param (for gradient
 /// accumulation). `module` supplies the traversal over parameter ids.
-fn accumulate<M: Module<AB>>(
+fn accumulate<AB: AutodiffBackend, M: Module<AB>>(
     acc: GradientsParams,
     incoming: GradientsParams,
     module: &M,
     scale: f32,
 ) -> GradientsParams {
-    let mut v = GradAccum {
+    let mut v = GradAccum::<AB> {
         acc,
         incoming,
         scale,
+        _ab: PhantomData,
     };
     module.visit(&mut v);
     v.acc
@@ -492,34 +495,38 @@ fn accumulate<M: Module<AB>>(
 
 /// Collects a module's float parameters (in traversal order) as rank-erased
 /// primitives, so a same-typed module can be blended against them element-wise.
-struct ParamCollector {
-    prims: Vec<TensorPrimitive<IB>>,
+struct ParamCollector<B: Backend> {
+    prims: Vec<TensorPrimitive<B>>,
 }
 
-impl ModuleVisitor<IB> for ParamCollector {
-    fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<IB, D>>) {
+impl<B: Backend> ModuleVisitor<B> for ParamCollector<B> {
+    fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<B, D>>) {
         self.prims.push(param.val().into_primitive());
     }
 }
 
 /// [`ModuleMapper`] applying `ema = keep*ema + (1-keep)*src`, consuming the
 /// collected source primitives in the same traversal order.
-struct EmaBlend {
-    prims: Vec<TensorPrimitive<IB>>,
+struct EmaBlend<B: Backend> {
+    prims: Vec<TensorPrimitive<B>>,
     keep: f64,
 }
 
-impl ModuleMapper<IB> for EmaBlend {
-    fn map_float<const D: usize>(&mut self, param: Param<Tensor<IB, D>>) -> Param<Tensor<IB, D>> {
+impl<B: Backend> ModuleMapper<B> for EmaBlend<B> {
+    fn map_float<const D: usize>(&mut self, param: Param<Tensor<B, D>>) -> Param<Tensor<B, D>> {
         let (id, dst, mapper) = param.consume();
-        let src = Tensor::<IB, D>::from_primitive(self.prims.pop().expect("ema source underflow"));
+        let src = Tensor::<B, D>::from_primitive(self.prims.pop().expect("ema source underflow"));
         let blended = dst.mul_scalar(self.keep) + src.mul_scalar(1.0 - self.keep);
         Param::from_mapped_value(id, blended, mapper)
     }
 }
 
 /// Update the generator weight EMA toward the current live weights.
-fn ema_update(ema: Synthesizer<IB>, net_g: &Synthesizer<AB>, keep: f64) -> Synthesizer<IB> {
+fn ema_update<AB: AutodiffBackend>(
+    ema: Synthesizer<AB::InnerBackend>,
+    net_g: &Synthesizer<AB>,
+    keep: f64,
+) -> Synthesizer<AB::InnerBackend> {
     let src = net_g.valid();
     let mut collect = ParamCollector { prims: Vec::new() };
     src.visit(&mut collect);

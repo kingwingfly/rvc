@@ -24,6 +24,10 @@ rvc-core = { path = "crates/rvc-core" }
 rvc-train = { path = "crates/rvc-train" }
 burn-rvc = { path = "crates/burn-rvc" }
 burn = { version = "0.21", default-features = false, features = ["std", "ndarray"] }
+# Only for capability probes `burn-tch` does not re-export (`Cuda::device_count`,
+# `utils::has_mps/has_vulkan`) — `LibTorch::device_count()` is hardcoded to 1.
+# Same library burn-tch already links, so this costs no extra build.
+tch = { version = "0.22", default-features = false }
 
 # Async / streaming
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "io-std", "io-util", "sync", "fs", "signal"] }

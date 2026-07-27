@@ -33,6 +33,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     let converter = build_converter(
         &args.models,
         args.backend,
+        args.device,
         args.transpose,
         StreamParams::realtime(),
         args.denoise.params(),
