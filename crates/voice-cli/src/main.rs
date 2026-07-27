@@ -14,6 +14,8 @@
 //! Logs go to **stderr** so a filter's stdout carries only data.
 
 mod args;
+mod backend;
+mod stt;
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser};
@@ -34,6 +36,7 @@ async fn main() -> Result<()> {
     });
     match cli.command {
         Command::Rvc { command } => rvc_cli::run_rvc(*command).await,
+        Command::Stt(a) => stt::run(*a).await,
         Command::Models(a) => commands::models::run(a).await,
         Command::Completions(a) => commands::completions::run(a, Cli::command()).await,
     }

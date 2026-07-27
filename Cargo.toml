@@ -4,6 +4,7 @@ members = [
     "crates/burn-kit",
     "crates/voice-audio",
     "crates/voice-hub",
+    "crates/voice-stt",
     "crates/rvc-core",
     "crates/burn-rvc",
     "crates/burn-whisper",
@@ -34,6 +35,7 @@ rvc-cli = { path = "crates/rvc-cli", default-features = false }
 burn-rvc = { path = "crates/burn-rvc" }
 burn-kit = { path = "crates/burn-kit" }
 burn-whisper = { path = "crates/burn-whisper" }
+voice-stt = { path = "crates/voice-stt" }
 burn = { version = "0.21", default-features = false, features = ["std", "ndarray"] }
 # Checkpoint readers. `burn-kit` owns the loading helpers; `burn-rvc` and every
 # later network crate go through it rather than depending on this directly.
@@ -70,6 +72,11 @@ ffmpeg-next = "8.1"
 
 # Model download (async API is the default in 1.0; `blocking` is opt-in)
 hf-hub = { version = "1.0", features = ["rustls-tls"] }
+
+# Text
+# BPE vocabularies straight from a Hugging Face `tokenizer.json`.
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
+serde_json = "1"
 
 # CLI
 clap = { version = "4.6", features = ["derive", "env"] }

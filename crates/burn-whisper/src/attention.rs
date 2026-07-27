@@ -133,11 +133,20 @@ impl<B: Backend> Attention<B> {
     }
 }
 
-/// The decoder's causal mask: position `i` may not attend past `i`.
+/// The decoder's causal mask: `true` where attention must be blocked, so a
+/// query may not see keys from its own future.
 ///
-/// Built for the `[n_q, n_kv]` slice actually being computed. During incremental
-/// decoding `n_q` is 1 and `n_kv` is everything so far, which makes the mask
-/// all-false — a single new token legitimately sees the whole prefix.
+/// Built for the `[n_q, n_kv]` slice actually being computed. With a cache of
+/// `n_kv - n_q` earlier tokens, query `i` sits at absolute position
+/// `n_kv - n_q + i`, which is exactly `tril_mask`'s offset. During incremental
+/// decoding `n_q` is 1 and the mask comes out all-false — one new token
+/// legitimately sees the whole prefix.
+///
+/// It is [`Tensor::tril_mask`], not `triu_mask`, and the names invite the
+/// opposite: Burn's masks say which triangle to *keep*, so `triu_mask` blocks
+/// the lower triangle. Using it here reverses time, and at `n_q == n_kv == 1` it
+/// blocks the only position there is — a whole row of `-inf` into softmax, which
+/// is `NaN` rather than an error.
 pub fn causal_mask<B: Backend>(n_q: usize, n_kv: usize, device: &B::Device) -> Tensor<B, 2, Bool> {
-    Tensor::triu_mask([n_q, n_kv], (n_kv - n_q) as i64 + 1, device)
+    Tensor::tril_mask([n_q, n_kv], (n_kv - n_q) as i64, device)
 }

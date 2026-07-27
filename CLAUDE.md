@@ -74,6 +74,15 @@ cargo run -p burn-whisper --example load -- <path/to/model.safetensors>  # 587/0
 Porting references are cloned under `/.reference` (gitignored) and **read, never
 run** — `openai/whisper`, and RVC-Project tag `2.2.231006` for `burn-rvc`.
 
+### Porting traps found the hard way
+`Tensor::triu_mask`/`tril_mask` are named for the triangle they **keep**, not the
+one they mask, so a causal mask is `tril_mask(shape, n_kv - n_q)`. Using
+`triu_mask` reverses time, and when a decode step has one query and one key it
+masks the only position there is — a full row of `-inf` into softmax is `NaN`,
+not an error, and it propagates to every logit. Burn's `assert_approx_eq` also
+compares `NaN` to `NaN` without complaint, so tests must assert finiteness
+separately (`burn-whisper`'s do).
+
 Requires **ffmpeg 8.1** dev libraries (and the `ffmpeg` binary for the realtime
 `serve` example). ContentVec + RMVPE ONNX assets auto-download from Hugging Face
 (`rvc models download` to prefetch). Only 48 kHz is supported today.
@@ -94,7 +103,8 @@ Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper
 | `rvc-train` | native Rust/Burn adversarial training loop (see `crates/rvc-train/ARCHITECTURE.md`) |
 | `voice-hub` | auto-download ContentVec/RMVPE ONNX from Hugging Face |
 | `rvc-cli` | lib **and** the `rvc` binary (clap): `convert`, `serve`, `models`, `train`, `preprocess` |
-| `voice-cli` | the `voice` binary: `rvc-cli`'s subcommands nested under `voice rvc …`, plus the rest of the toolkit |
+| `voice-stt` | speech recognition: Whisper log-mel front-end, BPE vocabulary, KV-cached greedy decode, segmentation via `voice-audio`'s slicer |
+| `voice-cli` | the `voice` binary: `rvc-cli`'s subcommands nested under `voice rvc …`, plus `stt` |
 
 ### Three runtimes, one path (the key abstraction)
 Everything downstream of the generator is shared: the same `FeatureExtractor`, the

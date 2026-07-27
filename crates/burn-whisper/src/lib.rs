@@ -141,9 +141,50 @@ mod tests {
         }
         assert_eq!(state.offset(), ids.len());
 
-        one_shot.into_data().assert_approx_eq::<f32>(
-            &stepwise.unwrap().into_data(),
-            burn::tensor::Tolerance::default(),
+        let stepwise = stepwise.unwrap().into_data();
+        // Finiteness first, and explicitly: `assert_approx_eq` compares NaN
+        // against NaN without complaint, so on its own it passes a decoder that
+        // has masked every position and produced nothing but NaN.
+        for (name, data) in [("one-shot", one_shot.into_data()), ("stepwise", stepwise)] {
+            let v: Vec<f32> = data.to_vec().unwrap();
+            assert!(
+                v.iter().all(|x| x.is_finite()),
+                "{name} logits are not finite"
+            );
+        }
+    }
+
+    #[test]
+    fn the_causal_mask_blocks_the_future_and_nothing_else() {
+        // Pinned directly because Burn's tri masks are named for the triangle
+        // they *keep*, so the obvious-looking `triu_mask` reverses time here.
+        let device = Default::default();
+
+        let full: Vec<bool> = causal_mask::<B>(3, 3, &device)
+            .into_data()
+            .to_vec()
+            .unwrap();
+        assert_eq!(
+            full,
+            [
+                false, true, true, // position 0 sees only itself
+                false, false, true, //
+                false, false, false, // position 2 sees everything
+            ]
         );
+
+        // One new token after two cached: it may see all three.
+        let cached: Vec<bool> = causal_mask::<B>(1, 3, &device)
+            .into_data()
+            .to_vec()
+            .unwrap();
+        assert_eq!(cached, [false, false, false]);
+
+        // The single-token case that produced a whole row of `-inf`.
+        let first: Vec<bool> = causal_mask::<B>(1, 1, &device)
+            .into_data()
+            .to_vec()
+            .unwrap();
+        assert_eq!(first, [false]);
     }
 }

@@ -1,0 +1,30 @@
+[package]
+name = "voice-stt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Speech recognition (Whisper) for the voice toolkit"
+
+# Compute backends, mirroring the rest of the workspace; `--backend` picks at
+# run time. `burn-kit` gains the matching device resolver with each.
+[features]
+default = []
+cuda = ["burn/cuda", "burn-kit/cuda"]
+tch = ["burn/tch", "burn-kit/tch"]
+wgpu = ["burn/wgpu", "burn-kit/wgpu"]
+
+[dependencies]
+burn = { workspace = true }
+burn-whisper.workspace = true
+burn-kit.workspace = true
+voice-audio.workspace = true
+rustfft.workspace = true
+tokenizers.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+burn-ndarray = "0.21"

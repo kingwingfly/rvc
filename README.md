@@ -42,13 +42,41 @@ the requirements are the same for both binaries.
 | | status | docs |
 |---|---|---|
 | **`rvc`** — voice conversion (RVC v2) | **works**, inference + native training | [crates/rvc-cli/README.md](crates/rvc-cli/README.md) |
-| **`stt`** — speech recognition (Whisper large-v3-turbo) | network ported; front-end and decode loop next | — |
+| **`stt`** — speech recognition (Whisper large-v3-turbo) | **works** — `voice stt` | below |
 | **`tts`** — speech synthesis (GPT-SoVITS v2) | planned, inference + fine-tuning | — |
 | **`translate`** | not started; pipe to any external tool meanwhile | — |
 
 `rvc` runs on three interchangeable compute backends — ONNX Runtime, and native
 Burn on either LibTorch or CubeCL/CUDA or WebGPU — chosen at run time with
 `--backend`. New engines are Burn-only.
+
+## `voice stt`
+
+Raw f32le mono PCM at 16 kHz on stdin, text on stdout:
+
+```sh
+ffmpeg -i take.mp3 -f f32le -ar 16000 -ac 1 - | voice stt
+```
+
+`--format jsonl` adds per-segment timings and the detected language, which is
+what a subtitle file — or a TTS training manifest — needs:
+
+```json
+{"start":2.300,"end":4.760,"language":"zh","text":"欺软怕硬的家伙算什么好汉"}
+```
+
+Weights come from `openai/whisper-large-v3-turbo`, downloaded on first use;
+`--repo owner/name` picks a different one and every dimension is read from that
+repo's own `config.json`, so a different size costs no code.
+
+Input is **buffered, not streamed** — segmentation looks for silences across the
+whole recording, and Whisper normalises each 30 s window against its own peak.
+Segmentation matters more than its size suggests: Whisper is a language model
+conditioned on audio, and handed a long quiet stretch it will invent fluent
+sentences to fill it. `voice stt` reuses the sentence slicer from `rvc
+preprocess`, which uses energy only to find silent gaps and never to gate
+quiet-but-present sound, so soft and breathy speech survives the cut.
+`--silence-db` and `--min-silence` tune where the cuts land.
 
 ## Crate layout
 
@@ -60,6 +88,7 @@ Burn on either LibTorch or CubeCL/CUDA or WebGPU — chosen at run time with
 | `rvc-core` | the voice-conversion pipeline: feature extraction, DSP, streaming `Converter`, all three generator backends |
 | `burn-rvc` | the RVC v2 network itself (standalone Burn port); no app deps |
 | `burn-whisper` | the Whisper network (standalone Burn port); loads HF safetensors unchanged |
+| `voice-stt` | speech recognition: log-mel front-end, BPE vocabulary, greedy decode, segmentation |
 | `rvc-train` | native Rust/Burn adversarial training — see [ARCHITECTURE.md](crates/rvc-train/ARCHITECTURE.md) |
 | `rvc-cli` | the `rvc` binary, and the library behind `voice rvc …` |
 | `voice-cli` | the `voice` binary |

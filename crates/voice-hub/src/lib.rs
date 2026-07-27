@@ -113,3 +113,49 @@ pub async fn fetch_shared(
         rmvpe: fetch(&rmvpe, cache_dir).await?,
     })
 }
+
+/// The four files a Hugging Face Whisper repo needs to be usable: the weights,
+/// the dimensions, the control-token ids and the BPE vocabulary.
+#[derive(Debug, Clone)]
+pub struct WhisperAssets {
+    /// The directory holding all four, which is what `voice-stt` loads from.
+    pub dir: PathBuf,
+}
+
+/// Default ASR model: `openai/whisper-large-v3-turbo` (809M, MIT).
+///
+/// Unlike the ContentVec and RMVPE entries above — community ONNX exports that
+/// move over time — this is a first-party repo, which is the main reason the
+/// toolkit ports models rather than consuming somebody's conversion of one.
+pub const DEFAULT_WHISPER: (&str, &str) = ("openai", "whisper-large-v3-turbo");
+
+/// Files that must be present for `voice-stt` to load a checkpoint.
+const WHISPER_FILES: [&str; 4] = [
+    "model.safetensors",
+    "config.json",
+    "generation_config.json",
+    "tokenizer.json",
+];
+
+/// Fetch a Whisper repo, returning the directory the files landed in.
+///
+/// `repo` overrides the default as `owner/name` — that is how a different size
+/// (`openai/whisper-large-v3`) or a fine-tune is selected, since `voice-stt`
+/// reads every dimension from the repo's own `config.json`.
+pub async fn fetch_whisper(repo: Option<&str>, cache_dir: Option<&Path>) -> Result<WhisperAssets> {
+    let (owner, name) = match repo {
+        Some(r) => r.split_once('/').unwrap_or((r, "")),
+        None => DEFAULT_WHISPER,
+    };
+
+    let mut dir = None;
+    for file in WHISPER_FILES {
+        let path = fetch(&ModelRef::new(owner, name, file), cache_dir).await?;
+        // Every file lands in the same snapshot directory; the weights are the
+        // slow one, so report progress against that rather than the JSON.
+        dir = path.parent().map(Path::to_path_buf);
+    }
+    Ok(WhisperAssets {
+        dir: dir.unwrap_or_else(default_cache_dir),
+    })
+}

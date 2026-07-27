@@ -1,0 +1,178 @@
+//! `voice stt` — speech recognition as a Unix filter.
+//!
+//! Raw f32le mono PCM at 16 kHz on stdin, text on stdout, logs on stderr:
+//!
+//! ```sh
+//! ffmpeg -i take.mp3 -f f32le -ar 16000 -ac 1 - | voice stt
+//! ```
+//!
+//! `--format text` (the default) writes one line per segment so it pipes
+//! straight into a translator or `voice tts`. `--format jsonl` adds timings and
+//! the detected language, which is what a subtitle file or a TTS training
+//! manifest needs.
+//!
+//! Unlike `voice rvc serve` this is **not** streaming: the whole input is read
+//! before anything is transcribed, because segmentation looks for silences
+//! across the recording and Whisper's own mel normalisation is per 30 s window.
+
+use anyhow::{Context, Result};
+use clap::{Args, ValueEnum};
+use futures::StreamExt;
+use std::path::PathBuf;
+use tokio::io::{AsyncWriteExt, BufWriter};
+use voice_stt::{DecodeOptions, TranscribeOptions};
+
+use crate::backend::{SttBackend, load_transcriber};
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum Format {
+    /// One line of text per segment — pipes into anything.
+    #[default]
+    Text,
+    /// One JSON object per line: start, end, text, language.
+    Jsonl,
+}
+
+#[derive(Debug, Args)]
+pub struct SttArgs {
+    /// Directory holding a Hugging Face Whisper repo
+    /// [default: auto-downloaded from Hugging Face].
+    #[arg(short, long)]
+    pub model: Option<PathBuf>,
+    /// Override the model repo as `owner/name`
+    /// [default: openai/whisper-large-v3-turbo].
+    #[arg(long, value_name = "OWNER/NAME")]
+    pub repo: Option<String>,
+    /// Cache directory for downloaded assets [default: the Hugging Face cache].
+    #[arg(long)]
+    pub cache_dir: Option<PathBuf>,
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
+    /// Force a language by ISO code (`en`, `zh`, `ja`) instead of detecting it.
+    /// Worth setting on short or breathy clips, where detection is least sure.
+    #[arg(short, long)]
+    pub language: Option<String>,
+    /// Translate to English rather than transcribing verbatim.
+    #[arg(long)]
+    pub translate: bool,
+    /// Compute backend: `auto`, `cuda`, `tch` (`libtorch`) or `wgpu`.
+    #[arg(long, value_enum, default_value_t = SttBackend::Auto)]
+    pub backend: SttBackend,
+    /// Compute device: `auto`, `cpu`, `gpu`, `gpu:N`, `mps` or `vulkan`.
+    #[arg(long, default_value = "auto", value_name = "DEVICE", value_parser = crate::args::parse_device)]
+    pub device: burn_kit::DeviceSpec,
+    /// Samples per input read chunk from stdin.
+    #[arg(long, default_value_t = 16000)]
+    pub chunk: usize,
+    /// Energy floor in dBFS: quieter than this counts as a gap between
+    /// utterances. Lower it to keep very soft passages in one segment.
+    #[arg(long, default_value_t = -40.0)]
+    pub silence_db: f32,
+    /// Minimum silent-gap length (seconds) that counts as a segment boundary.
+    #[arg(long, default_value_t = 0.5)]
+    pub min_silence: f32,
+    /// Drop any segment shorter than this (seconds).
+    #[arg(long, default_value_t = 0.2)]
+    pub min_clip: f32,
+    /// Hard cap on segment length (seconds). Cannot exceed 30 — one segment must
+    /// fit one encoder window.
+    #[arg(long, default_value_t = 30.0)]
+    pub max_clip: f32,
+    /// Cap on tokens generated per segment. Raise it if dense speech is being
+    /// cut off (a warning says so); lower it to bound a hallucination loop.
+    #[arg(long, default_value_t = 224)]
+    pub max_tokens: usize,
+}
+
+pub async fn run(args: SttArgs) -> Result<()> {
+    anyhow::ensure!(
+        args.max_clip > 0.0 && args.max_clip <= 30.0,
+        "--max-clip must be in (0, 30]: one segment has to fit Whisper's 30 s encoder window"
+    );
+
+    let dir = match &args.model {
+        Some(dir) => dir.clone(),
+        None => {
+            tracing::info!("resolving Whisper weights from Hugging Face...");
+            voice_hub::fetch_whisper(args.repo.as_deref(), args.cache_dir.as_deref())
+                .await
+                .context("failed to fetch the Whisper model")?
+                .dir
+        }
+    };
+
+    let stt = tokio::task::block_in_place(|| load_transcriber(&dir, args.backend, args.device))?;
+
+    // Buffered, not streamed: see the module docs.
+    let mut input = Box::pin(voice_audio::read_f32le(tokio::io::stdin(), args.chunk));
+    let mut audio: Vec<f32> = Vec::new();
+    while let Some(chunk) = input.next().await {
+        audio.extend_from_slice(&chunk.context("reading stdin")?);
+    }
+    tracing::info!(
+        "transcribing {:.1} s of audio",
+        audio.len() as f32 / voice_stt::SAMPLE_RATE as f32
+    );
+
+    let opts = TranscribeOptions {
+        slice: voice_audio::SliceOptions {
+            silence_db: args.silence_db,
+            min_silence: args.min_silence,
+            min_clip: args.min_clip,
+            max_clip: args.max_clip,
+            ..Default::default()
+        },
+        decode: DecodeOptions {
+            language: args.language.clone(),
+            translate: args.translate,
+            max_tokens: args.max_tokens,
+        },
+    };
+
+    let segments = tokio::task::block_in_place(|| stt.transcribe(&audio, &opts))
+        .context("transcription failed")?;
+
+    let mut out = BufWriter::new(tokio::io::stdout());
+    for s in &segments {
+        let line = match args.format {
+            Format::Text => format!("{}\n", s.text),
+            Format::Jsonl => format!(
+                "{{\"start\":{:.3},\"end\":{:.3},\"language\":\"{}\",\"text\":{}}}\n",
+                s.start,
+                s.end,
+                s.language,
+                json_string(&s.text)
+            ),
+        };
+        out.write_all(line.as_bytes())
+            .await
+            .context("writing stdout")?;
+    }
+    out.flush().await.context("final flush")?;
+    tracing::info!("{} segments", segments.len());
+    Ok(())
+}
+
+/// Escape a transcript as a JSON string.
+///
+/// Hand-rolled rather than pulling `serde` into the CLI for one field: the input
+/// is model-generated text, so the escapes that matter are quotes, backslashes
+/// and the control characters below 0x20.
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
