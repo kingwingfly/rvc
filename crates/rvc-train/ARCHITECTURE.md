@@ -192,15 +192,16 @@ compute backend; `lib.rs::dispatch` instantiates the concrete one from
 `TrainRequest::backend` at run time. Two cargo features (`tch`, `cuda`) decide what
 is linked; the CLI enables both.
 
-**Only `Autodiff<Cuda>` can train today.** `burn 0.21` panics in the backward pass of
-a *grouped, strided* `conv1d` whose padded input length is not a multiple of the
-stride — the weight gradient comes back too long and LibTorch's strict `copy_`
-rejects it. `DiscriminatorS` is precisely that shape (`k=41, s=4, groups=4..256` over
-a 17280-sample segment), so every step hits it. `resolve_backend` rejects
-`--backend tch` *before* the corpus is decoded. Ungrouped, or grouped-and-evenly-
-divisible, or CubeCL/CUDA: all fine — see `examples/convgrad.rs`, whose minimal case
-is `conv1d(16 -> 64, k=4, s=2, p=1, groups=4)` on length 101. The genericity is kept
-because fixing this upstream turns it back into a one-line dispatch arm.
+All three backends train, but one burn 0.21 quirk dictates a detail of the port:
+the autodiff builds a weight gradient one or more kernel-taps too long for a
+*grouped, strided* `conv1d` whose padded input length is not a multiple of the
+stride. CubeCL and WebGPU absorb it; LibTorch's strict `copy_` aborts.
+`DiscriminatorS` is precisely that shape (`k=41, s=4, groups=4..256` over a
+17280-sample segment), so `burn_rvc::discriminator::align_for_scale` reflect-pads
+its input up to `len % 256 == 1`, which the whole four-layer chain then divides
+evenly. `examples/convgrad.rs` is the probe: its minimal failing case is
+`conv1d(16 -> 64, k=4, s=2, p=1, groups=4)` on length 101, and it also shows the
+padded chain passing.
 
 `AB::InnerBackend` is where gradients, the EMA and every saved weight live.
 `AutodiffBackend` guarantees `InnerBackend: Backend<Device = Self::Device>`, so a
@@ -210,7 +211,20 @@ register}` are bound on plain `Backend`, `AdamW` implements `SimpleOptimizer<B>`
 any `B: Backend`, and the `Module` derive emits a concrete
 `type InnerModule = Synthesizer<B::InnerBackend>` that rustc normalises without help.
 
-Device selection is `rvc_core::DeviceSpec` (`--device auto|cpu|cuda|cuda:N|mps|vulkan`),
-shared with the inference path so `auto` means the same thing in both. One run uses
-one device: there is no data-parallel training (see the `Learner` note above — the
-multi-device strategies live inside it).
+Device selection is `rvc_core::DeviceSpec` (`--device auto|cpu|gpu|gpu:N|mps|vulkan`),
+shared with the inference path so `auto` means the same thing in both.
+
+`run` takes a device *slice*. With one entry it behaves exactly as before — no
+clone, no transfer. With more it is data-parallel on the master-device plan, which
+is what `Learner`'s `MultiDeviceOptim::OptimMainDevice` does and what we have to
+reimplement because the GAN loop can't use `Learner`: per-step replicas via
+`Module::to_device`, one `micro_step` per device, then
+`GradientsParams::to_device` back to the master before the existing `accumulate`
+sums them. Only the master's weights, optimizers and EMA advance.
+
+Two limits worth knowing. Devices are dispatched sequentially, so the win depends
+on backends queueing work asynchronously — `MultiDevicesTrainStep`'s
+thread-per-device is the next step for real scaling. And replicas are copied every
+step; avoiding that needs persistent replicas plus an all-reduce
+(`burn-collective`), which is out of scope. **N>1 is untested**: the development
+machine has one GPU and no backend that can pair it with a CPU for training.

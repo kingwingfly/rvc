@@ -34,8 +34,13 @@ const FM_WEIGHT: f64 = 2.0;
 pub fn run<AB: AutodiffBackend>(
     req: &TrainRequest,
     clips: Vec<Clip>,
-    device: &AB::Device,
+    devices: &[AB::Device],
 ) -> Result<PathBuf> {
+    anyhow::ensure!(!devices.is_empty(), "no compute device selected");
+    // Device 0 owns the weights, the optimizers and the EMA; the others only
+    // ever produce gradients.
+    let device = &devices[0];
+    let main_device = device;
     anyhow::ensure!(
         req.settings.sample_rate == 48_000,
         "native training currently supports only --model-sr 48000"
@@ -103,7 +108,12 @@ pub fn run<AB: AutodiffBackend>(
         );
     }
 
-    let spectral = Spectral::<AB>::new(&SpectralConfig::v2_48k(), device);
+    // One per device: the STFT kernels are constants, but a tensor can only be
+    // used on the device it lives on.
+    let spectrals: Vec<Spectral<AB>> = devices
+        .iter()
+        .map(|d| Spectral::<AB>::new(&SpectralConfig::v2_48k(), d))
+        .collect();
 
     let mut opt_g = AdamWConfig::new()
         .with_beta_1(0.8)
@@ -220,93 +230,73 @@ pub fn run<AB: AutodiffBackend>(
         let cur_lr = base_lr * lr_final.powf(progress);
         let update_d = step % d_interval == 0;
 
-        // Accumulate gradients over `accum` micro-batches (effective batch =
-        // batch * accum) before a single optimizer step: steadier gradients
-        // without the VRAM of a larger real batch. `accum == 1` is plain SGD.
-        let inv = 1.0 / accum as f32;
+        // Accumulate over `accum` micro-batches per device before one optimizer
+        // step — steadier gradients without the VRAM of a larger real batch. The
+        // effective batch is `batch * accum * devices`, and `inv` averages over
+        // all of it.
+        let inv = 1.0 / (accum * devices.len()) as f32;
         let mut acc_g = GradientsParams::new();
         let mut acc_d = GradientsParams::new();
         let mut g_sum = 0.0f32;
         let mut d_sum = 0.0f32;
         let mut mel_sum = 0.0f32;
 
+        // Replicas of the current weights for the non-master devices. Rebuilt
+        // each step because only the master is optimized; this clone-and-copy is
+        // the cost of data parallelism without an all-reduce.
+        let replicas: Vec<(Synthesizer<AB>, MultiPeriodDiscriminator<AB>)> = devices[1..]
+            .iter()
+            .map(|d| (net_g.clone().to_device(d), disc.clone().to_device(d)))
+            .collect();
+
         let b = batch;
         for _ in 0..accum {
-            let data = sample_batch(&clips, b, WINDOW_FRAMES, &mut rng, cdf.as_deref());
+            // Every device gets its own micro-batch, so the effective batch is
+            // `batch * accum * devices` — the usual data-parallel bargain.
+            for (i, dev) in devices.iter().enumerate() {
+                let data = sample_batch(&clips, b, WINDOW_FRAMES, &mut rng, cdf.as_deref());
+                let ids: Vec<usize> = (0..b)
+                    .map(|_| rng.below(WINDOW_FRAMES - SEGMENT_FRAMES + 1))
+                    .collect();
+                // Device 0 is the master and owns the live weights; the rest work
+                // on replicas made above. `replicas` is empty when N == 1, so that
+                // path is exactly the single-device one, with no copy.
+                let (g_ref, d_ref) = match i.checked_sub(1) {
+                    None => (&net_g, &disc),
+                    Some(r) => (&replicas[r].0, &replicas[r].1),
+                };
+                let out = micro_step(MicroIn {
+                    net_g: g_ref,
+                    disc: d_ref,
+                    spectral: &spectrals[i],
+                    device: dev,
+                    data,
+                    ids: &ids,
+                    batch: b,
+                    sid,
+                    seg_len,
+                    update_d,
+                });
 
-            let phone = Tensor::<AB, 3>::from_data(
-                TensorData::new(data.phone, [b, WINDOW_FRAMES, CONTENT_DIM]),
-                device,
-            );
-            let pitch = Tensor::<AB, 2, Int>::from_data(
-                TensorData::new(data.coarse, [b, WINDOW_FRAMES]),
-                device,
-            );
-            let nsff0 =
-                Tensor::<AB, 2>::from_data(TensorData::new(data.nsff0, [b, WINDOW_FRAMES]), device);
-            let gt = Tensor::<AB, 2>::from_data(
-                TensorData::new(data.gt, [b, WINDOW_FRAMES * HOP]),
-                device,
-            );
+                g_sum += out.g;
+                d_sum += out.d;
+                mel_sum += out.mel;
 
-            // enc_q input spectrogram (a constant w.r.t. autodiff).
-            let spec = spectral.linear(gt.clone()).detach();
-
-            // Random decode segment per sample.
-            let ids: Vec<usize> = (0..b)
-                .map(|_| rng.below(WINDOW_FRAMES - SEGMENT_FRAMES + 1))
-                .collect();
-
-            let tf = net_g.forward_train(phone, pitch, nsff0, spec, sid, &ids, SEGMENT_FRAMES);
-
-            // Ground-truth audio segment matching `ids`.
-            let mut segs = Vec::with_capacity(b);
-            for (i, &s) in ids.iter().enumerate() {
-                segs.push(gt.clone().narrow(0, i, 1).narrow(1, s * HOP, seg_len));
-            }
-            let y = Tensor::cat(segs, 0); // [b, seg_len]
-            let y3 = y.clone().reshape([b, 1, seg_len]);
-            let y_hat = tf.y_hat; // [b, 1, seg_len]
-
-            // ---- Discriminator (fake detached) ------------------------------
-            if update_d {
-                let y_hat_d = y_hat.clone().detach();
-                let mut d_loss = disc_loss(
-                    disc.scale.forward(y3.clone()).0,
-                    disc.scale.forward(y_hat_d.clone()).0,
-                );
-                for p in &disc.periods {
-                    d_loss =
-                        d_loss + disc_loss(p.forward(y3.clone()).0, p.forward(y_hat_d.clone()).0);
+                // Gradients come home to the master before they are summed; only
+                // the master's optimizer state and weights ever advance.
+                let g_grads = match i {
+                    0 => out.g_grads,
+                    _ => out.g_grads.to_device(main_device, &net_g),
+                };
+                acc_g = accumulate(acc_g, g_grads, &net_g, inv);
+                if let Some(d_grads) = out.d_grads {
+                    let d_grads = match i {
+                        0 => d_grads,
+                        _ => d_grads.to_device(main_device, &disc),
+                    };
+                    acc_d = accumulate(acc_d, d_grads, &disc, inv);
                 }
-                d_sum += scalar(&d_loss);
-                let d_grads = GradientsParams::from_grads(d_loss.backward(), &disc);
-                acc_d = accumulate(acc_d, d_grads, &disc, inv);
             }
-
-            // ---- Generator --------------------------------------------------
-            let mel_loss = mel_l1(
-                spectral.mel(y.clone()),
-                spectral.mel(y_hat.clone().reshape([b, seg_len])),
-            )
-            .mul_scalar(C_MEL);
-            let kl_loss = kl(tf.z_p, tf.logs_q, tf.m_p, tf.logs_p).mul_scalar(C_KL);
-
-            let (sf_s, ff_s) = disc.scale.forward(y_hat.clone().reshape([b, 1, seg_len]));
-            let (_, fr_s) = disc.scale.forward(y3.clone());
-            let mut g_adv = gen_adv(sf_s);
-            let mut g_fm = feature_matching(&fr_s, &ff_s);
-            for p in &disc.periods {
-                let (sf, ff) = p.forward(y_hat.clone().reshape([b, 1, seg_len]));
-                let (_, fr) = p.forward(y3.clone());
-                g_adv = g_adv + gen_adv(sf);
-                g_fm = g_fm + feature_matching(&fr, &ff);
-            }
-            let g_loss = g_adv + g_fm.mul_scalar(FM_WEIGHT) + mel_loss.clone() + kl_loss.clone();
-            g_sum += scalar(&g_loss);
-            mel_sum += scalar(&mel_loss);
-            let g_grads = GradientsParams::from_grads(g_loss.backward(), &net_g);
-            acc_g = accumulate(acc_g, g_grads, &net_g, inv);
         }
 
         // ---- Optimizer steps (once per accumulated batch) -------------------
@@ -434,6 +424,115 @@ fn keep_best<AB: AutodiffBackend>(
             tracing::warn!("could not save best checkpoint: {e:#}");
             false
         }
+    }
+}
+
+/// Everything one micro-batch needs. A struct because the list is long enough
+/// that positional arguments stop being readable.
+struct MicroIn<'a, AB: AutodiffBackend> {
+    net_g: &'a Synthesizer<AB>,
+    disc: &'a MultiPeriodDiscriminator<AB>,
+    spectral: &'a Spectral<AB>,
+    device: &'a AB::Device,
+    data: crate::dataset::Batch,
+    ids: &'a [usize],
+    batch: usize,
+    sid: i64,
+    seg_len: usize,
+    update_d: bool,
+}
+
+/// What it produces: gradients on the device it ran on, plus the scalars the
+/// dashboard reports.
+struct MicroOut {
+    g_grads: GradientsParams,
+    d_grads: Option<GradientsParams>,
+    g: f32,
+    d: f32,
+    mel: f32,
+}
+
+/// One forward pass and both backward passes, entirely on `input.device`.
+///
+/// Split out of the step loop so the same code serves the master device and each
+/// replica — data parallelism is then just "call this once per device and sum".
+fn micro_step<AB: AutodiffBackend>(input: MicroIn<'_, AB>) -> MicroOut {
+    let MicroIn {
+        net_g,
+        disc,
+        spectral,
+        device,
+        data,
+        ids,
+        batch: b,
+        sid,
+        seg_len,
+        update_d,
+    } = input;
+
+    let phone = Tensor::<AB, 3>::from_data(
+        TensorData::new(data.phone, [b, WINDOW_FRAMES, CONTENT_DIM]),
+        device,
+    );
+    let pitch =
+        Tensor::<AB, 2, Int>::from_data(TensorData::new(data.coarse, [b, WINDOW_FRAMES]), device);
+    let nsff0 = Tensor::<AB, 2>::from_data(TensorData::new(data.nsff0, [b, WINDOW_FRAMES]), device);
+    let gt = Tensor::<AB, 2>::from_data(TensorData::new(data.gt, [b, WINDOW_FRAMES * HOP]), device);
+
+    // enc_q input spectrogram (a constant w.r.t. autodiff).
+    let spec = spectral.linear(gt.clone()).detach();
+    let tf = net_g.forward_train(phone, pitch, nsff0, spec, sid, ids, SEGMENT_FRAMES);
+
+    // Ground-truth audio segment matching `ids`.
+    let mut segs = Vec::with_capacity(b);
+    for (i, &s) in ids.iter().enumerate() {
+        segs.push(gt.clone().narrow(0, i, 1).narrow(1, s * HOP, seg_len));
+    }
+    let y = Tensor::cat(segs, 0); // [b, seg_len]
+    let y3 = y.clone().reshape([b, 1, seg_len]);
+    let y_hat = tf.y_hat; // [b, 1, seg_len]
+
+    // ---- Discriminator (fake detached) --------------------------------------
+    let mut d = 0.0f32;
+    let d_grads = update_d.then(|| {
+        let y_hat_d = y_hat.clone().detach();
+        let mut d_loss = disc_loss(
+            disc.scale.forward(y3.clone()).0,
+            disc.scale.forward(y_hat_d.clone()).0,
+        );
+        for p in &disc.periods {
+            d_loss = d_loss + disc_loss(p.forward(y3.clone()).0, p.forward(y_hat_d.clone()).0);
+        }
+        d = scalar(&d_loss);
+        GradientsParams::from_grads(d_loss.backward(), disc)
+    });
+
+    // ---- Generator ----------------------------------------------------------
+    let mel_loss = mel_l1(
+        spectral.mel(y.clone()),
+        spectral.mel(y_hat.clone().reshape([b, seg_len])),
+    )
+    .mul_scalar(C_MEL);
+    let kl_loss = kl(tf.z_p, tf.logs_q, tf.m_p, tf.logs_p).mul_scalar(C_KL);
+
+    let (sf_s, ff_s) = disc.scale.forward(y_hat.clone().reshape([b, 1, seg_len]));
+    let (_, fr_s) = disc.scale.forward(y3.clone());
+    let mut g_adv = gen_adv(sf_s);
+    let mut g_fm = feature_matching(&fr_s, &ff_s);
+    for p in &disc.periods {
+        let (sf, ff) = p.forward(y_hat.clone().reshape([b, 1, seg_len]));
+        let (_, fr) = p.forward(y3.clone());
+        g_adv = g_adv + gen_adv(sf);
+        g_fm = g_fm + feature_matching(&fr, &ff);
+    }
+    let g_loss = g_adv + g_fm.mul_scalar(FM_WEIGHT) + mel_loss.clone() + kl_loss;
+
+    MicroOut {
+        g: scalar(&g_loss),
+        mel: scalar(&mel_loss),
+        d,
+        g_grads: GradientsParams::from_grads(g_loss.backward(), net_g),
+        d_grads,
     }
 }
 

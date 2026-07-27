@@ -8,8 +8,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 into a trained target voice while preserving content + F0 pitch (so breathy/expressive
 vocalizations survive by construction). Inference runs on **three interchangeable
 generator backends** — ONNX Runtime (`ort`), and native Burn on either LibTorch
-(`burn-tch`, ~9x faster) or CubeCL/CUDA — and training is native Rust/Burn on
-CubeCL/CUDA (LibTorch's autodiff can't train this model — see Training notes). The only Python is a standalone `.safetensors → ONNX` exporter
+(`burn-tch`, ~9x faster), CubeCL/CUDA or WebGPU — and training is native Rust/Burn
+on any of the three. The only Python is a standalone `.safetensors → ONNX` exporter
 under `export/`.
 
 ## Build / run / verify
@@ -81,10 +81,8 @@ by `burn-tch`'s build script — so `libtorch_device` is the only place it is bu
 optional `burn` feature (off by default) so consumers that only need the shared
 `FeatureExtractor` stay a lean `ort` crate. `burn` alone gives the *generic*
 generator and no compute backend; `cuda` and `tch` each add one and can both be on
-at once. `rvc-train` mirrors the same features. `rvc-cli` defaults to `["cuda", "tch"]` —
-one binary, run-time choice. `wgpu` exists and is correct on compute (it passes
-the whole `convgrad` probe, unlike tch) but is **not** default: with ONNX Runtime
-in the same process the exit path corrupts the heap and aborts. — and `crates/rvc-core/build.rs`
+at once. `rvc-train` mirrors the same features. `rvc-cli` defaults to all three —
+one binary, run-time choice. — and `crates/rvc-core/build.rs`
 refuses a `tch` build with no `LIBTORCH`, because `burn-tch` hardcodes
 `tch/download-libtorch` and cargo features are additive, so the silent fallback
 would otherwise be a multi-GB download of a **CPU-only** LibTorch.
@@ -125,12 +123,12 @@ Exported graph contract (matches `rvc-core`):
 
 Native Rust/Burn on a GPU; `trainer::run` is generic over `AutodiffBackend` and
 `crates/rvc-train/src/lib.rs` picks the concrete one at run time from `--backend`.
-**Only `Autodiff<Cuda>` works**: `burn 0.21`'s autodiff panics in the backward of a
-*grouped, strided* `conv1d` whose padded length isn't a multiple of the stride, which
-is exactly `DiscriminatorS` (`k=41, s=4, groups=4..256`). `--backend tch` is rejected
-up front (`rvc_train::TCH_TRAINING_UNSUPPORTED`); repro in
-`cargo run -p rvc-train --example convgrad --features tch,cuda`. Inference has no
-backward pass, so `--backend tch` converts fine. No `Learner` (the GAN loop doesn't fit it: `TrainStep::step`
+All three train. One constraint shapes `burn-rvc`: burn 0.21's autodiff builds a
+wrongly-shaped weight gradient for a *grouped, strided* `conv1d` whose padded length
+isn't a multiple of the stride — CubeCL and WebGPU absorb it, LibTorch aborts.
+`DiscriminatorS` is exactly that shape, so `align_for_scale` (`discriminator.rs`)
+reflect-pads its input to a length the whole chain divides evenly. Don't remove it
+without re-running `cargo run -p rvc-train --example convgrad --features tch,cuda,wgpu`. No `Learner` (the GAN loop doesn't fit it: `TrainStep::step`
 takes `&self` and yields one `GradientsParams` for one optimizer, while a GAN needs
 two models, two optimizers at different LRs, and D updated *between* the two
 backward passes) — the

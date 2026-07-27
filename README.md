@@ -75,15 +75,14 @@ unchanged.
 ## Compute backends & devices
 
 One `rvc` binary carries all three generator runtimes; `--backend` chooses at run
-time. `rvc train` takes the same flag, but **only `cuda` works today** — see Training
-below.
+time. `rvc train` takes the same flag, minus `onnx` (there is no ONNX training path).
 
 | `--backend` | aliases | runtime | devices |
 |---|---|---|---|
 | `onnx` | | ONNX Runtime (`ort`) | CUDA EP, else CPU |
 | `cuda` | `burn`, `burn-cuda` | native Burn, CubeCL/CUDA kernels | NVIDIA only |
 | `tch` | `libtorch`, `burn-tch` | native Burn, LibTorch | CUDA, MPS, Vulkan, CPU |
-| `wgpu` | `webgpu`, `burn-wgpu` | native Burn, WebGPU — **experimental, off by default** | any Vulkan/Metal/DX12 GPU |
+| `wgpu` | `webgpu`, `burn-wgpu` | native Burn, WebGPU | any Vulkan/Metal/DX12 GPU |
 | `auto` *(default)* | | for `convert`/`serve`: `.onnx` weights → `onnx`, else LibTorch on CUDA, else CubeCL/CUDA, else LibTorch on CPU. For `train`: always `cuda`. | |
 
 `--device` picks *which* device inside the chosen backend: `auto` (default),
@@ -94,13 +93,14 @@ backend only has CUDA.
 Naming a backend or device that isn't available is an **error with a reason**,
 never a silent fallback; only `auto` substitutes.
 
-`wgpu` needs `--features wgpu` and is **experimental**: its kernels and gradients
-are correct (it is the only backend besides CUDA that passes the whole
-`convgrad` probe, so it could train), but the process aborts with heap corruption
-at exit whenever ONNX Runtime is loaded in the same process — which `convert` and
-`train` always do, for ContentVec and RMVPE. Pure wgpu compute exits cleanly, so
-the fault is in the interaction, not the port. Until that's resolved it stays out
-of the default build.
+`wgpu` needs no vendor toolkit and runs on AMD, Intel and Apple GPUs, so it is
+the portable fallback where neither CUDA nor LibTorch is available.
+
+**Known issue:** training sometimes aborts at process *exit* (`corrupted
+double-linked list`) after the weights are written. It affects the CubeCL/CUDA
+path too, so it is not backend-specific, and the saved checkpoints are complete
+when it happens — but it does mean a non-zero exit code, so check for the output
+file rather than `$?` in scripts.
 
 ```sh
 rvc convert -m models/voice.safetensors --backend tch  --device cuda:0 -o out/ in.mp3
@@ -120,30 +120,28 @@ Timings are the CLI's own per-file log deltas, which start after the model is
 loaded; the first file is listed separately because CubeCL compiles kernels on
 first use.
 
-### Training: CUDA only
+### Training
 
-`rvc train --backend tch` **exits immediately with an explanation**. `burn 0.21`'s
-autodiff panics in the backward pass of a *grouped, strided* `conv1d` whose padded
-input length isn't a multiple of the stride — and the discriminator's scale branch
-(`k=41, s=4, groups=4..256` over a 17280-sample segment) is exactly that shape, so
-every step would hit it. Ungrouped convs are fine, grouped-and-evenly-divisible are
-fine, and CubeCL/CUDA is fine on all of them, so this is a `burn-tch` backward bug
-rather than a flaw in the port. Inference has no backward pass, which is why
-`--backend tch` converts happily.
-
-Minimal repro — `conv1d(16→64, k=4, s=2, p=1, groups=4)` on length 101:
+All three backends train. The saved weights are identical in kind — a model
+trained on one loads on any other.
 
 ```sh
-LD_LIBRARY_PATH=$LIBTORCH/lib \
-  cargo run -p rvc-train --example convgrad --features tch,cuda
+rvc train clips/*.wav -o models/voice --backend tch     # or cuda, wgpu
 ```
 
-**Multi-GPU:** device *selection* only — one run uses one device. There is no
-data-parallel training: Burn's multi-device machinery lives inside `Learner`,
-which the GAN loop cannot use (it needs two models and two optimizers, with D
-updated *between* the two backward passes). For batch throughput, run several
-`rvc convert` processes with different `--device cuda:N`; splitting one stream
-across GPUs would break the overlap-crossfade that carries state between blocks.
+One wrinkle worth knowing, because it shapes the code: burn 0.21's autodiff
+produces a wrongly-shaped weight gradient for a *grouped, strided* `conv1d` whose
+padded input length isn't a multiple of the stride. CubeCL and WebGPU absorb it;
+LibTorch checks shapes strictly and aborts. The scale discriminator is exactly
+that shape, so `burn-rvc` reflect-pads its input to a length the whole conv chain
+divides evenly (`align_for_scale`). That costs under 1% of a training segment,
+keeps every backend on the same arithmetic, and leaves weight shapes — so
+pretrained warm-start — untouched.
+
+```sh
+# which backends survive which convolution shapes
+cargo run -p rvc-train --example convgrad --features tch,cuda,wgpu
+```
 
 ## Usage
 
@@ -490,12 +488,10 @@ LD_LIBRARY_PATH=$PWD/libtorch/lib \
 - **Inference works on all three backends**, and both `convert` and `serve` run
   the native Burn generator on LibTorch or CubeCL/CUDA, or ONNX Runtime, through
   one shared `Converter` (`--backend`). One binary carries them all.
-- **LibTorch backend** (`--backend tch`) covers **inference** on CUDA, MPS, Vulkan
-  or CPU, and is ~9× faster per file than the CubeCL/CUDA backend on an RTX 2060.
-  It is the `auto` default for `.safetensors` weights. **Training stays on
-  CubeCL/CUDA**: LibTorch's autodiff cannot run the discriminator's grouped
-  strided convolutions (see *Training: CUDA only*), and `--backend tch` refuses
-  up front rather than failing mid-run.
+- **Three compute backends, one binary**: CubeCL/CUDA, LibTorch and WebGPU, all
+  for both inference and training, picked at run time with `--backend`. LibTorch
+  is ~9× faster per file than CubeCL/CUDA on an RTX 2060 and is what `auto`
+  chooses for `.safetensors` weights.
 - **Live training dashboard**: Burn's TUI shows loss plots + progress; `q` (or
   Ctrl-C without the TUI) stops early and saves.
 
@@ -511,8 +507,7 @@ LD_LIBRARY_PATH=$PWD/libtorch/lib \
   (`--backend tch` is the faster native path today).
 - Data-parallel multi-GPU training — needs the master-device gradient
   accumulation that `Learner` provides and this GAN loop cannot use.
-- Training on LibTorch, once burn's grouped-strided `conv1d` backward is fixed
-  upstream: the trainer is already generic over the backend, so it is a one-line
-  dispatch arm.
+- Track down the intermittent exit-time abort after training (affects CubeCL and
+  WebGPU; weights are already written when it fires).
 - Index/retrieval blend + `protect` for even tighter timbre match.
 - TTS (text → voice) — deferred.

@@ -38,6 +38,13 @@ const CASES: &[(usize, usize, usize, usize, usize, usize, usize)] = &[
     (64, 256, 4320, 41, 4, 20, 16),
     (256, 1024, 1080, 41, 4, 20, 64),
     (1024, 1024, 270, 41, 4, 20, 256),
+    // Same DiscriminatorS chain, but padded so every layer divides evenly
+    // (L = 1 mod 256 chains to 1 mod 4 at each of the four strided layers).
+    // If the whole chain passes on tch, padding D's input is a real fix.
+    (16, 64, 17409, 41, 4, 20, 4),
+    (64, 256, 4353, 41, 4, 20, 16),
+    (256, 1024, 1089, 41, 4, 20, 64),
+    (1024, 1024, 273, 41, 4, 20, 256),
 ];
 
 fn probe<AB: AutodiffBackend>(device: &AB::Device) {

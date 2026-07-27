@@ -29,7 +29,6 @@ pub enum VcError {
     /// The requested compute device is unavailable, or the chosen backend cannot
     /// drive it. Always a message rather than a panic: asking for hardware you
     /// don't have is a user mistake, not a bug.
-    #[cfg(feature = "burn")]
     #[error("device error: {0}")]
     Device(String),
 }

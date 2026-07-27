@@ -1,5 +1,8 @@
 //! Which compute backend and device the native Burn generator runs on.
 //!
+//! [`DeviceSpec`] is a plain parsed value with no Burn types, so it is available
+//! even without a compute backend compiled in — the CLI needs it either way.
+//!
 //! One `--device` spelling drives every backend; each resolver turns it into that
 //! backend's device type, rejecting what it can't do with a plain error. Shared
 //! with `rvc-train` so `convert` and `train` agree on what `auto` means. `auto`

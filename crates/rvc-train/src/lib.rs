@@ -7,10 +7,8 @@
 //! (`rvc convert --backend cuda`) or via the ONNX export helper.
 //!
 //! The loop is generic over the Burn compute backend ([`trainer::run`]); this
-//! module picks the concrete one from [`TrainRequest::backend`]. In practice
-//! that is always CubeCL/CUDA today — LibTorch cannot run the backward pass, see
-//! [`TCH_TRAINING_UNSUPPORTED`] — but the genericity is what lets that change
-//! with a one-line dispatch arm once the upstream bug is fixed.
+//! module picks the concrete one from [`TrainRequest::backend`]. Weights are
+//! backend-independent: a model trained on LibTorch loads on CubeCL and back.
 
 mod checkpoint;
 mod dashboard;
@@ -28,13 +26,11 @@ pub use rvc_core::DeviceSpec;
 
 /// Which Burn compute backend runs the training loop.
 ///
-/// Both can be linked into one binary; this is the run-time choice. Nothing
-/// about the saved weights depends on it — but see
-/// [`TCH_TRAINING_UNSUPPORTED`]: only CubeCL/CUDA can train at present.
+/// All can be linked into one binary; this is the run-time choice. Nothing about
+/// the saved weights depends on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TrainBackend {
-    /// Whatever can actually train. Today that is always [`Self::Cuda`]:
-    /// LibTorch is faster for inference but cannot run the backward pass.
+    /// Fastest available: LibTorch on CUDA, else CubeCL/CUDA, else LibTorch CPU.
     #[default]
     Auto,
     /// CubeCL/CUDA kernels. NVIDIA only.
@@ -132,8 +128,9 @@ pub struct TrainRequest {
     pub settings: TrainSettings,
     /// Compute backend for the training loop.
     pub backend: TrainBackend,
-    /// Which device that backend should use (`DeviceSpec::Auto` = fastest).
-    pub device: DeviceSpec,
+    /// Devices to train on. One entry is ordinary single-device training; more
+    /// than one runs data-parallel with device 0 as the master.
+    pub devices: Vec<DeviceSpec>,
     /// Early-stop flag: set it (e.g. from a SIGINT handler) to stop after the
     /// current step and save the model. In the TUI, `q` stops too.
     pub stop: Arc<AtomicBool>,
@@ -179,14 +176,18 @@ pub fn train(req: TrainRequest) -> Result<PathBuf> {
 /// corpus: feature extraction takes minutes, and finding out afterwards that the
 /// backend was never going to run is a poor trade.
 fn resolve_backend(req: &TrainRequest) -> Result<TrainBackend> {
+    anyhow::ensure!(!req.devices.is_empty(), "no --device given");
+    // Duplicates would silently double a device's share of the batch.
+    for (i, d) in req.devices.iter().enumerate() {
+        anyhow::ensure!(
+            !req.devices[..i].contains(d),
+            "device {d} is listed twice in --devices"
+        );
+    }
     let backend = match req.backend {
-        TrainBackend::Auto => auto_backend(req.device),
+        TrainBackend::Auto => auto_backend(req.devices[0]),
         explicit => explicit,
     };
-    anyhow::ensure!(
-        backend != TrainBackend::LibTorch,
-        "{TCH_TRAINING_UNSUPPORTED}"
-    );
     Ok(backend)
 }
 
@@ -196,24 +197,49 @@ fn resolve_backend(req: &TrainRequest) -> Result<TrainBackend> {
 /// build lacks, or a device it cannot see, is an error with a reason.
 fn dispatch(req: &TrainRequest, clips: Vec<dataset::Clip>) -> Result<PathBuf> {
     let backend = resolve_backend(req)?;
-    tracing::info!("training backend: {backend} (device {})", req.device);
+    let list = req
+        .devices
+        .iter()
+        .map(|d| d.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    tracing::info!("training backend: {backend} (devices: {list})");
 
     match backend {
-        TrainBackend::LibTorch => anyhow::bail!(TCH_TRAINING_UNSUPPORTED),
+        #[cfg(feature = "tch")]
+        TrainBackend::LibTorch => {
+            use burn::backend::{Autodiff, libtorch::LibTorch};
+            let devices = req
+                .devices
+                .iter()
+                .map(|d| rvc_core::libtorch_device(*d))
+                .collect::<rvc_core::Result<Vec<_>>>()?;
+            rvc_core::guard_init("tch", || {
+                trainer::run::<Autodiff<LibTorch<f32>>>(req, clips, &devices)
+            })?
+        }
         #[cfg(feature = "cuda")]
         TrainBackend::Cuda => {
             use burn::backend::{Autodiff, cuda::Cuda};
-            let device = rvc_core::cuda_device(req.device)?;
+            let devices = req
+                .devices
+                .iter()
+                .map(|d| rvc_core::cuda_device(*d))
+                .collect::<rvc_core::Result<Vec<_>>>()?;
             rvc_core::guard_init("cuda", || {
-                trainer::run::<Autodiff<Cuda>>(req, clips, &device)
+                trainer::run::<Autodiff<Cuda>>(req, clips, &devices)
             })?
         }
         #[cfg(feature = "wgpu")]
         TrainBackend::Wgpu => {
             use burn::backend::{Autodiff, wgpu::Wgpu};
-            let device = rvc_core::wgpu_device(req.device)?;
+            let devices = req
+                .devices
+                .iter()
+                .map(|d| rvc_core::wgpu_device(*d))
+                .collect::<rvc_core::Result<Vec<_>>>()?;
             rvc_core::guard_init("wgpu", || {
-                trainer::run::<Autodiff<Wgpu>>(req, clips, &device)
+                trainer::run::<Autodiff<Wgpu>>(req, clips, &devices)
             })?
         }
         // `Auto` is resolved above, so reaching here means the chosen backend was
@@ -226,32 +252,84 @@ fn dispatch(req: &TrainRequest, clips: Vec<dataset::Clip>) -> Result<PathBuf> {
     }
 }
 
-/// Why LibTorch cannot train, as of `burn 0.21` / `burn-tch 0.21`.
-///
-/// `Autodiff<LibTorch>` panics in `conv1d`'s backward whenever a convolution is
-/// **grouped** *and* its padded input length is not a multiple of the stride:
-/// the weight gradient comes back one or more kernel-taps too long, and
-/// LibTorch's strict `copy_` rejects it. `MultiPeriodDiscriminator`'s scale
-/// branch is exactly that shape (`k=41, s=4, groups=4..256` over a 17280-sample
-/// segment), so every training step hits it.
-///
-/// Minimal repro, in `examples/convgrad.rs`:
-/// `conv1d(16 -> 64, k=4, s=2, p=1, groups=4)` on length 101. Ungrouped is fine,
-/// grouped-but-evenly-divisible is fine, and CubeCL/CUDA is fine on all of them —
-/// so this is a `burn-tch` backward bug, not a flaw in the port. Inference is
-/// unaffected (no backward pass), which is why `--backend tch` converts happily.
-pub const TCH_TRAINING_UNSUPPORTED: &str = "\
-the LibTorch (tch) backend cannot train: burn 0.21's autodiff panics in the \
-backward pass of grouped strided conv1d, which the discriminator uses on every \
-step (see `cargo run -p rvc-train --example convgrad --features tch,cuda`).\n\
-Use `--backend cuda` to train; `--backend tch` is still the fastest choice for \
-`rvc convert` and `rvc serve`.";
-
 /// Resolve `Auto` to a backend that is both compiled in and usable.
-///
-/// Unlike inference, this never prefers LibTorch: it cannot run a backward pass
-/// (see [`TCH_TRAINING_UNSUPPORTED`]). Kept as a separate decision from
-/// `rvc_core::auto_prefers_libtorch` for exactly that reason.
 fn auto_backend(_spec: DeviceSpec) -> TrainBackend {
-    TrainBackend::Cuda
+    if rvc_core::auto_prefers_libtorch() {
+        TrainBackend::LibTorch
+    } else {
+        TrainBackend::Cuda
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req(devices: &[DeviceSpec], backend: TrainBackend) -> TrainRequest {
+        TrainRequest {
+            data: vec!["a.wav".into()],
+            out: "out".into(),
+            work_dir: "wd".into(),
+            content: "c.onnx".into(),
+            rmvpe: "r.onnx".into(),
+            resume: None,
+            pretrained_g: None,
+            pretrained_d: None,
+            settings: TrainSettings {
+                sample_rate: 48_000,
+                epochs: 1,
+                batch_size: 1,
+                speaker_id: 0,
+                lr: 1e-4,
+                lr_final: 0.1,
+                ema_frac: 0.1,
+                grad_accum: 1,
+                d_lr_ratio: 1.0,
+                d_interval: 1,
+                snr_weight: 0.0,
+                save_best: true,
+                use_tui: false,
+            },
+            backend,
+            devices: devices.to_vec(),
+            stop: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[test]
+    fn a_repeated_device_is_rejected() {
+        // Listing one twice would silently double its share of the batch, which
+        // looks like training working and quietly isn't.
+        let r = req(
+            &[DeviceSpec::Gpu(0), DeviceSpec::Gpu(0)],
+            TrainBackend::Cuda,
+        );
+        let err = resolve_backend(&r).unwrap_err().to_string();
+        assert!(err.contains("twice"), "{err}");
+
+        let ok = req(
+            &[DeviceSpec::Gpu(0), DeviceSpec::Gpu(1)],
+            TrainBackend::Cuda,
+        );
+        assert_eq!(resolve_backend(&ok).unwrap(), TrainBackend::Cuda);
+    }
+
+    #[test]
+    fn an_empty_device_list_is_rejected() {
+        let err = resolve_backend(&req(&[], TrainBackend::Cuda))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no --device"), "{err}");
+    }
+
+    #[test]
+    fn every_backend_is_accepted_for_training() {
+        for b in [
+            TrainBackend::Cuda,
+            TrainBackend::LibTorch,
+            TrainBackend::Wgpu,
+        ] {
+            assert_eq!(resolve_backend(&req(&[DeviceSpec::Auto], b)).unwrap(), b);
+        }
+    }
 }

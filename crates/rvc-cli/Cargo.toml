@@ -15,11 +15,8 @@ path = "src/main.rs"
 # One binary, both Burn compute backends linked; `--backend` picks at runtime.
 # Machines without a LibTorch install build with
 # `--no-default-features --features cuda` (then `--backend tch` errors cleanly).
-# `wgpu` is deliberately NOT default: its compute and gradients are correct, but
-# the process aborts (heap corruption) at exit whenever ONNX Runtime is loaded
-# too — which `convert`/`train` always do, for ContentVec + RMVPE. Opt in with
-# `--features wgpu` to experiment.
-default = ["cuda", "tch"]
+# One binary, every compute backend; `--backend` picks at run time.
+default = ["cuda", "tch", "wgpu"]
 cuda = ["rvc-core/cuda", "rvc-train/cuda"]
 tch = ["rvc-core/tch", "rvc-train/tch"]
 wgpu = ["rvc-core/wgpu", "rvc-train/wgpu"]

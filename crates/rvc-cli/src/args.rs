@@ -321,10 +321,18 @@ pub struct TrainArgs {
     /// (aliases `libtorch`, `burn-tch`). Saved weights are identical either way.
     #[arg(long, value_enum, default_value_t = ComputeBackend::Auto)]
     pub backend: ComputeBackend,
-    /// Compute device: `auto` (fastest visible), `cpu`, `cuda`, `cuda:N`, `mps`
-    /// or `vulkan`. `cpu`/`mps`/`vulkan` require `--backend tch`.
-    #[arg(long, default_value = "auto", value_name = "DEVICE", value_parser = parse_device)]
-    pub device: rvc_core::DeviceSpec,
+    /// Compute device(s): `auto`, `cpu`, `gpu`, `gpu:N`, `mps`, `vulkan`
+    /// (`cuda`/`cuda:N` are accepted spellings of `gpu`). Repeat or comma-separate
+    /// for data-parallel training across devices — the first is the master.
+    #[arg(
+        long,
+        alias = "devices",
+        default_value = "auto",
+        value_name = "DEVICE",
+        value_delimiter = ',',
+        value_parser = parse_device
+    )]
+    pub device: Vec<rvc_core::DeviceSpec>,
     /// Directory for the training log and saved weights.
     #[arg(long, default_value = "models/train")]
     pub work_dir: PathBuf,

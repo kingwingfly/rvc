@@ -78,7 +78,7 @@ pub async fn run(args: TrainArgs) -> Result<()> {
             use_tui,
         },
         backend: args.backend.into(),
-        device: args.device,
+        devices: args.device,
         stop,
     };
 

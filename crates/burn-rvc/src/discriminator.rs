@@ -43,6 +43,7 @@ impl<B: Backend> DiscriminatorS<B> {
 
     /// `x`: `[batch, 1, time]` → (`score [batch, L]`, feature maps).
     pub fn forward(&self, mut x: Tensor<B, 3>) -> (Tensor<B, 2>, Vec<Tensor<B, 3>>) {
+        x = align_for_scale(x);
         let mut fmap = Vec::with_capacity(self.convs.len() + 1);
         for conv in &self.convs {
             x = leaky_relu(conv.forward(x), LRELU_SLOPE);
@@ -104,6 +105,29 @@ impl<B: Backend> DiscriminatorP<B> {
         let [b, c, h, w] = x.dims();
         (x.reshape([b, c * h * w]), fmap)
     }
+}
+
+/// Product of the strides of the four `k=41, s=4` convolutions below.
+///
+/// Each consumes its input exactly only when `len % 4 == 1`, and chaining that
+/// through all four requires `len % 256 == 1`.
+const SCALE_STRIDE_PRODUCT: usize = 4 * 4 * 4 * 4;
+
+/// Reflect-pad `x` up to the next length the whole conv chain divides evenly.
+///
+/// A ragged length works fine forward, but its *backward* is where backends
+/// disagree: burn 0.21's autodiff hands LibTorch a weight gradient one kernel too
+/// long and it aborts, which is what stops `--backend tch` from training. Aligning
+/// here fixes it for every backend at once, costs <1% of a training segment, and
+/// leaves weight shapes — so pretrained warm-start — untouched.
+fn align_for_scale<B: Backend>(x: Tensor<B, 3>) -> Tensor<B, 3> {
+    let t = x.dims()[2];
+    // Smallest `n` with `(t + n) % 256 == 1`.
+    let n = (1 + SCALE_STRIDE_PRODUCT - t % SCALE_STRIDE_PRODUCT) % SCALE_STRIDE_PRODUCT;
+    if n == 0 || n >= t {
+        return x;
+    }
+    reflect_pad_last(x, n)
 }
 
 /// Reflect-pad the last dim of a `[b, c, t]` tensor by `n` (numpy `reflect`:

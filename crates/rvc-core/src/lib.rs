@@ -25,7 +25,6 @@ mod session;
 
 #[cfg(feature = "burn")]
 mod burn_backend;
-#[cfg(feature = "burn")]
 mod device;
 
 #[cfg(test)]
@@ -52,7 +51,6 @@ pub use device::cuda_device;
 pub use device::libtorch_device;
 #[cfg(feature = "wgpu")]
 pub use device::wgpu_device;
-#[cfg(feature = "burn")]
 pub use device::{
     DeviceSpec, auto_prefers_libtorch, guard_init, libtorch_has_cuda, visible_cuda_devices,
 };
