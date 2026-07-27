@@ -126,8 +126,9 @@ Native Rust/Burn on a GPU; `trainer::run` is generic over `AutodiffBackend` and
 All three train. One constraint shapes `burn-rvc`: burn 0.21's autodiff builds a
 wrongly-shaped weight gradient for a *grouped, strided* `conv1d` whose padded length
 isn't a multiple of the stride — CubeCL and WebGPU absorb it, LibTorch aborts.
-`DiscriminatorS` is exactly that shape, so `align_for_scale` (`discriminator.rs`)
-reflect-pads its input to a length the whole chain divides evenly. Don't remove it
+`DiscriminatorS` is exactly that shape, so `DiscriminatorS::forward`
+(`discriminator.rs`) reflect-pads its input to a length (`SCALE_ALIGN`) the whole
+chain divides evenly. Don't remove it
 without re-running `cargo run -p rvc-train --example convgrad --features tch,cuda,wgpu`. No `Learner` (the GAN loop doesn't fit it: `TrainStep::step`
 takes `&self` and yields one `GradientsParams` for one optimizer, while a GAN needs
 two models, two optimizers at different LRs, and D updated *between* the two

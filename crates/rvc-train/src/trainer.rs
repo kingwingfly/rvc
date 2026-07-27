@@ -248,12 +248,17 @@ pub fn run<AB: AutodiffBackend>(
         // step — steadier gradients without the VRAM of a larger real batch. The
         // effective batch is `batch * accum * devices`, and `inv` averages over
         // all of it.
-        let inv = 1.0 / (accum * devices.len()) as f32;
+        let micros = accum * devices.len();
+        let inv = 1.0 / micros as f32;
         let mut acc_g = GradientsParams::new();
         let mut acc_d = GradientsParams::new();
-        let mut g_sum = 0.0f32;
-        let mut d_sum = 0.0f32;
-        let mut mel_sum = 0.0f32;
+        // Losses stay on the device that produced them until the whole step has
+        // been dispatched. Reading one back is a hard sync, so summing them here
+        // would make each device wait for the previous one and serialise exactly
+        // what data parallelism is for.
+        let mut g_losses = Vec::with_capacity(micros);
+        let mut d_losses = Vec::with_capacity(micros);
+        let mut mel_losses = Vec::with_capacity(micros);
 
         // Replicas of the current weights for the non-master devices. Rebuilt
         // each step because only the master is optimized; this clone-and-copy is
@@ -292,9 +297,9 @@ pub fn run<AB: AutodiffBackend>(
                     update_d,
                 });
 
-                g_sum += out.g;
-                d_sum += out.d;
-                mel_sum += out.mel;
+                g_losses.push(out.g);
+                mel_losses.push(out.mel);
+                d_losses.extend(out.d);
 
                 // Gradients come home to the master before they are summed; only
                 // the master's optimizer state and weights ever advance.
@@ -316,7 +321,6 @@ pub fn run<AB: AutodiffBackend>(
         // ---- Optimizer steps (once per accumulated batch) -------------------
         if update_d {
             disc = opt_d.step(cur_lr * d_lr_ratio, disc, acc_d);
-            last_d = d_sum * inv;
         }
         net_g = opt_g.step(cur_lr, net_g, acc_g);
 
@@ -325,8 +329,14 @@ pub fn run<AB: AutodiffBackend>(
             ema = Some(ema_update(e, &net_g, ema_decay));
         }
 
-        let g_scalar = g_sum * inv;
-        let mel_scalar = mel_sum * inv;
+        // The step's only sync, now that every device and both optimizers have
+        // been dispatched. `last_d` keeps its previous value on the steps that
+        // leave D alone, which is what the dashboard should show.
+        let g_scalar = g_losses.into_iter().map(scalar).sum::<f32>() * inv;
+        let mel_scalar = mel_losses.into_iter().map(scalar).sum::<f32>() * inv;
+        if !d_losses.is_empty() {
+            last_d = d_losses.into_iter().map(scalar).sum::<f32>() * inv;
+        }
         dash.update(step, g_scalar, last_d, mel_scalar, cur_lr);
         // Always log the losses (throttled). With the TUI, `init_logging` routes
         // tracing to `{work_dir}/train.log` (not stderr), so this stays off the
@@ -467,21 +477,23 @@ struct MicroIn<'a, AB: AutodiffBackend> {
     update_d: bool,
 }
 
-/// What it produces: gradients on the device it ran on, plus the scalars the
-/// dashboard reports.
-struct MicroOut {
+/// What it produces: gradients on the device it ran on, plus the losses the
+/// dashboard reports — still as device tensors, and detached from the autodiff
+/// graph so holding them costs nothing. Reading them here would sync the device
+/// before the next one is even dispatched.
+struct MicroOut<AB: AutodiffBackend> {
     g_grads: GradientsParams,
     d_grads: Option<GradientsParams>,
-    g: f32,
-    d: f32,
-    mel: f32,
+    g: Tensor<AB::InnerBackend, 1>,
+    d: Option<Tensor<AB::InnerBackend, 1>>,
+    mel: Tensor<AB::InnerBackend, 1>,
 }
 
 /// One forward pass and both backward passes, entirely on `input.device`.
 ///
 /// Split out of the step loop so the same code serves the master device and each
 /// replica — data parallelism is then just "call this once per device and sum".
-fn micro_step<AB: AutodiffBackend>(input: MicroIn<'_, AB>) -> MicroOut {
+fn micro_step<AB: AutodiffBackend>(input: MicroIn<'_, AB>) -> MicroOut<AB> {
     let MicroIn {
         net_g,
         disc,
@@ -518,7 +530,7 @@ fn micro_step<AB: AutodiffBackend>(input: MicroIn<'_, AB>) -> MicroOut {
     let y_hat = tf.y_hat; // [b, 1, seg_len]
 
     // ---- Discriminator (fake detached) --------------------------------------
-    let mut d = 0.0f32;
+    let mut d = None;
     let d_grads = update_d.then(|| {
         let y_hat_d = y_hat.clone().detach();
         let mut d_loss = disc_loss(
@@ -528,7 +540,7 @@ fn micro_step<AB: AutodiffBackend>(input: MicroIn<'_, AB>) -> MicroOut {
         for p in &disc.periods {
             d_loss = d_loss + disc_loss(p.forward(y3.clone()).0, p.forward(y_hat_d.clone()).0);
         }
-        d = scalar(&d_loss);
+        d = Some(d_loss.clone().inner());
         GradientsParams::from_grads(d_loss.backward(), disc)
     });
 
@@ -553,8 +565,8 @@ fn micro_step<AB: AutodiffBackend>(input: MicroIn<'_, AB>) -> MicroOut {
     let g_loss = g_adv + g_fm.mul_scalar(FM_WEIGHT) + mel_loss.clone() + kl_loss;
 
     MicroOut {
-        g: scalar(&g_loss),
-        mel: scalar(&mel_loss),
+        g: g_loss.clone().inner(),
+        mel: mel_loss.inner(),
         d,
         g_grads: GradientsParams::from_grads(g_loss.backward(), net_g),
         d_grads,
@@ -571,10 +583,9 @@ fn human(d: std::time::Duration) -> String {
     }
 }
 
-/// Extract a scalar loss value to `f32` for logging.
-fn scalar<AB: AutodiffBackend>(t: &Tensor<AB, 1>) -> f32 {
-    t.clone()
-        .into_data()
+/// Extract a scalar loss value to `f32` for logging. Syncs the device.
+fn scalar<B: Backend>(t: Tensor<B, 1>) -> f32 {
+    t.into_data()
         .to_vec::<f32>()
         .map(|v| v.first().copied().unwrap_or(f32::NAN))
         .unwrap_or(f32::NAN)

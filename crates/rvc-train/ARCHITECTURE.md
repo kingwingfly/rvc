@@ -187,7 +187,7 @@ complete and the toolkit no longer needs it. The pretrained warm-start bases
 
 ## Backend
 
-`trainer::run<AB: AutodiffBackend>(req, clips, &AB::Device)` is generic over the
+`trainer::run<AB: AutodiffBackend>(req, clips, &[AB::Device])` is generic over the
 compute backend; `lib.rs::dispatch` instantiates the concrete one from
 `TrainRequest::backend` at run time. Two cargo features (`tch`, `cuda`) decide what
 is linked; the CLI enables both.
@@ -197,9 +197,8 @@ the autodiff builds a weight gradient one or more kernel-taps too long for a
 *grouped, strided* `conv1d` whose padded input length is not a multiple of the
 stride. CubeCL and WebGPU absorb it; LibTorch's strict `copy_` aborts.
 `DiscriminatorS` is precisely that shape (`k=41, s=4, groups=4..256` over a
-17280-sample segment), so `burn_rvc::discriminator::align_for_scale` reflect-pads
-its input up to `len % 256 == 1`, which the whole four-layer chain then divides
-evenly. `examples/convgrad.rs` is the probe: its minimal failing case is
+17280-sample segment), so `DiscriminatorS::forward` reflect-pads its input up to
+`len % SCALE_ALIGN == 1`, which the whole four-layer chain then divides evenly. `examples/convgrad.rs` is the probe: its minimal failing case is
 `conv1d(16 -> 64, k=4, s=2, p=1, groups=4)` on length 101, and it also shows the
 padded chain passing.
 
@@ -223,8 +222,17 @@ reimplement because the GAN loop can't use `Learner`: per-step replicas via
 sums them. Only the master's weights, optimizers and EMA advance.
 
 Two limits worth knowing. Devices are dispatched sequentially, so the win depends
-on backends queueing work asynchronously — `MultiDevicesTrainStep`'s
-thread-per-device is the next step for real scaling. And replicas are copied every
-step; avoiding that needs persistent replicas plus an all-reduce
-(`burn-collective`), which is out of scope. **N>1 is untested**: the development
-machine has one GPU and no backend that can pair it with a CPU for training.
+entirely on backends queueing work asynchronously — which is why `micro_step`
+returns loss *tensors* and `run` reads them only after every device and both
+optimizers have been dispatched. One `into_data()` in the middle of the fan-out
+would sync each device before the next was queued and make N devices strictly
+serial. `MultiDevicesTrainStep`'s thread-per-device is the next step for real
+scaling. And replicas are copied every step; avoiding that needs persistent
+replicas plus an all-reduce (`burn-collective`), which is out of scope.
+
+**N>1 is verified only as GPU+CPU on LibTorch** — the development machine has one
+GPU, so two-GPU sharding has never run. The two things that would fail silently
+have unit tests: that a replica's gradients reach the master under the same
+`ParamId`s (they did not, until burn's lazy parameter init was forced before the
+first clone), and that the gradient scale averages over devices as well as
+accumulation steps.

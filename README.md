@@ -140,7 +140,7 @@ produces a wrongly-shaped weight gradient for a *grouped, strided* `conv1d` whos
 padded input length isn't a multiple of the stride. CubeCL and WebGPU absorb it;
 LibTorch checks shapes strictly and aborts. The scale discriminator is exactly
 that shape, so `burn-rvc` reflect-pads its input to a length the whole conv chain
-divides evenly (`align_for_scale`). That costs under 1% of a training segment,
+divides evenly (`SCALE_ALIGN`). That costs under 1% of a training segment,
 keeps every backend on the same arithmetic, and leaves weight shapes — so
 pretrained warm-start — untouched.
 
@@ -148,6 +148,35 @@ pretrained warm-start — untouched.
 # which backends survive which convolution shapes
 cargo run -p rvc-train --example convgrad --features tch,cuda,wgpu
 ```
+
+### Multi-GPU (training only)
+
+`rvc train` takes a comma-separated device list — `--devices` reads better but is
+the same flag as `--device`. The first entry is the master: it holds the weights,
+both optimizer states and the EMA, and it is the only device that writes
+checkpoints.
+
+```sh
+rvc train clips/*.wav -o models/voice --backend tch --devices gpu:0,gpu:1
+```
+
+Each device draws its own micro-batch and its gradients are copied back to the
+master and averaged, so **`-b` is per device** and the effective batch is
+`batch × grad-accum × devices`. That buys a steadier gradient, not a shorter
+epoch: devices are dispatched in sequence, and replicas are re-copied from the
+master every step because there is no all-reduce. Treat N>1 as a way to use
+memory you already have, not as a speed-up.
+
+Duplicates are rejected after resolution, so `--devices auto,gpu:0` is an error
+rather than two replicas quietly sharing one card. Mixed device kinds are allowed
+(`--devices gpu:0,cpu` works, if slowly). Inference is single-device by design —
+`convert` and `serve` take one `--device`, because the streaming converter's
+overlap-crossfade carries state from block to block; run one process per GPU for
+batch throughput.
+
+N=1 takes exactly the single-device path, with no clone and no copy. **N>1 has
+only been exercised as GPU+CPU on one machine** — the two-GPU path is
+untested.
 
 ## Usage
 
@@ -505,6 +534,8 @@ LD_LIBRARY_PATH=$PWD/libtorch/lib \
   chooses for `.safetensors` weights.
 - **Live training dashboard**: Burn's TUI shows loss plots + progress; `q` (or
   Ctrl-C without the TUI) stops early and saves.
+- **Data-parallel multi-device training** (`--devices gpu:0,gpu:1`): master-device
+  gradient accumulation, N=1 unchanged. Verified as GPU+CPU; two GPUs untested.
 
 - **ONNX export works**: `export/` is a small standalone uv/python script that converts
   a Burn `.safetensors` to ONNX (clean-room torch, no RVC repo); verified by
@@ -516,8 +547,9 @@ LD_LIBRARY_PATH=$PWD/libtorch/lib \
 - 40 kHz training.
 - Faster CubeCL/CUDA inference so `serve` is realtime on that backend too
   (`--backend tch` is the faster native path today).
-- Data-parallel multi-GPU training — needs the master-device gradient
-  accumulation that `Learner` provides and this GAN loop cannot use.
+- Multi-GPU training that is actually *faster*: thread-per-device dispatch, and
+  persistent replicas with all-reduce (`burn-collective`) instead of copying the
+  master's weights out every step. The data-parallel path itself already works.
 - Track down the intermittent exit-time abort after training (affects CubeCL and
   WebGPU; weights are already written when it fires).
 - Index/retrieval blend + `protect` for even tighter timbre match.
