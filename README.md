@@ -1,60 +1,76 @@
 # rvc — RVC voice conversion toolkit
 
 Retimbre any voice recording into a voice you like. **Voice conversion (VC)**
-runs as pure-Rust inference (RVC v2) — native Burn on either LibTorch or
-CubeCL/CUDA, or ONNX Runtime — with a streaming Unix-filter CLI, and training is a
-native Rust (burn) pipeline: no Python in the toolkit except the single
-weight → ONNX conversion step.
+runs as pure-Rust inference (RVC v2) — native Burn on LibTorch or CubeCL/CUDA, or
+ONNX Runtime — with a streaming Unix-filter CLI, and training is a native Rust
+(burn) pipeline: no Python in the toolkit except the single weight → ONNX
+conversion step.
 
-## Architecture
+**New here?** [Requirements](#requirements) → [Install](#install) →
+[Convert a file](#convert-amp3-into-a-trained-voices-timbre). Building on it?
+[For developers](#for-developers).
 
-| crate | role |
-|-------|------|
-| `rvc-audio` | ffmpeg (8.1) mp3/wav decode, resample, WAV/raw-PCM I/O — all as `futures::Stream` of mono `f32` |
-| `rvc-core` | the voice-conversion pipeline: ContentVec + RMVPE feature extraction, and **every** generator backend (ONNX Runtime via `ort`; native Burn on LibTorch or CubeCL/CUDA, behind the `tch`/`cuda` features) behind one `Generator` trait; `Stream`-in → `Stream`-out `Converter`; reusable `FeatureExtractor` |
-| `burn-rvc` | the RVC v2 network itself, a standalone Burn port of `SynthesizerTrnMs768NSFsid` |
-| `rvc-hub` | auto-download ContentVec/RMVPE ONNX from Hugging Face |
-| `rvc-train` | native (Rust/burn) RVC generator training — see `crates/rvc-train/ARCHITECTURE.md` |
-| `rvc-cli` | the `rvc` binary (clap) |
+## Requirements
 
-## Prerequisites
+| | needed by | how it's found |
+|---|---|---|
+| **ONNX Runtime** | everyone — it runs ContentVec + RMVPE on every path, including the native ones | dlopened at run time from `ORT_DYLIB_PATH` |
+| **LibTorch** | optional — only `--backend tch` | linked at build time; found automatically at run time |
+| **ffmpeg 8.1** | everyone (decode/resample) | system libraries |
 
-- **ONNX Runtime**: this tool never bundles or downloads it. Point
-  `ORT_DYLIB_PATH` at your own build (GPU-enabled for CUDA):
-  ```sh
-  export ORT_DYLIB_PATH=/path/to/libonnxruntime.so
-  # e.g. a system install: export ORT_DYLIB_PATH=/usr/lib/libonnxruntime.so
-  ```
-  The CUDA execution provider is tried first, then CPU. A 6 GB GPU is enough for
-  inference. (Built against the ORT 1.24 API; newer runtimes work too.)
-- **LibTorch** (only for `--backend tch`): like ONNX Runtime, never bundled or
-  downloaded. Fetch it once and point `LIBTORCH` at it before building:
-  ```sh
-  # cuNNN must match your driver: cu118/cu121/cu124/cu126/cu128. Version must be 2.9.0.
-  wget https://download.pytorch.org/libtorch/cu126/libtorch-shared-with-deps-2.9.0%2Bcu126.zip
-  unzip libtorch-shared-with-deps-2.9.0+cu126.zip     # -> ./libtorch
-  export LIBTORCH=$PWD/libtorch
-  ```
-  That is the only step. The built binary finds LibTorch on its own — no
-  `LD_LIBRARY_PATH`, ever. It searches, in order: the `LIBTORCH` you built with,
-  `libtorch/` beside the binary, and `libtorch/` in the current directory. So
-  keeping `./libtorch` in your project directory is enough even if you move the
-  binary or rebuild elsewhere.
+Neither runtime is bundled or downloaded. Point at your own:
 
-  A distro PyTorch is usually too new (2.13 removed an API the bindings call).
-  Don't want LibTorch at all? `cargo build --release --no-default-features
-  --features cuda,wgpu` — then `--backend tch` reports that it wasn't built in.
+```sh
+export ORT_DYLIB_PATH=/usr/lib/libonnxruntime.so   # required
+```
 
-- **ffmpeg 8.1** dev libraries (for `rvc-audio`) and the `ffmpeg` binary (for
-  piping raw PCM in the realtime example).
+ONNX Runtime is loaded dynamically, so this is a **run-time** variable — the same
+binary works against any 1.24-compatible build, CPU or CUDA. The CUDA execution
+provider is tried first, then CPU.
 
-## Build
+### LibTorch (optional)
+
+Only needed for `--backend tch`, which is ~9x faster than the CUDA backend for
+inference (see [Compute backends](#compute-backends--devices)). Skip it and
+everything else still works.
+
+Unlike ONNX Runtime, LibTorch is *linked*, so it must be present when the binary
+is built. **Version must be 2.9.0** — that is what the `tch 0.22` bindings are
+generated against, and a distro PyTorch is usually too new.
+
+```sh
+# cuNNN must match your driver: cu118 / cu121 / cu124 / cu126 / cu128
+wget https://download.pytorch.org/libtorch/cu126/libtorch-shared-with-deps-2.9.0%2Bcu126.zip
+unzip libtorch-shared-with-deps-2.9.0+cu126.zip     # -> ./libtorch
+export LIBTORCH=$PWD/libtorch
+```
+
+At run time the binary finds LibTorch by itself — **`LD_LIBRARY_PATH` is never
+needed**. It searches in order:
+
+1. the `LIBTORCH` it was built against,
+2. `libtorch/` next to the binary,
+3. `libtorch/` in the current working directory.
+
+So keeping a `./libtorch` in your project directory is enough even after moving
+the binary.
+
+## Install
 
 ```sh
 export ORT_DYLIB_PATH=/usr/lib/libonnxruntime.so
-export LIBTORCH=$PWD/libtorch          # see Prerequisites; omit with --no-default-features
-cargo build --release
+export LIBTORCH=$PWD/libtorch      # omit to build without the tch backend
+cargo build --release              # -> target/release/rvc
 ```
+
+Without LibTorch:
+
+```sh
+cargo build --release --no-default-features --features cuda
+```
+
+`--backend tch` then reports that it wasn't compiled in, and everything else is
+unchanged.
 
 ## Compute backends & devices
 
@@ -129,7 +145,7 @@ updated *between* the two backward passes). For batch throughput, run several
 `rvc convert` processes with different `--device cuda:N`; splitting one stream
 across GPUs would break the overlap-crossfade that carries state between blocks.
 
-## Use
+## Usage
 
 ### Convert `a.mp3` into a trained voice's timbre
 
@@ -402,6 +418,66 @@ rvc completions zsh  > ~/.zfunc/_rvc
 rvc completions bash > /etc/bash_completion.d/rvc
 rvc completions fish > ~/.config/fish/completions/rvc.fish
 ```
+
+## For developers
+
+### Building from source
+
+Same as Install, plus: **keep LibTorch at the project root as `./libtorch`.**
+The build needs `LIBTORCH` set, and several crates' test binaries link it too
+(cargo unifies features across the workspace), so the test suite needs the
+library on the loader path:
+
+```sh
+export ORT_DYLIB_PATH=/usr/lib/libonnxruntime.so
+export LIBTORCH=$PWD/libtorch
+
+cargo build --release
+cargo clippy --workspace --all-targets     # kept clean
+cargo fmt
+
+LD_LIBRARY_PATH=$PWD/libtorch/lib cargo test --workspace
+```
+
+`LD_LIBRARY_PATH` is a **test-only** requirement: cargo runs each test binary
+with its own package directory as the working directory, so the relative search
+path baked into `rvc` doesn't apply to them. The `rvc` binary itself never needs
+it.
+
+### Checking the network port
+
+There are no unit tests for the network. Correctness is checked by loading the
+real pretrained weights and reporting coverage — the whole generator must load
+560/560 params with 0 missing:
+
+```sh
+cargo run -p burn-rvc --example load  -- models/pretrained/f0G48k.pth
+cargo run -p burn-rvc --example infer -- models/pretrained/f0G48k.pth
+```
+
+Both take `--backend ndarray|cuda|tch` (default `ndarray`, needs no GPU); the
+counts must come out identical on every backend.
+
+### Backend conformance probe
+
+`convgrad` checks which backends survive the convolution shapes the
+discriminator uses — this is what identified the LibTorch training bug:
+
+```sh
+LD_LIBRARY_PATH=$PWD/libtorch/lib \
+  cargo run -p rvc-train --example convgrad --features tch,cuda,wgpu
+```
+
+### Crate layout
+
+| crate | role |
+|-------|------|
+| `rvc-audio` | ffmpeg (8.1) mp3/wav decode, resample, WAV/raw-PCM I/O — all as `futures::Stream` of mono `f32` |
+| `rvc-core` | the voice-conversion pipeline: ContentVec + RMVPE feature extraction, and **every** generator backend (ONNX Runtime via `ort`; native Burn on LibTorch or CubeCL/CUDA, behind the `tch`/`cuda` features) behind one `Generator` trait; `Stream`-in → `Stream`-out `Converter`; reusable `FeatureExtractor` |
+| `burn-rvc` | the RVC v2 network itself, a standalone Burn port of `SynthesizerTrnMs768NSFsid` |
+| `rvc-hub` | auto-download ContentVec/RMVPE ONNX from Hugging Face |
+| `rvc-train` | native (Rust/burn) RVC generator training — see `crates/rvc-train/ARCHITECTURE.md` |
+| `rvc-cli` | the `rvc` binary (clap) |
 
 ## Status
 
