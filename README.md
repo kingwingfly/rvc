@@ -155,6 +155,7 @@ the trainer snapshots the generator **and** its discriminator next to the output
 rvc train --out models/voice …  # -> models/checkpoint/voice.best.safetensors
                                 #    models/checkpoint/voice.best.raw.safetensors
                                 #    models/checkpoint/voice.best.disc.safetensors
+                                #    models/checkpoint/voice.best.json  (its score)
 ```
 
 That's the **same file set as the final output** — EMA weights, raw twin, and
@@ -166,10 +167,11 @@ from it and get *its* raw twin and *its* discriminator (never the final run's):
 rvc train --out models/voice --resume models/checkpoint/voice.best.safetensors …
 ```
 
-What's compared is the mean `mel` over a window sized to give ~20 evaluations
-across the run, not a single step, since the per-step loss is noisy enough that
-its minimum is mostly luck. Pass `--no-save-best` to skip it (saves ~20 extra
-weight writes over a run).
+What's compared is the mean `mel` over a window of at most 50 steps, not a single
+step, since the per-step loss is noisy enough that its minimum is mostly luck. The
+score is kept in the `.best.json` sidecar and read back on the next run, so
+resuming can only *improve* on the best you already have rather than overwrite it
+with wherever the new run happens to start. Pass `--no-save-best` to skip it.
 
 Notes: only 48 kHz is supported today; defaults are `-e 5` epochs and `-b 2`
 (safe on a 6 GB RTX 2060). One epoch is one pass over the corpus and can be slow

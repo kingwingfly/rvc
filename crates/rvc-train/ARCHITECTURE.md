@@ -118,7 +118,8 @@ of files sharing a stem, and *every* save writes the same family:
 ```
 
 `Checkpoint::new` accepts any spelling of a family (with or without the suffix,
-generator or raw twin) and `resume_from` picks the twin when it exists, so
+generator, raw twin or discriminator sidecar) and `resume_from` picks the twin
+when it exists, so
 `--resume` continues from the `raw-G ↔ live-D` pairing that actually played the
 adversarial game rather than from the EMA, which never itself faced D. Members
 are built from the *stem* rather than `Path::with_extension` — that only sees the
@@ -131,13 +132,32 @@ There is no *periodic*-checkpoint machinery; there is one extra snapshot:
   the same family under `<out-dir>/checkpoint/` with a `.best` stem, written
   whenever the `mel` loss hits a new minimum — so a run that drifts late still
   leaves its best model behind, and that model deploys and resumes exactly like
-  the final one. The comparison is on the *mean* mel over a window of
-  `total_steps/20` steps (the per-step loss is noisy enough that its single-step
-  minimum is luck), which also bounds the run to ~20 checkpoint writes. A family
-  counts as the new best only once all its files land, so a failed write can't
-  leave a generator paired with a stale discriminator. What's saved is what a
-  deploy uses (the EMA), even though the mel scored is the live generator's —
-  which is exactly why the raw twin matters: it's the G that faced the D beside it.
+  the final one. What's saved is what a deploy uses (the EMA), even though the mel
+  scored is the live generator's — which is exactly why the raw twin matters: it's
+  the G that faced the D beside it. Three rules make the comparison mean something:
+
+  - **Window.** The per-step mel is noisy enough that its single-step minimum is
+    luck, so what's compared is the *mean* over `(total_steps/20).clamp(1, 50)`
+    steps. The cap is load-bearing: `total_steps` is the *scheduled* count, and
+    since runs are normally ended by hand (`q`/Ctrl-C) long before that, an
+    uncapped window would first close only in runs nobody actually completes.
+  - **Persistence.** The score lives in a `<out>.best.json` sidecar
+    (`{"mel", "step"}`, hand-parsed — two fields don't earn a serde dependency)
+    and is read back at startup. Without it every process starts from an empty
+    best and its first window overwrites the previous run's model however much
+    worse it is, which under the recommended stop-early/`--resume` workflow
+    reduces `.best` to "the last run's exit snapshot". A sidecar whose weights are
+    missing is ignored; a corrupt one is a `warn!` and no more.
+  - **Tail.** The partial window an early stop leaves behind is judged only when
+    it's at least half a full window — a one-step mean has many times the variance
+    of a full one and would unseat a genuinely better best. Below that it still
+    counts when nothing is on disk, so a stopped-early run leaves *something*.
+
+  A family counts as the new best only once all its files land — sidecar last —
+  so a failed write can neither leave a generator paired with a stale
+  discriminator nor advance the score a later run inherits. Every run reports on
+  exit what it kept, or warns that it wrote no best at all — the failure mode here
+  is invisible otherwise.
 
 3. **ONNX export** — the one allowed Python step, kept **minimal and standalone**.
    A small self-contained `uv` project (~one torch file) defines the inference

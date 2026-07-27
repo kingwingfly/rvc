@@ -8,6 +8,9 @@
 //! voice.disc.safetensors   the discriminator that co-evolved with that twin
 //! ```
 //!
+//! The best-so-far family carries a fourth member, `voice.best.json`, recording
+//! what it scored — the one piece of state that has to outlive the process.
+//!
 //! `--resume` prefers the raw twin: it is the generator that actually faced the
 //! saved discriminator, so `raw-G <-> live-D` continues the adversarial game
 //! faithfully, whereas the EMA is a smoothed average that never itself faced D.
@@ -39,8 +42,9 @@ pub struct Checkpoint {
 
 impl Checkpoint {
     /// The family a generator path belongs to. Accepts the output name with or
-    /// without its suffix (`models/voice`, `models/voice.safetensors`) and the
-    /// raw twin (`models/voice.raw.safetensors`) — all name the same family.
+    /// without its suffix (`models/voice`, `models/voice.safetensors`), the raw
+    /// twin and the discriminator sidecar — all name the same family, so pointing
+    /// `--resume` at any member of a run resolves to that run.
     pub fn new(generator: &Path) -> Self {
         let dir = generator.parent().unwrap_or(Path::new("")).to_path_buf();
         let name = generator
@@ -48,9 +52,10 @@ impl Checkpoint {
             .and_then(|s| s.to_str())
             .unwrap_or("voice");
         let stem = name.strip_suffix(&format!(".{SUFFIX}")).unwrap_or(name);
+        let stem = stem.strip_suffix(".raw").unwrap_or(stem);
         Self {
             dir,
-            stem: stem.strip_suffix(".raw").unwrap_or(stem).to_string(),
+            stem: stem.strip_suffix(".disc").unwrap_or(stem).to_string(),
         }
     }
 
@@ -76,6 +81,38 @@ impl Checkpoint {
     /// The discriminator sidecar.
     pub fn disc(&self) -> PathBuf {
         self.member(".disc")
+    }
+
+    /// The bookkeeping sidecar: what this checkpoint scored and when. Kept beside
+    /// the weights rather than in the trainer so the *next* process knows what it
+    /// has to beat — without it every run starts from an empty best and its first
+    /// window overwrites a previous run's better model however much worse it is.
+    pub fn meta(&self) -> PathBuf {
+        // Not `member`: that one names weights, and this is not a safetensors file.
+        self.dir.join(format!("{}.json", self.stem))
+    }
+
+    /// The recorded score of the weights on disk, if any. A missing sidecar is the
+    /// ordinary first-run case; a damaged one is worth a word but must not stop a
+    /// run, so it degrades to "nothing to beat".
+    pub fn load_meta(&self) -> Option<BestMeta> {
+        let p = self.meta();
+        let text = std::fs::read_to_string(&p).ok()?;
+        let meta = parse_meta(&text);
+        if meta.is_none() {
+            tracing::warn!("ignoring unreadable {}", p.display());
+        }
+        meta
+    }
+
+    /// Record what the saved weights scored. Callers write this only *after* the
+    /// family lands, so a failed weight write can never advance the best that a
+    /// later run inherits.
+    pub fn save_meta(&self, meta: BestMeta) -> Result<()> {
+        let p = self.meta();
+        let BestMeta { mel, step } = meta;
+        std::fs::write(&p, format!("{{\"mel\": {mel}, \"step\": {step}}}\n"))
+            .with_context(|| format!("writing {}", p.display()))
     }
 
     /// Which generator to actually load when resuming from this family: the raw
@@ -128,14 +165,45 @@ impl Checkpoint {
     }
 }
 
+/// Why a checkpoint was kept: the mel it scored and the step it came from (an
+/// exit-window best and a mid-run one are otherwise indistinguishable in a log).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BestMeta {
+    pub mel: f32,
+    pub step: usize,
+}
+
 fn failed(path: &Path, e: Box<dyn Error>) -> anyhow::Error {
     anyhow!("saving {}: {e}", path.display())
 }
 
+/// Two numbers do not justify a serde dependency, and the only writer of this
+/// file is [`Checkpoint::save_meta`]; anything else is treated as corrupt.
+fn parse_meta(text: &str) -> Option<BestMeta> {
+    let mel: f32 = number(text, "mel")?.parse().ok()?;
+    let step: usize = number(text, "step")?.parse().ok()?;
+    // A non-finite score would compare false against everything and freeze the best.
+    mel.is_finite().then_some(BestMeta { mel, step })
+}
+
+/// The token following `"key":` in a flat one-object JSON.
+fn number<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    let at = text.find(&format!("\"{key}\""))?;
+    let (_, rest) = text[at..].split_once(':')?;
+    rest.split([',', '}']).next().map(str::trim)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Checkpoint;
+    use super::{BestMeta, Checkpoint, parse_meta};
     use std::path::{Path, PathBuf};
+
+    /// A scratch directory unique to this test binary *and* case.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("rvc-ckpt-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
     #[test]
     fn every_spelling_names_the_same_family() {
@@ -181,15 +249,77 @@ mod tests {
     }
 
     #[test]
+    fn the_disc_sidecar_names_the_same_family() {
+        // `--resume out/voice.disc.safetensors` must reach the run that wrote it,
+        // not a `voice.disc.disc.safetensors` nobody ever writes.
+        let want = Checkpoint::new(Path::new("out/voice"));
+        assert_eq!(
+            Checkpoint::new(Path::new("out/voice.disc.safetensors")),
+            want
+        );
+        let best = want.best();
+        assert_eq!(Checkpoint::new(&best.disc()), best);
+    }
+
+    #[test]
     fn resume_prefers_the_raw_twin_when_it_exists() {
-        let dir = std::env::temp_dir().join(format!("rvc-ckpt-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = scratch("resume");
         let ck = Checkpoint::new(&dir.join("voice"));
 
         // Without EMA only the deployable weights exist, so they're what resumes.
         assert_eq!(ck.resume_from(), ck.generator());
         std::fs::write(ck.raw(), b"x").unwrap();
         assert_eq!(ck.resume_from(), ck.raw());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_meta_sidecar_round_trips() {
+        let best = Checkpoint::new(Path::new("models/voice.safetensors")).best();
+        assert_eq!(
+            best.meta(),
+            PathBuf::from("models/checkpoint/voice.best.json")
+        );
+
+        let dir = scratch("meta");
+        let ck = Checkpoint::new(&dir.join("voice")).best();
+        std::fs::create_dir_all(dir.join("checkpoint")).unwrap();
+        // Nothing recorded yet is the ordinary first-run case.
+        assert_eq!(ck.load_meta(), None);
+
+        let want = BestMeta {
+            mel: 34.376,
+            step: 1234,
+        };
+        ck.save_meta(want).unwrap();
+        assert_eq!(ck.load_meta(), Some(want));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_corrupt_sidecar_degrades_to_no_best() {
+        // A truncated write or a hand-edit must not stop the run, and must not
+        // leave a score that every later window compares false against.
+        for bad in [
+            "",
+            "{",
+            "{\"mel\": }",
+            "{\"mel\": 1.0}",
+            "{\"mel\": nan, \"step\": 0}",
+        ] {
+            assert_eq!(parse_meta(bad), None, "{bad:?} should not parse");
+        }
+        assert_eq!(
+            parse_meta("{\"mel\": 12.5, \"step\": 7}\n"),
+            Some(BestMeta { mel: 12.5, step: 7 })
+        );
+
+        let dir = scratch("corrupt");
+        let ck = Checkpoint::new(&dir.join("voice"));
+        std::fs::write(ck.meta(), b"not json").unwrap();
+        assert_eq!(ck.load_meta(), None);
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -12,7 +12,7 @@ use burn::tensor::{Int, Tensor, TensorData, TensorPrimitive};
 use burn_rvc::{MultiPeriodDiscriminator, Synthesizer, SynthesizerConfig};
 
 use crate::TrainRequest;
-use crate::checkpoint::Checkpoint;
+use crate::checkpoint::{BestMeta, Checkpoint};
 use crate::dashboard::Dashboard;
 use crate::dataset::{CONTENT_DIM, Clip, HOP, Rng, clip_weights, sample_batch};
 use crate::losses::{disc_loss, feature_matching, gen_adv, kl, mel_l1};
@@ -168,13 +168,32 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
     let out = Checkpoint::new(&req.out);
 
     // Best-so-far checkpointing (on unless `--no-save-best`). The per-step mel is
-    // noisy enough that its minimum is mostly luck, so we compare the *mean* over
-    // a window sized to give ~20 evaluations over a run of any length — which also
-    // bounds the writes.
+    // noisy enough that its minimum is mostly luck, so we compare the *mean* over a
+    // window. The cap matters more than the fraction: `total_steps` is the
+    // *scheduled* count, and a run that is stopped by hand — the way this trainer
+    // is meant to be used — would otherwise exit before its first window ever
+    // closed, leaving the in-loop save dead code.
     let best = req.settings.save_best.then(|| out.best());
-    let best_window = (total_steps / 20).max(1);
-    let mut best_mel = f32::INFINITY;
+    let best_window = (total_steps / 20).clamp(1, 50);
+    // Inherit the score the last run left, so a fresh process can only *improve* on
+    // it; starting from infinity makes every run's first window a clobber. A
+    // sidecar whose weights are gone is ignored — it would veto every save.
+    let prev = best
+        .as_ref()
+        .filter(|ck| ck.generator().exists())
+        .and_then(Checkpoint::load_meta);
+    let mut best_mel = prev.map_or(f32::INFINITY, |m| m.mel);
+    // `Some` only once this run has written one, which is what the closing report
+    // distinguishes: an inherited best is not evidence that this run produced one.
+    let mut best_step: Option<usize> = None;
     let (mut win_sum, mut win_n) = (0.0f32, 0usize);
+    if let Some(m) = prev {
+        tracing::info!(
+            "best so far: mel {:.3} (step {}) from a prior run",
+            m.mel,
+            m.step
+        );
+    }
 
     let mut dash = Dashboard::new(
         req.settings.use_tui,
@@ -184,6 +203,7 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
 
     let mut stopped_early = false;
     let mut last_d = 0.0f32; // carried across steps that skip the D update
+    let mut last_step = 0usize; // the last step actually executed, for the tail window
     for step in 0..total_steps {
         // Early stop: SIGINT (non-TUI) or `q` in the dashboard. The model saved
         // below reflects the last completed step.
@@ -191,6 +211,7 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
             stopped_early = true;
             break;
         }
+        last_step = step;
         // Exponential LR schedule over the whole run: base_lr at step 0 decaying
         // to base_lr * lr_final at the final step (epoch-count independent).
         let progress = step as f64 / total_steps.max(1) as f64;
@@ -324,7 +345,9 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
             if win_n == best_window {
                 let mean = win_sum / win_n as f32;
                 (win_sum, win_n) = (0.0, 0);
-                keep_best(ck, &mut best_mel, mean, ema.as_ref(), &net_g, &disc);
+                if keep_best(ck, &mut best_mel, mean, step, ema.as_ref(), &net_g, &disc) {
+                    best_step = Some(step);
+                }
             }
         }
     }
@@ -335,42 +358,82 @@ pub fn run(req: &TrainRequest, clips: Vec<Clip>) -> Result<PathBuf> {
         tracing::info!("stopped early; saving current weights");
     }
 
-    // Judge the partial window an early stop (or a ragged tail) leaves behind:
-    // when a run is cut short that window is the likeliest best, and dropping it
-    // would mean a stopped-early run produced no best checkpoint at all.
-    if let (Some(ck), true) = (&best, win_n > 0) {
-        let mean = win_sum / win_n as f32;
-        keep_best(ck, &mut best_mel, mean, ema.as_ref(), &net_g, &disc);
+    // Judge the partial window an early stop (or a ragged tail) leaves behind, but
+    // only when there is enough of it to mean anything: a one-step mean carries
+    // many times the variance of a full window, so a lucky tail would otherwise
+    // unseat a genuinely better best. Under that bar it still stands when nothing
+    // is on disk — a stopped-early run must leave *something* rather than nothing.
+    if let Some(ck) = &best {
+        let trustworthy = win_n * 2 >= best_window || best_mel.is_infinite();
+        if win_n > 0 && trustworthy {
+            let mean = win_sum / win_n as f32;
+            if keep_best(
+                ck,
+                &mut best_mel,
+                mean,
+                last_step,
+                ema.as_ref(),
+                &net_g,
+                &disc,
+            ) {
+                best_step = Some(last_step);
+            }
+        }
     }
 
     out.save(ema.as_ref(), &net_g.valid(), &disc.valid())
         .context("saving trained weights")?;
-    if let (Some(ck), true) = (&best, best_mel.is_finite()) {
-        tracing::info!(
-            "best checkpoint (mel {best_mel:.3}): {}",
-            ck.generator().display()
-        );
+    if let Some(ck) = &best {
+        match best_step {
+            Some(step) => tracing::info!(
+                "best checkpoint (mel {best_mel:.3}, step {step}): {}",
+                ck.generator().display()
+            ),
+            // A run that contributes no best is invisible otherwise: say plainly
+            // that this one added nothing, and whether anything is there at all.
+            None if best_mel.is_finite() => tracing::info!(
+                "no new best this run; keeping mel {best_mel:.3} in {}",
+                ck.generator().display()
+            ),
+            None => tracing::warn!(
+                "no best checkpoint was written (the run was too short to complete a window)"
+            ),
+        }
     }
     Ok(out.generator())
 }
 
-/// Save `ck` when `mean` beats `best`. `best` advances only once the whole family
-/// is on disk, so a failed write can't block a later minimum from being saved.
+/// Save `ck` when `mean` beats `best`, reporting whether it did. `best` advances
+/// only once the whole family is on disk, so a failed write can't block a later
+/// minimum from being saved; the score sidecar is written last for the same
+/// reason — a later run must not inherit a best whose weights never landed.
 fn keep_best(
     ck: &Checkpoint,
     best: &mut f32,
     mean: f32,
+    step: usize,
     ema: Option<&Synthesizer<IB>>,
     net_g: &Synthesizer<AB>,
     disc: &MultiPeriodDiscriminator<AB>,
-) {
+) -> bool {
     if mean.is_nan() || mean >= *best {
-        return;
+        return false;
     }
-    tracing::info!("new best mel {mean:.3}");
+    tracing::info!("new best mel {mean:.3} (step {step})");
     match ck.save(ema, &net_g.valid(), &disc.valid()) {
-        Ok(()) => *best = mean,
-        Err(e) => tracing::warn!("could not save best checkpoint: {e:#}"),
+        Ok(()) => {
+            *best = mean;
+            if let Err(e) = ck.save_meta(BestMeta { mel: mean, step }) {
+                // The weights are the checkpoint; losing the score only costs the
+                // *next* run its memory of what to beat.
+                tracing::warn!("could not record the best score: {e:#}");
+            }
+            true
+        }
+        Err(e) => {
+            tracing::warn!("could not save best checkpoint: {e:#}");
+            false
+        }
     }
 }
 
