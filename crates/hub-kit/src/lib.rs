@@ -159,3 +159,30 @@ pub async fn fetch_whisper(repo: Option<&str>, cache_dir: Option<&Path>) -> Resu
         dir: dir.unwrap_or_else(default_cache_dir),
     })
 }
+
+/// Default prosody encoder: an ONNX `chinese-roberta-wwm-ext-large` that emits
+/// the third-from-last hidden layer.
+///
+/// That last detail is the whole requirement. A stock `optimum` export gives
+/// `last_hidden_state`, which is a *different* representation — GPT-SoVITS (and
+/// Style-Bert-VITS2, whose conversion this is) condition on layer −3, and
+/// substituting the last one sounds wrong rather than failing.
+pub const DEFAULT_PROSODY_BERT: (&str, &str) =
+    ("tsukumijima", "chinese-roberta-wwm-ext-large-onnx");
+
+/// Files the prosody encoder needs.
+const PROSODY_FILES: [&str; 3] = ["model.onnx", "tokenizer.json", "config.json"];
+
+/// Fetch the prosody encoder, returning the directory the files landed in.
+pub async fn fetch_prosody_bert(repo: Option<&str>, cache_dir: Option<&Path>) -> Result<PathBuf> {
+    let (owner, name) = match repo {
+        Some(r) => r.split_once('/').unwrap_or((r, "")),
+        None => DEFAULT_PROSODY_BERT,
+    };
+    let mut dir = None;
+    for file in PROSODY_FILES {
+        let path = fetch(&ModelRef::new(owner, name, file), cache_dir).await?;
+        dir = path.parent().map(Path::to_path_buf);
+    }
+    Ok(dir.unwrap_or_else(default_cache_dir))
+}

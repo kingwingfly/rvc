@@ -7,6 +7,7 @@ members = [
     "crates/stt-core",
     "crates/cli-kit",
     "crates/stt-cli",
+    "crates/tts-core",
     "crates/rvc-core",
     "crates/burn-rvc",
     "crates/burn-vits",
@@ -47,6 +48,7 @@ stt-core = { path = "crates/stt-core" }
 cli-kit = { path = "crates/cli-kit" }
 train-kit = { path = "crates/train-kit" }
 text-kit = { path = "crates/text-kit" }
+tts-core = { path = "crates/tts-core" }
 # Same reason as `rvc-cli`: `voice-cli` re-declares the backend features and
 # forwards them, and cargo forbids overriding an inherited `default-features`.
 stt-cli = { path = "crates/stt-cli", default-features = false }

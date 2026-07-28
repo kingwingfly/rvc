@@ -182,6 +182,25 @@ would otherwise be a multi-GB download of a **CPU-only** LibTorch.
 `RUNPATH`; without it a missing `libtorch.so` aborts in `ld.so` before `main`, on
 every subcommand. They are deliberate duplicates — an rpath is per-executable.
 
+### Which runtime a model gets, and why
+A model that is **trained here** must be a Burn port — there is no ONNX training
+path. A model that is **frozen** may be either, and the deciding question is not
+loyalty to Burn:
+
+- `tts-core`'s prosody BERT is ONNX. It is frozen, an export exists, and one
+  sentence through 24 layers is launch-overhead bound, so a port would not be
+  meaningfully faster. The trait (`ProsodyEncoder`) leaves the slot open.
+- `burn-gptsovits`'s cnhubert is a Burn port, done before that reasoning was
+  settled. Keeping it costs nothing and it is verified at 210/0.
+- GPT-SoVITS `s1`/`s2` must be Burn: they are fine-tuned.
+
+Where a port *would* pay is dropping ONNX Runtime from the toolkit entirely,
+which would remove `ORT_DYLIB_PATH` from setup. `rvc-core`'s ContentVec and RMVPE
+are the two that stand in the way — and ContentVec is a HuBERT variant, so
+`burn-gptsovits`'s `hubert.rs` already covers its architecture. Porting it would
+mean lifting that module into a `burn-hubert` of its own, since two engines would
+then share it.
+
 ### The phoneme table is a compatibility contract (`text-kit`)
 `text_kit::symbols::SYMBOLS` is GPT-SoVITS's v2 vocabulary verbatim, 732 entries
 in order, because those indices address the T2S model's phoneme embedding. It is

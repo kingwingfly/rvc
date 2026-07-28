@@ -1,0 +1,28 @@
+[package]
+name = "tts-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Speech synthesis (GPT-SoVITS) for the voice toolkit"
+
+[features]
+default = ["onnx"]
+# The prosody encoder. On by default: it is the only implementation, and Chinese
+# synthesis without prosody features is measurably flatter.
+onnx = ["dep:ort", "dep:tokenizers"]
+cuda = ["burn-kit/cuda"]
+tch = ["burn-kit/tch"]
+wgpu = ["burn-kit/wgpu"]
+
+[dependencies]
+text-kit.workspace = true
+hub-kit.workspace = true
+burn-kit.workspace = true
+# The prosody encoder is inference-only and published as ONNX, so it runs on
+# ONNX Runtime rather than being ported. See `bert.rs`.
+ort = { workspace = true, optional = true }
+tokenizers = { workspace = true, optional = true }
+thiserror.workspace = true
+tracing.workspace = true
