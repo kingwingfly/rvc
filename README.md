@@ -52,7 +52,7 @@ the requirements are the same for both binaries.
 |---|---|---|
 | **`rvc`** — voice conversion (RVC v2) | **works**, inference + native training | [crates/rvc-cli/README.md](crates/rvc-cli/README.md) |
 | **`stt`** — speech recognition (Whisper large-v3-turbo) | **works** — `voice stt` | below |
-| **`tts`** — speech synthesis (GPT-SoVITS v2) | planned, inference + fine-tuning | — |
+| **`tts`** — speech synthesis (GPT-SoVITS v2) | in progress — front-end and cnhubert done | — |
 | **`translate`** | not started; pipe to any external tool meanwhile | — |
 
 `rvc` runs on three interchangeable compute backends — ONNX Runtime, and native
@@ -117,6 +117,7 @@ Three tiers, and the names say which is which.
 | `burn-vits` | the VITS blocks RVC and GPT-SoVITS share — attention, WaveNet, flow, posterior encoder, ResBlock1, discriminators — plus the family's losses and its differentiable STFT |
 | `burn-rvc` | what is RVC's alone: the NSF source module, the 768-dim content encoder, the synthesizer wiring |
 | `burn-whisper` | the Whisper network; loads HF safetensors unchanged |
+| `burn-gptsovits` | the GPT-SoVITS network. cnhubert done; VQ/SoVITS and the T2S transformer in progress |
 
 **Engines**, one `-core` and one `-cli` apiece, all the same shape:
 

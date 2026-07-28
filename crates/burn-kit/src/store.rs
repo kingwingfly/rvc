@@ -29,22 +29,65 @@ fn remapper(remaps: &[(&str, &str)]) -> KeyRemapper {
     remapper
 }
 
+/// One checkpoint entry: its name, dtype and shape.
+pub type TensorInfo = (String, DType, Vec<usize>);
+
+/// List a PyTorch checkpoint's tensors.
+///
+/// The first thing to run against a new checkpoint: the module tree has to mirror
+/// these names, and guessing them from a reference implementation's source is how
+/// a port ends up with a silent mismatch.
+pub fn pytorch_keys(
+    path: &Path,
+    top_level_key: Option<&str>,
+) -> Result<Vec<TensorInfo>, Box<dyn Error>> {
+    let reader = open_pytorch(path, top_level_key)?;
+    let mut out: Vec<_> = reader
+        .into_tensors()
+        .into_iter()
+        .map(|(name, snap)| {
+            let dims = snap
+                .shape
+                .clone()
+                .into_ranges()
+                .into_iter()
+                .map(|r| r.end)
+                .collect();
+            (name, snap.dtype, dims)
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
+}
+
+/// Open a checkpoint, with or without a wrapping key.
+///
+/// Hugging Face's `pytorch_model.bin` puts the state dict at the root; the
+/// RVC-lineage `.pth` files wrap theirs under `"model"`.
+fn open_pytorch(path: &Path, top_level_key: Option<&str>) -> Result<PytorchReader, Box<dyn Error>> {
+    Ok(match top_level_key {
+        Some(key) => PytorchReader::with_top_level_key(path, key)?,
+        None => PytorchReader::new(path)?,
+    })
+}
+
 /// Load a PyTorch checkpoint subtree into `module`.
 ///
-/// `top_level_key` selects the state_dict inside the checkpoint (RVC uses
-/// `"model"`); `remaps` is an ordered list of `(regex, replacement)` applied to
-/// every tensor name before matching.
+/// `top_level_key` selects the state_dict inside the checkpoint — `Some("model")`
+/// for the RVC-lineage `.pth` files, `None` for a Hugging Face
+/// `pytorch_model.bin`, which puts it at the root. `remaps` is an ordered list of
+/// `(regex, replacement)` applied to every tensor name before matching.
 pub fn load_pytorch_into<B, M>(
     module: &mut M,
     path: &Path,
-    top_level_key: &str,
+    top_level_key: Option<&str>,
     remaps: &[(&str, &str)],
 ) -> Result<ApplyResult, Box<dyn Error>>
 where
     B: Backend,
     M: ModuleSnapshot<B>,
 {
-    let reader = PytorchReader::with_top_level_key(path, top_level_key)?;
+    let reader = open_pytorch(path, top_level_key)?;
     // The tensor name lives in the map key; stamp it onto each snapshot's path.
     let snapshots: Vec<TensorSnapshot> = reader
         .into_tensors()

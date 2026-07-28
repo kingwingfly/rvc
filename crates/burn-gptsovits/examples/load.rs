@@ -1,0 +1,75 @@
+//! Load a GPT-SoVITS component's checkpoint and report weight coverage.
+//!
+//! The crate's stand-in for unit tests, as in `burn-rvc` and `burn-whisper`: the
+//! networks have none, so correctness starts with real published weights mapping
+//! onto the module tree with nothing missing. It catches a wrong module *layout*.
+//! It cannot catch a wrong *formula* — post-norm where the reference is pre-norm
+//! loads at 100% and is wrong — which is what end-to-end listening is for.
+//!
+//! Usage: `cargo run -p burn-gptsovits --example load -- [--backend ndarray|cuda|tch] hubert <pytorch_model.bin>`
+
+#[path = "common/mod.rs"]
+mod common;
+
+use burn::tensor::backend::Backend;
+use burn_gptsovits::{Hubert, HubertConfig};
+
+struct Load {
+    component: String,
+    weights: String,
+}
+
+impl common::Job for Load {
+    fn run<B: Backend>(self, device: &B::Device) {
+        let res = match self.component.as_str() {
+            "hubert" => {
+                let mut model = Hubert::<B>::new(&HubertConfig::chinese_base(), device);
+                model.load_pytorch(&self.weights)
+            }
+            other => {
+                eprintln!("unknown component `{other}` (known: hubert)");
+                std::process::exit(2);
+            }
+        }
+        .expect("failed to read checkpoint");
+
+        println!("applied : {}", res.applied.len());
+        println!(
+            "missing : {}  (model params with no checkpoint tensor)",
+            res.missing.len()
+        );
+        for (name, why) in &res.missing {
+            println!("    MISSING {name}  ({why})");
+        }
+        // Every norm's weight/bias shows up here even though it applied: the
+        // adapter consumes them as Burn's gamma/beta and the store still counts
+        // the original key as unconsumed. Anything else in this list is real.
+        let (norms, real): (Vec<_>, Vec<_>) = res
+            .unused
+            .iter()
+            .partition(|k| k.ends_with("_norm.weight") || k.ends_with("_norm.bias"));
+        println!(
+            "unused  : {} ({} norm gamma/beta, reported but applied; {} genuinely unused)",
+            res.unused.len(),
+            norms.len(),
+            real.len()
+        );
+        for name in real.iter().take(20) {
+            println!("    UNUSED {name}");
+        }
+        println!("errors  : {}", res.errors.len());
+        for e in &res.errors {
+            println!("    ERROR {e:?}");
+        }
+    }
+}
+
+fn main() {
+    let (backend, args) = common::parse_args();
+    let (Some(component), Some(weights)) = (args.first().cloned(), args.get(1).cloned()) else {
+        eprintln!("usage: load [--backend ndarray|cuda|tch] <component> <checkpoint>");
+        std::process::exit(2);
+    };
+    println!("backend : {backend}");
+    common::run_on(backend, Load { component, weights });
+}

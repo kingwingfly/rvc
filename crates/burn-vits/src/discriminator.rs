@@ -172,7 +172,7 @@ impl<B: Backend> MultiPeriodDiscriminator<B> {
             .iter()
             .map(|(a, b)| (a.as_str(), b.as_str()))
             .collect();
-        load_pytorch_into::<B, _>(self, path.as_ref(), "model", &remaps)
+        load_pytorch_into::<B, _>(self, path.as_ref(), Some("model"), &remaps)
     }
 
     /// Save the discriminator in Burn-native safetensors (round-trips with

@@ -1,0 +1,24 @@
+[package]
+name = "burn-gptsovits"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "The GPT-SoVITS network in Burn: cnhubert, BERT, the VQ/SoVITS stage and the T2S transformer"
+
+[features]
+# Extra compute backends for the examples (the weight-coverage harnesses that
+# stand in for unit tests). Off by default so the crate's normal build stays
+# backend-free.
+cuda = ["burn/cuda"]
+tch = ["burn/tch"]
+
+[dependencies]
+burn = { version = "0.21", default-features = false, features = ["std"] }
+burn-vits.workspace = true
+burn-store.workspace = true
+burn-kit = { workspace = true, features = ["store"] }
+
+[dev-dependencies]
+burn-ndarray = "0.21"

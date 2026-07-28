@@ -189,7 +189,7 @@ impl<B: Backend> Synthesizer<B> {
             (r"^flow\.flows\.4\.", "flow.flows.2."),
             (r"^flow\.flows\.6\.", "flow.flows.3."),
         ];
-        load_pytorch_into::<B, _>(self, path.as_ref(), "model", &remaps)
+        load_pytorch_into::<B, _>(self, path.as_ref(), Some("model"), &remaps)
     }
 
     /// Save weights in Burn-native safetensors (our field naming; round-trips

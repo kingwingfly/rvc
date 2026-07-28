@@ -10,6 +10,7 @@ members = [
     "crates/rvc-core",
     "crates/burn-rvc",
     "crates/burn-vits",
+    "crates/burn-gptsovits",
     "crates/burn-whisper",
     "crates/text-kit",
     "crates/train-kit",
@@ -40,6 +41,7 @@ rvc-cli = { path = "crates/rvc-cli", default-features = false }
 burn-rvc = { path = "crates/burn-rvc" }
 burn-kit = { path = "crates/burn-kit" }
 burn-vits = { path = "crates/burn-vits" }
+burn-gptsovits = { path = "crates/burn-gptsovits" }
 burn-whisper = { path = "crates/burn-whisper" }
 stt-core = { path = "crates/stt-core" }
 cli-kit = { path = "crates/cli-kit" }
