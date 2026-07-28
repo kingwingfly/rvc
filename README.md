@@ -129,6 +129,30 @@ running Japanese through the Chinese front-end produces fluent-sounding wrong
 audio. The accuracy ceiling on Chinese is the polyphone dictionary — see
 `text-kit`.
 
+### Fine-tuning a voice
+
+Cloning from one reference clip gets the timbre. Fine-tuning adapts the
+*delivery* — pacing, emphasis, where a speaker breathes — because those live in
+the semantic token sequence `s1` predicts.
+
+A corpus is audio beside transcripts, `<stem>.wav` next to `<stem>.txt`. `stt`
+writes the transcripts:
+
+```sh
+for f in corpus/*.wav
+  ffmpeg -v quiet -i $f -f f32le -ar 16000 -ac 1 - | stt > (string replace .wav .txt $f)
+end
+
+tts train corpus/ -o tuned/voice --epochs 10
+tts --reference clip.wav --reference-text "…" --s1 tuned/voice.safetensors < script.txt
+```
+
+Training is plain next-token cross-entropy, so unlike an adversarial loop the
+loss means something on its own: it should fall and keep falling. Two files are
+written — `voice.safetensors` (the weight EMA, what you want) and
+`voice.raw.safetensors` (the live weights). `s2` fine-tuning is not implemented
+yet, so timbre still comes from the reference clip.
+
 ## Crate layout
 
 Three tiers, and the names say which is which.
@@ -159,7 +183,7 @@ Three tiers, and the names say which is which.
 |-------|------|
 | `rvc-core` + `rvc-train` + `rvc-cli` | voice conversion → binary `rvc` |
 | `stt-core` + `stt-cli` | speech recognition, Burn **or** ONNX Runtime → binary `stt` |
-| `tts-core` + `tts-cli` | speech synthesis → binary `tts` |
+| `tts-core` + `tts-train` + `tts-cli` | speech synthesis → binary `tts` |
 | `voice-cli` | the integration → binary `voice` |
 
 Two rules keep it that way. **No engine depends on another engine** — anything

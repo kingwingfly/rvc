@@ -19,13 +19,15 @@ path = "src/main.rs"
 
 [features]
 default = ["cuda", "tch", "wgpu", "onnx"]
-cuda = ["tts-core/cuda", "burn/cuda"]
-tch = ["tts-core/tch", "burn/tch"]
-wgpu = ["tts-core/wgpu", "burn/wgpu"]
-onnx = ["tts-core/onnx"]
+cuda = ["tts-core/cuda", "tts-train/cuda", "burn/cuda"]
+tch = ["tts-core/tch", "tts-train/tch", "burn/tch"]
+wgpu = ["tts-core/wgpu", "tts-train/wgpu", "burn/wgpu"]
+onnx = ["tts-core/onnx", "tts-train/onnx"]
 
 [dependencies]
 tts-core.workspace = true
+tts-train.workspace = true
+train-kit.workspace = true
 text-kit.workspace = true
 audio-kit.workspace = true
 hub-kit.workspace = true

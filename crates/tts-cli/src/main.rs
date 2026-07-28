@@ -25,6 +25,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Fine-tune GPT-SoVITS on a corpus of audio with transcripts.
+    Train(tts_cli::TrainArgs),
     /// Print a shell completion script (bash, zsh, fish, powershell, elvish).
     Completions(CompletionsArgs),
 }
@@ -35,6 +37,7 @@ async fn main() -> Result<()> {
     cli_kit::init_logging(None);
     match cli.command {
         None => tts_cli::run(cli.synth).await,
+        Some(Command::Train(a)) => tts_cli::train::run(a).await,
         Some(Command::Completions(a)) => cli_kit::completions(a, Cli::command()),
     }
 }

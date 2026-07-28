@@ -133,6 +133,30 @@ where
     Ok(module.load_from(&mut store)?)
 }
 
+/// Load a safetensors checkpoint that [`save_safetensors`] wrote.
+///
+/// The difference from [`load_safetensors_into`] is the missing
+/// `PyTorchToBurnAdapter`, and it is not cosmetic: that adapter transposes Linear
+/// weights from PyTorch's `[out, in]` to Burn's `[in, out]`, but a file this
+/// toolkit saved is *already* in Burn's layout. Loading one through the
+/// PyTorch path transposes it a second time — which at least fails loudly on
+/// `ShapeMismatch` for a rectangular weight, and would silently transpose a
+/// square one.
+pub fn load_burn_safetensors_into<B, M>(
+    module: &mut M,
+    path: &Path,
+) -> Result<ApplyResult, Box<dyn Error>>
+where
+    B: Backend,
+    M: ModuleSnapshot<B>,
+{
+    // `Upcast` stays: training can save fp16 and inference runs fp32.
+    let mut store = SafetensorsStore::from_file(path)
+        .with_from_adapter(Upcast)
+        .allow_partial(true);
+    Ok(module.load_from(&mut store)?)
+}
+
 /// Write a module to a safetensors file, replacing whatever was there.
 ///
 /// Overwrite rather than fail: re-running training to an existing output must
@@ -219,5 +243,31 @@ mod tests {
             DType::F32,
             "fp32 must be left alone, not narrowed"
         );
+    }
+
+    #[test]
+    fn a_saved_module_loads_back_unchanged() {
+        // The regression: `load_safetensors_into` applies `PyTorchToBurnAdapter`
+        // because Hugging Face ships `[out, in]` Linear weights, but a file we
+        // saved ourselves is already `[in, out]`. Reading one back through that
+        // path transposes it a second time. A rectangular weight makes the bug
+        // visible — square dims would have loaded "fine" and silently scrambled.
+        type B = burn::backend::NdArray;
+        let device = Default::default();
+        let saved = burn::nn::LinearConfig::new(3, 5).init::<B>(&device);
+        let expected = saved.weight.val().to_data();
+
+        let dir = std::env::temp_dir().join("burn-kit-roundtrip");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("linear.safetensors");
+        save_safetensors::<B, _>(&saved, &path).unwrap();
+
+        let mut loaded = burn::nn::LinearConfig::new(3, 5).init::<B>(&device);
+        let result = load_burn_safetensors_into::<B, _>(&mut loaded, &path).unwrap();
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(loaded.weight.val().dims(), [3, 5]);
+        loaded.weight.val().to_data().assert_eq(&expected, true);
+
+        std::fs::remove_file(&path).ok();
     }
 }

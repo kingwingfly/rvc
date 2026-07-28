@@ -125,7 +125,7 @@ impl<B: Backend> Synthesizer<B> {
 
         let t2s_config = T2sConfig::default();
         let mut t2s = T2s::<B>::new(&t2s_config, device);
-        t2s.load_pytorch(s1).map_err(|e| weights("s1", e))?;
+        t2s.load_weights(s1).map_err(|e| weights("s1", e))?;
 
         let mut sovits = SovitsPartial::<B>::new(&SovitsConfig::default(), device);
         sovits.load_pytorch(s2).map_err(|e| weights("s2", e))?;

@@ -1,0 +1,31 @@
+[package]
+name = "tts-train"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Native (Rust/Burn) GPT-SoVITS fine-tuning for the voice toolkit"
+
+[features]
+# Compute backends, mirroring `rvc-train`'s. The loop is generic over
+# `AutodiffBackend`, so these only decide what gets linked.
+cuda = ["burn/cuda", "burn-kit/cuda", "tts-core/cuda"]
+tch = ["burn/tch", "burn-kit/tch", "tts-core/tch"]
+wgpu = ["burn/wgpu", "burn-kit/wgpu", "tts-core/wgpu"]
+onnx = ["tts-core/onnx"]
+
+[dependencies]
+burn-gptsovits.workspace = true
+burn-kit.workspace = true
+train-kit.workspace = true
+text-kit.workspace = true
+tts-core.workspace = true
+audio-kit.workspace = true
+burn = { workspace = true, features = ["autodiff", "train", "tui", "metrics"] }
+futures.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+burn-ndarray = "0.21"

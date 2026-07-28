@@ -246,6 +246,7 @@ pub struct T2s<B: Backend> {
     h: T2sStack<B>,
     ar_predict_layer: Linear<B>,
     n_layer: usize,
+    vocab_size: usize,
 }
 
 /// An embedding under the extra `word_embeddings` level the checkpoint has.
@@ -274,6 +275,7 @@ impl<B: Backend> T2s<B> {
                 .with_bias(false)
                 .init(device),
             n_layer: cfg.n_layer,
+            vocab_size: cfg.vocab_size,
         }
     }
 
@@ -323,6 +325,33 @@ impl<B: Backend> T2s<B> {
         self.run(x, Some(mask), state)
     }
 
+    /// Logits for **every** audio position — the training forward.
+    ///
+    /// Inference wants only the last position, because it generates one token at
+    /// a time. Training wants all of them at once: each predicts the next token,
+    /// so one pass over a clip supplies as many examples as it has tokens. The
+    /// text positions are dropped; nothing predicts a phoneme.
+    ///
+    /// Returns `[n_audio, vocab]`, for one clip at a time.
+    pub fn forward_prompt_all(&self, text: Tensor<B, 3>, audio: Tensor<B, 3>) -> Tensor<B, 2> {
+        let n_text = text.dims()[1];
+        let n_audio = audio.dims()[1];
+        let x = Tensor::cat(vec![text, audio], 1);
+        let mask = prompt_mask::<B>(n_text, n_audio, &x.device());
+
+        let mut h = x;
+        let mut state = self.state();
+        for (i, layer) in self.h.layers.iter().enumerate() {
+            h = layer.forward(h, Some(mask.clone()), &mut state.layers[i]);
+        }
+
+        let width = h.dims()[2];
+        let audio_only = h.slice([0..1, n_text..n_text + n_audio, 0..width]);
+        self.ar_predict_layer
+            .forward(audio_only)
+            .reshape([n_audio, self.vocab_size])
+    }
+
     /// Run the stack over `x` and return logits for its final position.
     ///
     /// `x` is already embedded, and every position it carries is new — the cache
@@ -351,6 +380,20 @@ impl<B: Backend> T2s<B> {
         let width = h.dims()[2];
         let last = h.slice([0..batch, seq - 1..seq, 0..width]);
         self.ar_predict_layer.forward(last).squeeze_dim::<2>(1)
+    }
+
+    /// Load weights, dispatching on extension: a `.ckpt` from upstream, or a
+    /// `.safetensors` this toolkit fine-tuned. Both are `s1`; only the container
+    /// differs.
+    pub fn load_weights(
+        &mut self,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<burn_store::ApplyResult, Box<dyn std::error::Error>> {
+        let path = path.as_ref();
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("safetensors") => burn_kit::store::load_burn_safetensors_into::<B, _>(self, path),
+            _ => self.load_pytorch(path),
+        }
     }
 
     /// Load an `s1*.ckpt`.

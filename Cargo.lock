@@ -7713,7 +7713,9 @@ dependencies = [
  "text-kit",
  "tokio",
  "tracing",
+ "train-kit",
  "tts-core",
+ "tts-train",
 ]
 
 [[package]]
@@ -7730,6 +7732,23 @@ dependencies = [
  "thiserror 2.0.19",
  "tokenizers 0.23.1",
  "tracing",
+]
+
+[[package]]
+name = "tts-train"
+version = "0.1.0"
+dependencies = [
+ "audio-kit",
+ "burn",
+ "burn-gptsovits",
+ "burn-kit",
+ "burn-ndarray",
+ "futures",
+ "text-kit",
+ "thiserror 2.0.19",
+ "tracing",
+ "train-kit",
+ "tts-core",
 ]
 
 [[package]]

@@ -25,3 +25,8 @@ tracing.workspace = true
 burn = { workspace = true, optional = true }
 burn-store = { workspace = true, optional = true }
 tch = { workspace = true, optional = true }
+
+# The round-trip test in `store` needs a backend to build a module on; ndarray is
+# the one that needs no GPU and no system library.
+[dev-dependencies]
+burn = { workspace = true, features = ["ndarray"] }

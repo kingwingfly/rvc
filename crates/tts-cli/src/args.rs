@@ -49,18 +49,24 @@ impl From<Lang> for text_kit::Language {
 pub struct TtsArgs {
     /// Reference recording of the voice to clone (any format ffmpeg reads).
     /// A few seconds of clean speech is what the model expects.
-    #[arg(short, long, required_unless_present = "model_dir")]
+    // Checked in `run` rather than by clap: these are flattened into a command
+    // that also has a `train` subcommand, and clap would demand them there too.
+    #[arg(short, long)]
     pub reference: Option<PathBuf>,
     /// What is said in the reference recording. Required, and not a nicety:
     /// `s1` works by continuation, so it is primed with the reference's
     /// phonemes beside the reference's audio. Without it the model is shown
     /// text and audio that disagree and stops after a token or two.
-    #[arg(short = 't', long, required_unless_present = "model_dir")]
+    #[arg(short = 't', long)]
     pub reference_text: Option<String>,
     /// Directory holding `chinese-hubert-base/`, an `s1*.ckpt` and an `s2G*.pth`
     /// [default: auto-downloaded from Hugging Face].
     #[arg(short = 'm', long = "models")]
     pub model_dir: Option<PathBuf>,
+    /// Fine-tuned `s1` weights, overriding the base model's. This is what
+    /// `tts train` writes.
+    #[arg(long, value_name = "SAFETENSORS")]
+    pub s1: Option<PathBuf>,
     /// Directory holding the ONNX prosody encoder. Without it the model gets
     /// zero prosody features — intelligible, but flatter on Chinese.
     #[arg(long)]
@@ -101,6 +107,19 @@ pub struct TtsArgs {
 }
 
 pub async fn run(args: TtsArgs) -> Result<()> {
+    // Before anything is fetched or loaded. Clap cannot enforce these — they are
+    // flattened into a command that also has a `train` subcommand, which does not
+    // want them — so `run` is where "required" is decided, and a missing flag
+    // should cost a message rather than a model load.
+    let reference = args
+        .reference
+        .as_ref()
+        .context("a --reference recording is required")?;
+    let reference_text = args
+        .reference_text
+        .clone()
+        .context("--reference-text is required: it is what `s1` continues from")?;
+
     let dir = match &args.model_dir {
         Some(dir) => dir.clone(),
         None => {
@@ -110,7 +129,11 @@ pub async fn run(args: TtsArgs) -> Result<()> {
                 .context("failed to fetch the GPT-SoVITS models")?
         }
     };
-    let paths = hub_kit::gptsovits_paths(&dir)?;
+    let mut paths = hub_kit::gptsovits_paths(&dir)?;
+    if let Some(s1) = &args.s1 {
+        tracing::info!("fine-tuned s1: {}", s1.display());
+        paths.s1 = s1.clone();
+    }
 
     let prosody: Option<Box<dyn tts_core::ProsodyEncoder>> = {
         let dir = match &args.prosody {
@@ -140,21 +163,12 @@ pub async fn run(args: TtsArgs) -> Result<()> {
         }
     };
 
-    let reference = args
-        .reference
-        .as_ref()
-        .context("a --reference recording is required")?;
     let audio = read_reference(reference).await?;
     tracing::info!(
         "reference: {} ({:.1} s)",
         reference.display(),
         audio.len() as f32 / tts_core::ANALYSIS_SR as f32
     );
-
-    let reference_text = args
-        .reference_text
-        .clone()
-        .context("--reference-text is required: it is what `s1` continues from")?;
 
     let mut model = tokio::task::block_in_place(|| {
         load(
@@ -218,6 +232,17 @@ pub async fn run(args: TtsArgs) -> Result<()> {
 
     out.flush().await.context("final flush")?;
     tracing::info!("{spoken} lines");
+
+    // Do not unwind the models. Dropping them aborts the process with glibc's
+    // "corrupted double-linked list" *after* every sample has been written —
+    // harmless to the audio, fatal to the exit code, which for a filter in a
+    // pipeline is the part that gets checked. It needs both an ONNX Runtime
+    // session on the CUDA execution provider and a CUDA Burn backend to
+    // reproduce: `--prosody` omitted exits 0, `CUDA_VISIBLE_DEVICES=` exits 0,
+    // and `rvc convert` drives the same two runtimes without tripping it.
+    // The audio is already flushed, so the only thing skipped here is handing
+    // memory back moments before the kernel reclaims it anyway.
+    std::mem::forget(model);
     Ok(())
 }
 

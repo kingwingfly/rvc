@@ -107,3 +107,110 @@ pub fn load(
         ),
     }
 }
+
+/// Everything a fine-tune needs, gathered so the per-backend arms below stay
+/// one line each.
+pub struct TrainInputs<'a> {
+    pub hubert: &'a Path,
+    pub s1: &'a Path,
+    pub s2: &'a Path,
+    pub prosody: Option<&'a Path>,
+    pub pairs: &'a [(std::path::PathBuf, std::path::PathBuf)],
+    pub language: text_kit::Language,
+    pub settings: &'a tts_train::S1Settings,
+    pub out: &'a train_kit::Checkpoint,
+}
+
+/// Prepare the corpus and fine-tune `s1` on the chosen backend.
+///
+/// The frozen encoders run on the *inner* backend — preparation needs no
+/// gradients, and building them under autodiff would tape a forward pass per
+/// clip for nothing.
+pub fn train_s1(
+    inputs: TrainInputs<'_>,
+    backend: TtsBackend,
+    device: burn_kit::DeviceSpec,
+) -> Result<()> {
+    let backend = match backend {
+        TtsBackend::Auto => match burn_kit::auto_backend() {
+            burn_kit::AutoBackend::LibTorch => TtsBackend::Tch,
+            burn_kit::AutoBackend::Cuda => TtsBackend::Cuda,
+            burn_kit::AutoBackend::Wgpu => TtsBackend::Wgpu,
+        },
+        explicit => explicit,
+    };
+    tracing::info!("fine-tuning ({backend:?}, device {device})");
+
+    macro_rules! train {
+        ($inner:ty, $device:expr, $name:literal) => {{
+            let device = $device;
+            let prosody = load_prosody(inputs.prosody);
+            let clips = burn_kit::guard_init($name, || -> Result<_> {
+                let (hubert, quantizer) =
+                    tts_train::encoders::<$inner>(inputs.hubert, inputs.s2, &device)?;
+                let mut prosody = prosody;
+                let clips = tts_train::prepare(
+                    inputs.pairs,
+                    &hubert,
+                    &quantizer,
+                    &mut prosody,
+                    inputs.language,
+                    &device,
+                )?;
+                // Never unwound, for the reason `args::run` gives at its own
+                // `mem::forget`: dropping an ONNX Runtime CUDA session beside a
+                // CUDA Burn backend corrupts the heap, and the abort lands at
+                // exit — after the fine-tuned weights are safely on disk, which
+                // makes it look like training crashed when it did not. Verified
+                // both ways: this same run without `--prosody` exits 0.
+                // The cost is the encoder's memory held for the rest of the run;
+                // it is inference-only and idle from here on.
+                std::mem::forget(prosody);
+                Ok(clips)
+            })??;
+
+            burn_kit::guard_init($name, || {
+                tts_train::s1::run::<burn::backend::Autodiff<$inner>>(
+                    inputs.s1,
+                    &clips,
+                    inputs.settings,
+                    inputs.out,
+                    &device,
+                )
+            })??;
+        }};
+    }
+
+    match backend {
+        #[cfg(feature = "tch")]
+        TtsBackend::Tch => train!(
+            burn::backend::LibTorch<f32>,
+            burn_kit::libtorch_device(device)?,
+            "tch"
+        ),
+        #[cfg(feature = "cuda")]
+        TtsBackend::Cuda => train!(burn::backend::Cuda, burn_kit::cuda_device(device)?, "cuda"),
+        #[cfg(feature = "wgpu")]
+        TtsBackend::Wgpu => train!(burn::backend::Wgpu, burn_kit::wgpu_device(device)?, "wgpu"),
+        TtsBackend::Auto => unreachable!("resolved above"),
+        #[allow(unreachable_patterns)]
+        other => anyhow::bail!(
+            "this binary was built without the {other:?} backend (rebuild with `--features …`)"
+        ),
+    }
+    Ok(())
+}
+
+/// Load the prosody encoder if one was found; its absence costs expressiveness
+/// rather than correctness, so it is a warning.
+fn load_prosody(dir: Option<&Path>) -> Option<Box<dyn ProsodyEncoder>> {
+    let dir = dir?;
+    #[cfg(feature = "onnx")]
+    match tts_core::OnnxProsody::load(dir, 1024) {
+        Ok(p) => return Some(Box::new(p) as Box<dyn ProsodyEncoder>),
+        Err(e) => tracing::warn!("prosody encoder failed to load ({e}); training without it"),
+    }
+    #[cfg(not(feature = "onnx"))]
+    let _ = dir;
+    None
+}

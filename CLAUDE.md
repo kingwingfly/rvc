@@ -119,6 +119,23 @@ model just loses mantissa) except on LibTorch, which rejects a conv whose bias
 dtype stops matching its input. fp16 and fp32 checkpoints of the same model are
 both common on the Hub, so test against both.
 
+**A safetensors file is not one format but two**, and `burn-kit` has a loader for
+each. `load_safetensors_into` applies `PyTorchToBurnAdapter`, which transposes
+Linear weights from PyTorch's `[out, in]` to Burn's `[in, out]` — right for a
+Hugging Face checkpoint, wrong for one `save_safetensors` wrote, which is already
+in Burn's layout and gets transposed a second time. Reading our own checkpoint
+back through the PyTorch path is what `load_burn_safetensors_into` exists to
+prevent. Rectangular weights fail loudly on `ShapeMismatch`; a square one would
+load "fine" and be silently scrambled. `burn-kit`'s round-trip test pins it.
+
+**ONNX Runtime on the CUDA execution provider must not be dropped** in a process
+that also drives a CUDA Burn backend: unwinding it aborts with glibc's "corrupted
+double-linked list" *after* all work is done, turning a successful run into exit
+134. `tts` therefore `mem::forget`s its models once stdout is flushed. Omitting
+`--prosody`, or `CUDA_VISIBLE_DEVICES=`, exits 0 — and `rvc convert` drives the
+same two runtimes without tripping it, so this is narrower than "ORT and Burn
+conflict".
+
 Requires **ffmpeg 8.1** dev libraries (and the `ffmpeg` binary for the realtime
 `serve` example). ContentVec + RMVPE ONNX assets auto-download from Hugging Face
 (`rvc models download` to prefetch). Only 48 kHz is supported today.
@@ -137,13 +154,14 @@ Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper
 | `burn-vits` | the VITS blocks RVC and GPT-SoVITS share (both descend from the same source, which is why their `state_dict` names line up): attention stack, `Wn`, flow, posterior encoder, `ResBlock1`, weight-norm convs, discriminators, the family's losses, the differentiable STFT |
 | `burn-rvc` | what is RVC's alone: `SourceModule` (NSF), the 768-dim `TextEncoder`, `GeneratorNsf`, the synthesizer wiring; re-exports `burn-vits` so it still reads as one model |
 | `burn-whisper` | the Whisper network (standalone Burn port); mirrors HF's `state_dict` layout so `openai/whisper-large-v3-turbo` loads unchanged |
-| `burn-gptsovits` | the GPT-SoVITS network. `hubert` at 210/0, `quantizer` at 3/0, and `s2` complete at 773/0 (the 3 unused are the codebook's EMA training statistics). **`s2` is verified numerically, not just structurally**: `examples/reconstruct` round-trips real audio through cnhubert, the quantiser and the synthesizer, and the output tracks the source's energy envelope at r=0.91 against a chance baseline of 0.30. `t2s` (`s1`) is at 295/0. Every network of GPT-SoVITS is now ported; and `tts-core`/`tts-cli` wire them into a working `tts`. What remains is `tts-train`. `examples/keys` lists any checkpoint's tensors, which is the first thing to run against a new one |
+| `burn-gptsovits` | the GPT-SoVITS network. `hubert` at 210/0, `quantizer` at 3/0, and `s2` complete at 773/0 (the 3 unused are the codebook's EMA training statistics). **`s2` is verified numerically, not just structurally**: `examples/reconstruct` round-trips real audio through cnhubert, the quantiser and the synthesizer, and the output tracks the source's energy envelope at r=0.91 against a chance baseline of 0.30. `t2s` (`s1`) is at 295/0. Every network of GPT-SoVITS is now ported; `tts-core`/`tts-cli` wire them into a working `tts`, and `tts-train` fine-tunes `s1`. What remains is `s2` fine-tuning (the VITS GAN half). `examples/keys` lists any checkpoint's tensors, which is the first thing to run against a new one |
 | `rvc-train` | native Rust/Burn adversarial training loop (see `crates/rvc-train/ARCHITECTURE.md`) |
 | `hub-kit` | auto-download every engine's assets from Hugging Face |
 | `rvc-cli` | lib **and** the `rvc` binary (clap): `convert`, `serve`, `models`, `train`, `preprocess` |
 | `stt-core` | speech recognition: Whisper log-mel front-end, BPE vocabulary, KV-cached greedy decode, segmentation via `audio-kit`'s slicer, and **two runtimes** (native Burn, ONNX Runtime) behind one `Engine` trait |
 | `stt-cli` | lib **and** the `stt` binary |
 | `tts-core` | speech synthesis: reference analysis, `s1` sampling with a KV cache, `s2` decode, and the ONNX prosody encoder behind a trait |
+| `tts-train` | fine-tuning GPT-SoVITS. `s1` is plain next-token cross-entropy over `T2s::forward_prompt_all` — one model, one optimizer, one loss, so unlike `rvc-train` the number means something on its own. A corpus is `<stem>.wav` + `<stem>.txt` pairs, and `stt` is how the transcripts get written |
 | `tts-cli` | lib **and** the `tts` binary |
 | `cli-kit` | logging, shell completions and `--device` parsing, shared by all three binaries |
 | `train-kit` | training scaffolding with no model knowledge: `Checkpoint`, `ema_update`, `accumulate`, `materialize`, `Dashboard`. Generic over the module trained, so a GAN and a cross-entropy loop share it |

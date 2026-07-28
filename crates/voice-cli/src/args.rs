@@ -33,6 +33,8 @@ pub enum Command {
     Stt(Box<SttArgs>),
     /// Speech synthesis: text on stdin, f32le mono PCM on stdout.
     Tts(Box<TtsArgs>),
+    /// Fine-tune GPT-SoVITS on a corpus of audio with transcripts.
+    TtsTrain(Box<tts_cli::TrainArgs>),
     /// Download/prefetch shared model assets from Hugging Face.
     Models(ModelsArgs),
     /// Print a shell completion script (bash, zsh, fish, powershell, elvish).
