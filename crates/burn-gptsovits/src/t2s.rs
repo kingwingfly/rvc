@@ -303,18 +303,48 @@ impl<B: Backend> T2s<B> {
         self.ar_audio_position.forward(x, offset)
     }
 
+    /// The opening pass, over the phonemes and the prompt's tokens together.
+    ///
+    /// The mask is **not** one causal triangle across the join. Text attends
+    /// within itself in both directions — it is given, not predicted — while
+    /// audio attends over all the text and causally over itself. A plain causal
+    /// mask would stop each phoneme from seeing the ones after it, which is a
+    /// different and much weaker conditioning that nothing would report.
+    pub fn forward_prompt(
+        &self,
+        text: Tensor<B, 3>,
+        audio: Tensor<B, 3>,
+        state: &mut T2sState<B>,
+    ) -> Tensor<B, 2> {
+        let n_text = text.dims()[1];
+        let n_audio = audio.dims()[1];
+        let x = Tensor::cat(vec![text, audio], 1);
+        let mask = prompt_mask::<B>(n_text, n_audio, &x.device());
+        self.run(x, Some(mask), state)
+    }
+
     /// Run the stack over `x` and return logits for its final position.
     ///
-    /// `x` is already embedded — the caller decides whether it is text, audio or
-    /// the two concatenated, because the prompt is all three.
+    /// `x` is already embedded, and every position it carries is new — the cache
+    /// holds everything before. Used one token at a time after
+    /// [`T2s::forward_prompt`].
     pub fn forward(&self, x: Tensor<B, 3>, state: &mut T2sState<B>) -> Tensor<B, 2> {
-        let [batch, seq, _] = x.dims();
+        let [_, seq, _] = x.dims();
         let n_kv = seq + state.offset;
         let mask = causal_mask::<B>(seq, n_kv, &x.device());
+        self.run(x, Some(mask), state)
+    }
 
+    fn run(
+        &self,
+        x: Tensor<B, 3>,
+        mask: Option<Tensor<B, 2, Bool>>,
+        state: &mut T2sState<B>,
+    ) -> Tensor<B, 2> {
+        let [batch, seq, _] = x.dims();
         let mut h = x;
         for (i, layer) in self.h.layers.iter().enumerate() {
-            h = layer.forward(h, Some(mask.clone()), &mut state.layers[i]);
+            h = layer.forward(h, mask.clone(), &mut state.layers[i]);
         }
         state.offset += seq;
 
@@ -338,6 +368,30 @@ impl<B: Backend> T2s<B> {
             &[(r"^model\.", "")],
         )
     }
+}
+
+/// The prompt's block mask: text sees all text, audio sees all text and its own
+/// past. `true` blocks.
+fn prompt_mask<B: Backend>(
+    n_text: usize,
+    n_audio: usize,
+    device: &B::Device,
+) -> Tensor<B, 2, Bool> {
+    let n = n_text + n_audio;
+    let mut flags = vec![0i32; n * n];
+    for row in 0..n {
+        for col in 0..n {
+            let blocked = if row < n_text {
+                // A phoneme may not look ahead into the audio.
+                col >= n_text
+            } else {
+                // An audio position sees every phoneme, and audio only up to now.
+                col >= n_text && col > row
+            };
+            flags[row * n + col] = blocked as i32;
+        }
+    }
+    Tensor::<B, 2, Int>::from_data(TensorData::new(flags, [n, n]), device).bool()
 }
 
 /// `true` where attention must be blocked — the future, given `n_kv - n_q`

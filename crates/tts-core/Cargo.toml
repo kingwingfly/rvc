@@ -18,6 +18,9 @@ wgpu = ["burn-kit/wgpu"]
 
 [dependencies]
 text-kit.workspace = true
+burn-gptsovits.workspace = true
+burn-vits.workspace = true
+burn = { workspace = true }
 hub-kit.workspace = true
 burn-kit.workspace = true
 # The prosody encoder is inference-only and published as ONNX, so it runs on

@@ -7699,10 +7699,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
+name = "tts-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "audio-kit",
+ "burn",
+ "burn-kit",
+ "clap",
+ "cli-kit",
+ "futures",
+ "hub-kit",
+ "text-kit",
+ "tokio",
+ "tracing",
+ "tts-core",
+]
+
+[[package]]
 name = "tts-core"
 version = "0.1.0"
 dependencies = [
+ "burn",
+ "burn-gptsovits",
  "burn-kit",
+ "burn-vits",
  "hub-kit",
  "ort",
  "text-kit",
@@ -7958,6 +7979,7 @@ dependencies = [
  "rvc-cli",
  "stt-cli",
  "tokio",
+ "tts-cli",
 ]
 
 [[package]]

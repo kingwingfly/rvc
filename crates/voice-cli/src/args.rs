@@ -9,6 +9,7 @@ use clap::{Parser, Subcommand};
 use rvc_cli::args::{CompletionsArgs, ModelsArgs, RvcCommand};
 
 use stt_cli::SttArgs;
+use tts_cli::TtsArgs;
 
 /// voice — speech toolkit: recognition, synthesis and voice conversion, each a
 /// filter that composes in a pipe.
@@ -30,6 +31,8 @@ pub enum Command {
     },
     /// Speech recognition: f32le mono PCM @16 kHz on stdin, text on stdout.
     Stt(Box<SttArgs>),
+    /// Speech synthesis: text on stdin, f32le mono PCM on stdout.
+    Tts(Box<TtsArgs>),
     /// Download/prefetch shared model assets from Hugging Face.
     Models(ModelsArgs),
     /// Print a shell completion script (bash, zsh, fish, powershell, elvish).

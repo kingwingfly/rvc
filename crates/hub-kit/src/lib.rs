@@ -186,3 +186,84 @@ pub async fn fetch_prosody_bert(repo: Option<&str>, cache_dir: Option<&Path>) ->
     }
     Ok(dir.unwrap_or_else(default_cache_dir))
 }
+
+/// The official GPT-SoVITS v2 bundle.
+pub const DEFAULT_GPTSOVITS: (&str, &str) = ("lj1995", "GPT-SoVITS");
+
+/// Files the synthesis path needs from it.
+const GPTSOVITS_FILES: [&str; 4] = [
+    "chinese-hubert-base/config.json",
+    "chinese-hubert-base/pytorch_model.bin",
+    "gsv-v2final-pretrained/s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt",
+    "gsv-v2final-pretrained/s2G2333k.pth",
+];
+
+/// Where each model landed inside a fetched (or hand-assembled) bundle.
+#[derive(Debug, Clone)]
+pub struct GptSovitsPaths {
+    pub hubert: PathBuf,
+    pub s1: PathBuf,
+    pub s2: PathBuf,
+}
+
+/// Fetch the v2 bundle, returning the directory it landed in.
+pub async fn fetch_gptsovits(cache_dir: Option<&Path>) -> Result<PathBuf> {
+    let (owner, name) = DEFAULT_GPTSOVITS;
+    let mut root = None;
+    for file in GPTSOVITS_FILES {
+        let path = fetch(&ModelRef::new(owner, name, file), cache_dir).await?;
+        // Files sit at varying depths inside the snapshot; the root is what the
+        // shallowest one's parent gives.
+        let depth = file.matches('/').count();
+        let mut dir = path.clone();
+        for _ in 0..=depth {
+            dir = dir.parent().map(Path::to_path_buf).unwrap_or(dir);
+        }
+        root = Some(dir);
+    }
+    Ok(root.unwrap_or_else(default_cache_dir))
+}
+
+/// Locate the three checkpoints inside `dir`.
+///
+/// Tolerant about layout because the same directory can come from the Hub's
+/// snapshot or from a hand-assembled folder: `s1`/`s2` are found by extension
+/// and prefix rather than by an exact filename, since those carry epoch and step
+/// numbers that change with every release.
+pub fn gptsovits_paths(dir: &Path) -> Result<GptSovitsPaths> {
+    let hubert = ["chinese-hubert-base/pytorch_model.bin", "pytorch_model.bin"]
+        .iter()
+        .map(|p| dir.join(p))
+        .find(|p| p.exists())
+        .ok_or_else(|| missing("chinese-hubert-base/pytorch_model.bin", dir))?;
+
+    let find = |prefix: &str, ext: &str| -> Option<PathBuf> {
+        for candidate in [dir.join("gsv-v2final-pretrained"), dir.to_path_buf()] {
+            let Ok(entries) = std::fs::read_dir(&candidate) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with(prefix) && name.ends_with(ext) {
+                    return Some(path);
+                }
+            }
+        }
+        None
+    };
+
+    Ok(GptSovitsPaths {
+        hubert,
+        s1: find("s1", ".ckpt").ok_or_else(|| missing("an s1*.ckpt", dir))?,
+        s2: find("s2G", ".pth").ok_or_else(|| missing("an s2G*.pth", dir))?,
+    })
+}
+
+fn missing(what: &str, dir: &Path) -> HubError {
+    HubError::Io(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        format!("{what} not found under {}", dir.display()),
+    ))
+}

@@ -23,11 +23,12 @@ out.
 |---|---|---|
 | **`rvc`** | voice conversion — `convert`, `serve`, `train`, `preprocess` | retimbring recordings is all you need |
 | **`stt`** | speech recognition — PCM in, text out | transcription is all you need |
-| **`voice`** | the whole toolkit: `voice rvc …`, `voice stt` | you want them together |
+| **`tts`** | speech synthesis — text in, PCM out | you want a voice to read text |
+| **`voice`** | the whole toolkit: `voice rvc …`, `voice stt`, `voice tts` | you want them together |
 
 Each engine stands alone and pulls in only what it uses — installing `stt` costs
 you no ONNX Runtime and none of the RVC stack. `voice` is an *integration*: it
-depends on `rvc-cli` and `stt-cli` as libraries, so a flag cannot exist on one
+depends on `rvc-cli`, `stt-cli` and `tts-cli` as libraries, so a flag cannot exist on one
 spelling and not the other.
 
 ```sh
@@ -36,6 +37,7 @@ export LIBTORCH=$PWD/libtorch                      # optional; must be 2.9.0
 cargo build --release                              # all three binaries
 cargo build --release -p rvc-cli                   # just `rvc`
 cargo build --release -p stt-cli                   # just `stt`
+cargo build --release -p tts-cli                   # just `tts`
 ```
 
 A **debug build can run models at full speed** — the `dev` profile optimises
@@ -52,7 +54,7 @@ the requirements are the same for both binaries.
 |---|---|---|
 | **`rvc`** — voice conversion (RVC v2) | **works**, inference + native training | [crates/rvc-cli/README.md](crates/rvc-cli/README.md) |
 | **`stt`** — speech recognition (Whisper large-v3-turbo) | **works** — `voice stt` | below |
-| **`tts`** — speech synthesis (GPT-SoVITS v2) | in progress — front-end and cnhubert done | — |
+| **`tts`** — speech synthesis (GPT-SoVITS v2) | **works** — `voice tts` | below |
 | **`translate`** | not started; pipe to any external tool meanwhile | — |
 
 `rvc` runs on three interchangeable compute backends — ONNX Runtime, and native
@@ -95,6 +97,38 @@ preprocess`, which uses energy only to find silent gaps and never to gate
 quiet-but-present sound, so soft and breathy speech survives the cut.
 `--silence-db` and `--min-silence` tune where the cuts land.
 
+## `voice tts`
+
+Text on stdin, raw f32le mono PCM on stdout. GPT-SoVITS clones a voice from a
+few seconds of reference audio:
+
+```sh
+echo "今天天气很好" \
+  | tts --reference clip.wav --reference-text "不要再欺负他了" \
+  | ffplay -f f32le -ar 32000 -ac 1 -
+```
+
+`--reference-text` is required and is not bookkeeping. `s1` generates by
+*continuation*: it is primed with the reference's phonemes beside the
+reference's semantic tokens and then asked to keep going with your text. Given
+only the target text it sees phonemes and audio that disagree, finds nothing to
+continue, and stops after a token or two.
+
+`--sr` resamples, which is what makes the pipeline this toolkit exists for:
+
+```sh
+tts --reference clip.wav --reference-text "…" --sr 16000 < script.txt \
+  | rvc serve -m voice.safetensors --model-sr 48000 > out.f32le
+```
+
+One line of stdin is one utterance. Weights (cnhubert, `s1`, `s2` and the ONNX
+prosody encoder) download on first use.
+
+**Chinese only for now.** `--language en|ja` errors rather than guessing, because
+running Japanese through the Chinese front-end produces fluent-sounding wrong
+audio. The accuracy ceiling on Chinese is the polyphone dictionary — see
+`text-kit`.
+
 ## Crate layout
 
 Three tiers, and the names say which is which.
@@ -109,7 +143,6 @@ Three tiers, and the names say which is which.
 | `cli-kit` | logging, shell completions, `--device` parsing |
 | `train-kit` | checkpoints, weight EMA, gradient accumulation, the live dashboard — generic over the module being trained |
 | `text-kit` | grapheme-to-phoneme for TTS: language splitting, Mandarin g2p, GPT-SoVITS's phoneme table. No model, no tensors |
-| `tts-core` | speech synthesis pipeline. Prosody features done; the T2S and SoVITS stages next |
 
 **Networks**, named after the model, holding no app dependencies:
 
@@ -118,7 +151,7 @@ Three tiers, and the names say which is which.
 | `burn-vits` | the VITS blocks RVC and GPT-SoVITS share — attention, WaveNet, flow, posterior encoder, ResBlock1, discriminators — plus the family's losses and its differentiable STFT |
 | `burn-rvc` | what is RVC's alone: the NSF source module, the 768-dim content encoder, the synthesizer wiring |
 | `burn-whisper` | the Whisper network; loads HF safetensors unchanged |
-| `burn-gptsovits` | the GPT-SoVITS network. cnhubert done; VQ/SoVITS and the T2S transformer in progress |
+| `burn-gptsovits` | the GPT-SoVITS network: cnhubert, the quantiser, `s2` (SoVITS) and `s1` (T2S) |
 
 **Engines**, one `-core` and one `-cli` apiece, all the same shape:
 
@@ -126,6 +159,7 @@ Three tiers, and the names say which is which.
 |-------|------|
 | `rvc-core` + `rvc-train` + `rvc-cli` | voice conversion → binary `rvc` |
 | `stt-core` + `stt-cli` | speech recognition, Burn **or** ONNX Runtime → binary `stt` |
+| `tts-core` + `tts-cli` | speech synthesis → binary `tts` |
 | `voice-cli` | the integration → binary `voice` |
 
 Two rules keep it that way. **No engine depends on another engine** — anything

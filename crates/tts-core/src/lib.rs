@@ -13,8 +13,12 @@
 
 mod error;
 pub mod prosody;
+mod sample;
+mod synth;
 
 pub use error::{Result, TtsError};
 #[cfg(feature = "onnx")]
 pub use prosody::OnnxProsody;
 pub use prosody::{ProsodyEncoder, ProsodyFeatures};
+pub use sample::{Rng, SampleOptions};
+pub use synth::{ANALYSIS_SR, OUTPUT_SR, Reference, SynthOptions, Synthesizer};

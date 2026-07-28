@@ -5,8 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 `voice` is a pure-Rust speech toolkit whose engines compose over Unix pipes:
-`voice -(stt)-> text -(translate)-> text -(tts)-> voice -(rvc)-> voice`. Only the
-`rvc` stage exists today.
+`voice -(stt)-> text -(translate)-> text -(tts)-> voice -(rvc)-> voice`. Everything
+but `translate` works today.
 
 `rvc` is RVC v2 voice conversion: it retimbres a source voice into a trained
 target voice while preserving content + F0 pitch (so breathy/expressive
@@ -27,8 +27,8 @@ for the authors and unusable for anyone else. The single `.safetensors → ONNX`
 exporter under `export/` is the last exception, gains no new responsibilities,
 and should eventually go.
 
-**One binary per engine, plus `voice`.** `rvc` and `stt` each stand alone and
-pull in only what they use — installing `stt` costs no ONNX Runtime and none of
+**One binary per engine, plus `voice`.** `rvc`, `stt` and `tts` each stand alone
+and pull in only what they use — installing `stt` costs no ONNX Runtime and none of
 the RVC stack. `voice` is the *integration*: it depends on `rvc-cli` and
 `stt-cli` **as libraries**, so an argument is defined exactly once and never
 copied between binaries. Every `*-cli` crate is therefore a lib **and** a bin.
@@ -62,7 +62,7 @@ crates are `*-kit`. `voice-cli` is the only `voice-*` crate.
 export ORT_DYLIB_PATH=/usr/lib/libonnxruntime.so
 export LIBTORCH=$PWD/libtorch   # must be exactly 2.9.0 (what tch 0.22 targets)
 
-cargo build                     # all three binaries: `rvc`, `stt`, `voice`
+cargo build                     # all four binaries: `rvc`, `stt`, `tts`, `voice`
 cargo build --release -p rvc-cli   # just `rvc`, optimised
 
 # `cargo build` (dev) is the right default even for running models: the profile
@@ -137,16 +137,18 @@ Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper
 | `burn-vits` | the VITS blocks RVC and GPT-SoVITS share (both descend from the same source, which is why their `state_dict` names line up): attention stack, `Wn`, flow, posterior encoder, `ResBlock1`, weight-norm convs, discriminators, the family's losses, the differentiable STFT |
 | `burn-rvc` | what is RVC's alone: `SourceModule` (NSF), the 768-dim `TextEncoder`, `GeneratorNsf`, the synthesizer wiring; re-exports `burn-vits` so it still reads as one model |
 | `burn-whisper` | the Whisper network (standalone Burn port); mirrors HF's `state_dict` layout so `openai/whisper-large-v3-turbo` loads unchanged |
-| `burn-gptsovits` | the GPT-SoVITS network. `hubert` at 210/0, `quantizer` at 3/0, and `s2` complete at 773/0 (the 3 unused are the codebook's EMA training statistics). **`s2` is verified numerically, not just structurally**: `examples/reconstruct` round-trips real audio through cnhubert, the quantiser and the synthesizer, and the output tracks the source's energy envelope at r=0.91 against a chance baseline of 0.30. `t2s` (`s1`) is at 295/0. Every network of GPT-SoVITS is now ported; what remains is `tts-core` to wire text → tokens → audio, and `tts-train`. `examples/keys` lists any checkpoint's tensors, which is the first thing to run against a new one |
+| `burn-gptsovits` | the GPT-SoVITS network. `hubert` at 210/0, `quantizer` at 3/0, and `s2` complete at 773/0 (the 3 unused are the codebook's EMA training statistics). **`s2` is verified numerically, not just structurally**: `examples/reconstruct` round-trips real audio through cnhubert, the quantiser and the synthesizer, and the output tracks the source's energy envelope at r=0.91 against a chance baseline of 0.30. `t2s` (`s1`) is at 295/0. Every network of GPT-SoVITS is now ported; and `tts-core`/`tts-cli` wire them into a working `tts`. What remains is `tts-train`. `examples/keys` lists any checkpoint's tensors, which is the first thing to run against a new one |
 | `rvc-train` | native Rust/Burn adversarial training loop (see `crates/rvc-train/ARCHITECTURE.md`) |
-| `hub-kit` | auto-download ContentVec/RMVPE ONNX from Hugging Face |
+| `hub-kit` | auto-download every engine's assets from Hugging Face |
 | `rvc-cli` | lib **and** the `rvc` binary (clap): `convert`, `serve`, `models`, `train`, `preprocess` |
 | `stt-core` | speech recognition: Whisper log-mel front-end, BPE vocabulary, KV-cached greedy decode, segmentation via `audio-kit`'s slicer, and **two runtimes** (native Burn, ONNX Runtime) behind one `Engine` trait |
 | `stt-cli` | lib **and** the `stt` binary |
+| `tts-core` | speech synthesis: reference analysis, `s1` sampling with a KV cache, `s2` decode, and the ONNX prosody encoder behind a trait |
+| `tts-cli` | lib **and** the `tts` binary |
 | `cli-kit` | logging, shell completions and `--device` parsing, shared by all three binaries |
 | `train-kit` | training scaffolding with no model knowledge: `Checkpoint`, `ema_update`, `accumulate`, `materialize`, `Dashboard`. Generic over the module trained, so a GAN and a cross-entropy loop share it |
 | `text-kit` | grapheme-to-phoneme: script-based language splitting, Mandarin g2p (jieba + pinyin + opencpop + tone sandhi), and GPT-SoVITS's 732-symbol table. Pure Rust, no ML, no backend — so it is fully testable without weights |
-| `voice-cli` | the `voice` binary: `rvc-cli` and `stt-cli` nested as `voice rvc …` and `voice stt` |
+| `voice-cli` | the `voice` binary: `rvc-cli`, `stt-cli` and `tts-cli` nested as `voice rvc …`, `voice stt` and `voice tts` |
 
 ### Three runtimes, one path (the key abstraction)
 Everything downstream of the generator is shared: the same `FeatureExtractor`, the
@@ -201,6 +203,14 @@ are the two that stand in the way — and ContentVec is a HuBERT variant, so
 mean lifting that module into a `burn-hubert` of its own, since two engines would
 then share it.
 
+### `s1` generates by continuation (`tts-core`)
+The reference's **transcript** is part of the prompt, not metadata: `s1` is shown
+the reference's phonemes beside the reference's semantic tokens and asked to
+continue with the target's phonemes. Give it only the target text and it sees
+text and audio that disagree, finds nothing to continue, and stops after a token
+or two — a bug that looks like a broken decoder and is not. Hence
+`--reference-text` being required.
+
 ### Verifying a port beyond weight coverage
 Coverage says the module tree matches the checkpoint. It says nothing about
 whether the forward pass computes the right thing, and this repo has already
@@ -214,6 +224,9 @@ Each model therefore needs a second check that exercises arithmetic:
   where shuffling gives 0.30, and spectral flatness 0.17 against 1.0 for noise.
   Cheap, needs no reference implementation, and a mis-wired MRTE or a
   mis-scaled attention fails it loudly.
+- `tts` end to end — synthesise, then transcribe the result with `stt`. Text in
+  and text out are compared by an independent model, which is as close to
+  listening as an automated check gets.
 
 ### The semantic-token boundary (`burn-gptsovits::quantizer`)
 25 Hz token ids over a 1024-entry codebook are what the two stages agree on: T2S
