@@ -19,6 +19,8 @@ use burn::tensor::backend::Backend;
 use burn_vits::{PosteriorEncoder, ResidualCouplingBlock};
 
 use crate::decoder::{Decoder, DecoderConfig};
+use crate::reference::{ReferenceConfig, ReferenceEncoder};
+use crate::text_encoder::{TextEncoder, TextEncoderConfig};
 
 /// The shape of one `s2` checkpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +39,10 @@ pub struct SovitsConfig {
     pub flow_layers: usize,
     /// The waveform decoder.
     pub decoder: DecoderConfig,
+    /// Semantic tokens and phonemes to the prior.
+    pub text_encoder: TextEncoderConfig,
+    /// The speaker vector.
+    pub reference: ReferenceConfig,
 }
 
 impl Default for SovitsConfig {
@@ -50,6 +56,8 @@ impl Default for SovitsConfig {
             n_flows: 4,
             flow_layers: 4,
             decoder: DecoderConfig::default(),
+            text_encoder: TextEncoderConfig::default(),
+            reference: ReferenceConfig::default(),
         }
     }
 }
@@ -67,6 +75,10 @@ pub struct SovitsPartial<B: Backend> {
     pub flow: ResidualCouplingBlock<B>,
     /// Latent to waveform.
     pub dec: Decoder<B>,
+    /// Semantic tokens and phonemes to the prior.
+    pub enc_p: TextEncoder<B>,
+    /// Reference audio to the speaker vector.
+    pub ref_enc: ReferenceEncoder<B>,
 }
 
 impl<B: Backend> SovitsPartial<B> {
@@ -88,6 +100,8 @@ impl<B: Backend> SovitsPartial<B> {
                 device,
             ),
             dec: Decoder::new(&cfg.decoder, device),
+            enc_p: TextEncoder::new(&cfg.text_encoder, device),
+            ref_enc: ReferenceEncoder::new(&cfg.reference, device),
         }
     }
 
@@ -114,17 +128,45 @@ impl<B: Backend> SovitsPartial<B> {
 
     /// Load the parts of an `s2G*.pth` that are modelled so far.
     ///
-    /// The state dict sits under `"weight"`. Upstream stores the flow's coupling
-    /// layers at even indices with parameter-free `Flip`s between them, so they
-    /// are renumbered — the same remap `burn-rvc` needs, for the same reason.
+    /// The state dict sits under `"weight"`. Two families of remap, both the
+    /// same ones `burn-rvc` needs and for the same reason — the two projects
+    /// inherited the layout together: each attention stack is stored as four
+    /// parallel lists rather than a list of layers, and the flow's couplings sit
+    /// at even indices with parameter-free `Flip`s between them. A third, of the
+    /// same kind, renumbers `ref_enc.spectral`.
     ///
-    /// Everything not yet built is reported unused; that count is how much of
-    /// `s2` is left.
+    /// The four `quantizer.*` tensors are reported unused on purpose: they load
+    /// through [`crate::Quantizer`], which is separately useful for turning a
+    /// corpus into semantic tokens without any of the synthesizer.
     pub fn load_pytorch(
         &mut self,
         path: impl AsRef<std::path::Path>,
     ) -> Result<burn_store::ApplyResult, Box<dyn std::error::Error>> {
         let remaps = [
+            // Upstream keeps each attention stack as four parallel lists;
+            // `burn-vits` groups them per layer. Three stacks, so the stack name
+            // is captured alongside the index.
+            (
+                r"^enc_p\.(encoder_ssl|encoder_text|encoder2)\.attn_layers\.(\d+)\.",
+                "enc_p.$1.layers.$2.attn.",
+            ),
+            (
+                r"^enc_p\.(encoder_ssl|encoder_text|encoder2)\.norm_layers_1\.(\d+)\.",
+                "enc_p.$1.layers.$2.norm_1.",
+            ),
+            (
+                r"^enc_p\.(encoder_ssl|encoder_text|encoder2)\.ffn_layers\.(\d+)\.",
+                "enc_p.$1.layers.$2.ffn.",
+            ),
+            (
+                r"^enc_p\.(encoder_ssl|encoder_text|encoder2)\.norm_layers_2\.(\d+)\.",
+                "enc_p.$1.layers.$2.norm_2.",
+            ),
+            // `ref_enc.spectral` is an `nn.Sequential` of
+            // linear/activation/dropout, so its two learnable layers land at
+            // indices 0 and 3. Only the learnable ones exist here.
+            (r"^ref_enc\.spectral\.3\.", "ref_enc.spectral.1."),
+            // `Flip` layers sit between the couplings and carry no parameters.
             (r"^flow\.flows\.2\.", "flow.flows.1."),
             (r"^flow\.flows\.4\.", "flow.flows.2."),
             (r"^flow\.flows\.6\.", "flow.flows.3."),

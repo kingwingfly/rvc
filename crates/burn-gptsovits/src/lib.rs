@@ -15,9 +15,13 @@
 mod decoder;
 mod hubert;
 mod quantizer;
+mod reference;
 mod sovits;
+mod text_encoder;
 
 pub use decoder::{Decoder, DecoderConfig};
 pub use hubert::{Hubert, HubertConfig};
 pub use quantizer::{Codebook, Quantizer, QuantizerConfig, Vq};
+pub use reference::{ReferenceConfig, ReferenceEncoder};
 pub use sovits::{SovitsConfig, SovitsPartial};
+pub use text_encoder::{TextEncoder, TextEncoderConfig};
