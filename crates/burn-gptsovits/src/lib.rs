@@ -13,5 +13,7 @@
 //! Nothing here names a compute backend, and there are no app dependencies.
 
 mod hubert;
+mod quantizer;
 
 pub use hubert::{Hubert, HubertConfig};
+pub use quantizer::{Codebook, Quantizer, QuantizerConfig, Vq};

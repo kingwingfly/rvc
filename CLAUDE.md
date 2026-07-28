@@ -137,7 +137,7 @@ Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper
 | `burn-vits` | the VITS blocks RVC and GPT-SoVITS share (both descend from the same source, which is why their `state_dict` names line up): attention stack, `Wn`, flow, posterior encoder, `ResBlock1`, weight-norm convs, discriminators, the family's losses, the differentiable STFT |
 | `burn-rvc` | what is RVC's alone: `SourceModule` (NSF), the 768-dim `TextEncoder`, `GeneratorNsf`, the synthesizer wiring; re-exports `burn-vits` so it still reads as one model |
 | `burn-whisper` | the Whisper network (standalone Burn port); mirrors HF's `state_dict` layout so `openai/whisper-large-v3-turbo` loads unchanged |
-| `burn-gptsovits` | the GPT-SoVITS network. `hubert` (cnhubert) done at 210/0; the VQ/SoVITS stage and the T2S transformer are next. `examples/keys` lists any checkpoint's tensors, which is the first thing to run against a new one |
+| `burn-gptsovits` | the GPT-SoVITS network. `hubert` (cnhubert) at 210/0 and `quantizer` (`extract_latent`) at 3/0; the rest of `s2` and the T2S transformer are next. `examples/keys` lists any checkpoint's tensors, which is the first thing to run against a new one |
 | `rvc-train` | native Rust/Burn adversarial training loop (see `crates/rvc-train/ARCHITECTURE.md`) |
 | `hub-kit` | auto-download ContentVec/RMVPE ONNX from Hugging Face |
 | `rvc-cli` | lib **and** the `rvc` binary (clap): `convert`, `serve`, `models`, `train`, `preprocess` |
@@ -200,6 +200,16 @@ are the two that stand in the way — and ContentVec is a HuBERT variant, so
 `burn-gptsovits`'s `hubert.rs` already covers its architecture. Porting it would
 mean lifting that module into a `burn-hubert` of its own, since two engines would
 then share it.
+
+### The semantic-token boundary (`burn-gptsovits::quantizer`)
+25 Hz token ids over a 1024-entry codebook are what the two stages agree on: T2S
+predicts them from text, SoVITS renders them to waveform, and building a training
+set is running `Quantizer::encode` over the corpus. The rate comes from one
+stride — cnhubert's 50 Hz halved — and everything downstream (tokens per second,
+T2S sequence length) follows from it.
+
+`s2G2333k.pth` confirms `text-kit`'s phoneme table independently:
+`enc_p.text_embedding` is `[732, 192]`, and 732 is exactly the symbol count.
 
 ### The phoneme table is a compatibility contract (`text-kit`)
 `text_kit::symbols::SYMBOLS` is GPT-SoVITS's v2 vocabulary verbatim, 732 entries

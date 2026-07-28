@@ -6,13 +6,13 @@
 //! It cannot catch a wrong *formula* — post-norm where the reference is pre-norm
 //! loads at 100% and is wrong — which is what end-to-end listening is for.
 //!
-//! Usage: `cargo run -p burn-gptsovits --example load -- [--backend ndarray|cuda|tch] hubert <pytorch_model.bin>`
+//! Usage: `cargo run -p burn-gptsovits --example load -- [--backend ndarray|cuda|tch] <hubert|quantizer> <checkpoint>`
 
 #[path = "common/mod.rs"]
 mod common;
 
 use burn::tensor::backend::Backend;
-use burn_gptsovits::{Hubert, HubertConfig};
+use burn_gptsovits::{Hubert, HubertConfig, Quantizer, QuantizerConfig};
 
 struct Load {
     component: String,
@@ -26,8 +26,12 @@ impl common::Job for Load {
                 let mut model = Hubert::<B>::new(&HubertConfig::chinese_base(), device);
                 model.load_pytorch(&self.weights)
             }
+            "quantizer" => {
+                let mut model = Quantizer::<B>::new(&QuantizerConfig::default(), 1, device);
+                model.load_pytorch(&self.weights)
+            }
             other => {
-                eprintln!("unknown component `{other}` (known: hubert)");
+                eprintln!("unknown component `{other}` (known: hubert, quantizer)");
                 std::process::exit(2);
             }
         }
