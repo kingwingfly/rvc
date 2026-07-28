@@ -18,8 +18,10 @@ use burn::tensor::Tensor;
 use burn::tensor::backend::Backend;
 use burn_vits::{PosteriorEncoder, ResidualCouplingBlock};
 
+use crate::decoder::{Decoder, DecoderConfig};
+
 /// The shape of one `s2` checkpoint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SovitsConfig {
     /// Linear-spectrogram bins the posterior encoder consumes — `n_fft / 2 + 1`.
     pub spec_channels: usize,
@@ -33,6 +35,8 @@ pub struct SovitsConfig {
     pub n_flows: usize,
     /// WaveNet depth inside each coupling layer — 4 here, where RVC uses 3.
     pub flow_layers: usize,
+    /// The waveform decoder.
+    pub decoder: DecoderConfig,
 }
 
 impl Default for SovitsConfig {
@@ -45,6 +49,7 @@ impl Default for SovitsConfig {
             gin_channels: 512,
             n_flows: 4,
             flow_layers: 4,
+            decoder: DecoderConfig::default(),
         }
     }
 }
@@ -52,14 +57,16 @@ impl Default for SovitsConfig {
 /// The parts of `s2` that exist so far.
 ///
 /// Deliberately not called `Synthesizer` yet: it cannot synthesise until `enc_p`
-/// and `dec` are here, and a name that promises otherwise would be the kind of
-/// thing that reads as finished in a diff.
+/// is here to turn tokens and text into a prior, and a name that promises
+/// otherwise would be the kind of thing that reads as finished in a diff.
 #[derive(Module, Debug)]
 pub struct SovitsPartial<B: Backend> {
     /// Spectrogram to latent. Training only — inference goes through `enc_p`.
     pub enc_q: PosteriorEncoder<B>,
     /// Latent to prior, invertible and speaker-conditioned.
     pub flow: ResidualCouplingBlock<B>,
+    /// Latent to waveform.
+    pub dec: Decoder<B>,
 }
 
 impl<B: Backend> SovitsPartial<B> {
@@ -80,6 +87,7 @@ impl<B: Backend> SovitsPartial<B> {
                 cfg.flow_layers,
                 device,
             ),
+            dec: Decoder::new(&cfg.decoder, device),
         }
     }
 

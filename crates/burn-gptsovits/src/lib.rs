@@ -12,10 +12,12 @@
 //!
 //! Nothing here names a compute backend, and there are no app dependencies.
 
+mod decoder;
 mod hubert;
 mod quantizer;
 mod sovits;
 
+pub use decoder::{Decoder, DecoderConfig};
 pub use hubert::{Hubert, HubertConfig};
 pub use quantizer::{Codebook, Quantizer, QuantizerConfig, Vq};
 pub use sovits::{SovitsConfig, SovitsPartial};
