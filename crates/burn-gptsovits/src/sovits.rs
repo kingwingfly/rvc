@@ -14,11 +14,12 @@
 //! | `ref_enc` | new — a mel style encoder |
 
 use burn::module::Module;
-use burn::tensor::Tensor;
 use burn::tensor::backend::Backend;
+use burn::tensor::{Int, Tensor};
 use burn_vits::{PosteriorEncoder, ResidualCouplingBlock};
 
 use crate::decoder::{Decoder, DecoderConfig};
+use crate::quantizer::{Quantizer, QuantizerConfig};
 use crate::reference::{ReferenceConfig, ReferenceEncoder};
 use crate::text_encoder::{TextEncoder, TextEncoderConfig};
 
@@ -43,6 +44,8 @@ pub struct SovitsConfig {
     pub text_encoder: TextEncoderConfig,
     /// The speaker vector.
     pub reference: ReferenceConfig,
+    /// The codebook.
+    pub quantizer: QuantizerConfig,
 }
 
 impl Default for SovitsConfig {
@@ -58,6 +61,7 @@ impl Default for SovitsConfig {
             decoder: DecoderConfig::default(),
             text_encoder: TextEncoderConfig::default(),
             reference: ReferenceConfig::default(),
+            quantizer: QuantizerConfig::default(),
         }
     }
 }
@@ -79,6 +83,9 @@ pub struct SovitsPartial<B: Backend> {
     pub enc_p: TextEncoder<B>,
     /// Reference audio to the speaker vector.
     pub ref_enc: ReferenceEncoder<B>,
+    /// The codebook. Loaded separately — see [`SovitsPartial::load_pytorch`].
+    pub quantizer: Quantizer<B>,
+    reference_width: usize,
 }
 
 impl<B: Backend> SovitsPartial<B> {
@@ -102,6 +109,8 @@ impl<B: Backend> SovitsPartial<B> {
             dec: Decoder::new(&cfg.decoder, device),
             enc_p: TextEncoder::new(&cfg.text_encoder, device),
             ref_enc: ReferenceEncoder::new(&cfg.reference, device),
+            quantizer: Quantizer::new(&cfg.quantizer, 1, device),
+            reference_width: cfg.reference.in_dim,
         }
     }
 
@@ -126,6 +135,62 @@ impl<B: Backend> SovitsPartial<B> {
         (z, m, logs)
     }
 
+    /// The speaker vector for a reference spectrogram.
+    ///
+    /// `refer`: `[batch, spec_channels, frames]`. Only the first `in_dim` bins
+    /// are used — upstream slices `refer[:, :704]`, which is where that width
+    /// comes from rather than from any mel count.
+    pub fn speaker(&self, refer: Tensor<B, 3>) -> Tensor<B, 3> {
+        let [batch, _, frames] = refer.dims();
+        let width = self.reference_width;
+        self.ref_enc
+            .forward(refer.slice([0..batch, 0..width, 0..frames]))
+    }
+
+    /// Semantic tokens to waveform.
+    ///
+    /// `codes`: `[batch, tokens]` at 25 Hz, `text`: `[batch, phones]`,
+    /// `g`: the speaker vector from [`SovitsPartial::speaker`]. `noise_scale`
+    /// is how much of the prior's variance to actually sample — upstream's
+    /// default is 0.5, i.e. deliberately less than the distribution suggests.
+    pub fn decode(
+        &self,
+        codes: Tensor<B, 2, Int>,
+        text: Tensor<B, 2, Int>,
+        g: Tensor<B, 3>,
+        noise_scale: f64,
+    ) -> Tensor<B, 3> {
+        let quantized = self.quantizer_decode(codes);
+        let (m, logs) = self.enc_p.forward(quantized, text, g.clone());
+
+        let eps = Tensor::random(
+            m.dims(),
+            burn::tensor::Distribution::Normal(0.0, 1.0),
+            &m.device(),
+        );
+        let z_p = m + eps * logs.exp() * noise_scale;
+        // Inference runs the flow backwards: the prior is what `enc_p` produced,
+        // and the decoder wants the latent it came from.
+        let z = self.flow.reverse(z_p, g.clone());
+        self.dec.forward(z, g)
+    }
+
+    /// Codes to the 50 Hz features `enc_p` expects.
+    ///
+    /// The quantiser works at 25 Hz and `enc_p` at 50, so every token is
+    /// repeated once — nearest-neighbour upsampling, matching upstream's
+    /// `F.interpolate(mode="nearest")`. Interpolating *between* codes would be
+    /// wrong: they name codebook entries, and a point between two of them is not
+    /// a third entry.
+    fn quantizer_decode(&self, codes: Tensor<B, 2, Int>) -> Tensor<B, 3> {
+        let quantized = self.quantizer.decode(codes);
+        let [batch, dim, tokens] = quantized.dims();
+        quantized
+            .unsqueeze_dim::<4>(3)
+            .expand([batch, dim, tokens, 2])
+            .reshape([batch, dim, tokens * 2])
+    }
+
     /// Load the parts of an `s2G*.pth` that are modelled so far.
     ///
     /// The state dict sits under `"weight"`. Two families of remap, both the
@@ -135,9 +200,8 @@ impl<B: Backend> SovitsPartial<B> {
     /// at even indices with parameter-free `Flip`s between them. A third, of the
     /// same kind, renumbers `ref_enc.spectral`.
     ///
-    /// The four `quantizer.*` tensors are reported unused on purpose: they load
-    /// through [`crate::Quantizer`], which is separately useful for turning a
-    /// corpus into semantic tokens without any of the synthesizer.
+    /// The codebook's `embed_avg`, `cluster_size` and `inited` stay unused —
+    /// EMA statistics from training it, with no part in a lookup.
     pub fn load_pytorch(
         &mut self,
         path: impl AsRef<std::path::Path>,
@@ -161,6 +225,15 @@ impl<B: Backend> SovitsPartial<B> {
             (
                 r"^enc_p\.(encoder_ssl|encoder_text|encoder2)\.norm_layers_2\.(\d+)\.",
                 "enc_p.$1.layers.$2.norm_2.",
+            ),
+            // The convolution that halves the frame rate sits at the top level
+            // upstream, but belongs to the quantiser: it is the step that takes
+            // cnhubert's 50 Hz to the 25 Hz the codes are at. Anchored, so
+            // `enc_p.ssl_proj` — a different layer entirely — is left alone.
+            (r"^ssl_proj\.", "quantizer.ssl_proj."),
+            (
+                r"^quantizer\.vq\.layers\.(\d+)\._codebook\.",
+                "quantizer.vq.layers.$1.",
             ),
             // `ref_enc.spectral` is an `nn.Sequential` of
             // linear/activation/dropout, so its two learnable layers land at

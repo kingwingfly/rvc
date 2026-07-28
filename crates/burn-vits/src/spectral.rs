@@ -37,6 +37,20 @@ impl SpectralConfig {
         }
     }
 
+    /// The 32 kHz config GPT-SoVITS v2 uses. The hop is the decoder's
+    /// upsample product, so one spectrogram frame is one latent frame.
+    pub fn gptsovits_v2_32k() -> Self {
+        Self {
+            sample_rate: 32_000,
+            n_fft: 2048,
+            hop: 640,
+            win_length: 2048,
+            n_mels: 128,
+            fmin: 0.0,
+            fmax: 16_000.0,
+        }
+    }
+
     /// Number of linear-spectrogram bins.
     pub fn n_bins(&self) -> usize {
         self.n_fft / 2 + 1

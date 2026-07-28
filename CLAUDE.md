@@ -137,7 +137,7 @@ Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper
 | `burn-vits` | the VITS blocks RVC and GPT-SoVITS share (both descend from the same source, which is why their `state_dict` names line up): attention stack, `Wn`, flow, posterior encoder, `ResBlock1`, weight-norm convs, discriminators, the family's losses, the differentiable STFT |
 | `burn-rvc` | what is RVC's alone: `SourceModule` (NSF), the 768-dim `TextEncoder`, `GeneratorNsf`, the synthesizer wiring; re-exports `burn-vits` so it still reads as one model |
 | `burn-whisper` | the Whisper network (standalone Burn port); mirrors HF's `state_dict` layout so `openai/whisper-large-v3-turbo` loads unchanged |
-| `burn-gptsovits` | the GPT-SoVITS network. `hubert` at 210/0, `quantizer` at 3/0, and `s2` complete at 770/0 (the other 6 tensors are the quantiser's, loaded through `Quantizer`). The T2S transformer is next. **`s2` is structurally verified, not numerically** — an end-to-end reconstruction test is the thing to do before building `s1` on top of it. `examples/keys` lists any checkpoint's tensors, which is the first thing to run against a new one |
+| `burn-gptsovits` | the GPT-SoVITS network. `hubert` at 210/0, `quantizer` at 3/0, and `s2` complete at 773/0 (the 3 unused are the codebook's EMA training statistics). **`s2` is verified numerically, not just structurally**: `examples/reconstruct` round-trips real audio through cnhubert, the quantiser and the synthesizer, and the output tracks the source's energy envelope at r=0.91 against a chance baseline of 0.30. The T2S transformer is next. `examples/keys` lists any checkpoint's tensors, which is the first thing to run against a new one |
 | `rvc-train` | native Rust/Burn adversarial training loop (see `crates/rvc-train/ARCHITECTURE.md`) |
 | `hub-kit` | auto-download ContentVec/RMVPE ONNX from Hugging Face |
 | `rvc-cli` | lib **and** the `rvc` binary (clap): `convert`, `serve`, `models`, `train`, `preprocess` |
@@ -200,6 +200,20 @@ are the two that stand in the way — and ContentVec is a HuBERT variant, so
 `burn-gptsovits`'s `hubert.rs` already covers its architecture. Porting it would
 mean lifting that module into a `burn-hubert` of its own, since two engines would
 then share it.
+
+### Verifying a port beyond weight coverage
+Coverage says the module tree matches the checkpoint. It says nothing about
+whether the forward pass computes the right thing, and this repo has already
+shipped a port that loaded at 100% and produced garbage (Whisper's causal mask).
+Each model therefore needs a second check that exercises arithmetic:
+
+- `burn-whisper` — transcripts diffed against ONNX Runtime on the same weights,
+  which came out byte-identical.
+- `burn-gptsovits` `s2` — `examples/reconstruct` runs audio through the whole
+  stage and correlates the output's energy envelope against the input's. r=0.91
+  where shuffling gives 0.30, and spectral flatness 0.17 against 1.0 for noise.
+  Cheap, needs no reference implementation, and a mis-wired MRTE or a
+  mis-scaled attention fails it loudly.
 
 ### The semantic-token boundary (`burn-gptsovits::quantizer`)
 25 Hz token ids over a 1024-entry codebook are what the two stages agree on: T2S
