@@ -92,6 +92,15 @@ cargo run -p burn-whisper --example load -- <path/to/model.safetensors>  # 587/0
 Porting references are cloned under `/.reference` (gitignored) and **read, never
 run** — `openai/whisper`, and RVC-Project tag `2.2.231006` for `burn-rvc`.
 
+### Two runtimes for one model (`stt-core`)
+`Engine` (`engine.rs`) is the whole boundary between the decode loop and a
+runtime: token ids in, `f32` logits out. Encoded audio and KV caches stay inside
+the engine, because they are backend-specific tensors with no useful common type.
+That keeps `Transcriber` non-generic — the backend is a constructor call, not a
+type parameter — and it buys the best correctness check available: **Burn and
+ONNX Runtime produce byte-identical transcripts from the same weights**, which is
+how the Burn port is validated against an independent implementation.
+
 ### Porting traps found the hard way
 `Tensor::triu_mask`/`tril_mask` are named for the triangle they **keep**, not the
 one they mask, so a causal mask is `tril_mask(shape, n_kv - n_q)`. Using
@@ -100,6 +109,13 @@ masks the only position there is — a full row of `-inf` into softmax is `NaN`,
 not an error, and it propagates to every logit. Burn's `assert_approx_eq` also
 compares `NaN` to `NaN` without complaint, so tests must assert finiteness
 separately (`burn-whisper`'s do).
+
+`burn_store::HalfPrecisionAdapter` reads as "widen fp16 on load" and is
+**bidirectional** — it also *narrows* fp32 to fp16. `burn-kit`'s `Upcast` is the
+one-way version and is what the safetensors loader uses. The bug is silent (the
+model just loses mantissa) except on LibTorch, which rejects a conv whose bias
+dtype stops matching its input. fp16 and fp32 checkpoints of the same model are
+both common on the Hub, so test against both.
 
 Requires **ffmpeg 8.1** dev libraries (and the `ffmpeg` binary for the realtime
 `serve` example). ContentVec + RMVPE ONNX assets auto-download from Hugging Face
@@ -121,7 +137,7 @@ Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper
 | `rvc-train` | native Rust/Burn adversarial training loop (see `crates/rvc-train/ARCHITECTURE.md`) |
 | `hub-kit` | auto-download ContentVec/RMVPE ONNX from Hugging Face |
 | `rvc-cli` | lib **and** the `rvc` binary (clap): `convert`, `serve`, `models`, `train`, `preprocess` |
-| `stt-core` | speech recognition: Whisper log-mel front-end, BPE vocabulary, KV-cached greedy decode, segmentation via `audio-kit`'s slicer |
+| `stt-core` | speech recognition: Whisper log-mel front-end, BPE vocabulary, KV-cached greedy decode, segmentation via `audio-kit`'s slicer, and **two runtimes** (native Burn, ONNX Runtime) behind one `Engine` trait |
 | `stt-cli` | lib **and** the `stt` binary |
 | `cli-kit` | logging, shell completions and `--device` parsing, shared by all three binaries |
 | `voice-cli` | the `voice` binary: `rvc-cli` and `stt-cli` nested as `voice rvc …` and `voice stt` |

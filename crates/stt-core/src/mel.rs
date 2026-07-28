@@ -66,11 +66,6 @@ pub struct LogMel {
 }
 
 impl LogMel {
-    /// How many mel bands this front-end produces.
-    pub fn bins(&self) -> usize {
-        self.n_mels
-    }
-
     /// `n_mels` is 128 for large-v3 and its derivatives, 80 for everything older.
     pub fn new(n_mels: usize) -> Self {
         // Periodic Hann, matching `torch.hann_window`'s default.

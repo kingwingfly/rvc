@@ -18,10 +18,13 @@ name = "stt"
 path = "src/main.rs"
 
 [features]
-default = ["cuda", "tch", "wgpu"]
+default = ["cuda", "tch", "wgpu", "onnx"]
 cuda = ["stt-core/cuda"]
 tch = ["stt-core/tch"]
 wgpu = ["stt-core/wgpu"]
+# ONNX Runtime as an alternative to the Burn backends. On by default because
+# `--backend auto` should be able to accept an ONNX export it is handed.
+onnx = ["stt-core/onnx"]
 
 [dependencies]
 stt-core.workspace = true

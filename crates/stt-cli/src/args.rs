@@ -102,7 +102,8 @@ pub async fn run(args: SttArgs) -> Result<()> {
         }
     };
 
-    let stt = tokio::task::block_in_place(|| load_transcriber(&dir, args.backend, args.device))?;
+    let mut stt =
+        tokio::task::block_in_place(|| load_transcriber(&dir, args.backend, args.device))?;
 
     // Buffered, not streamed: see the module docs.
     let mut input = Box::pin(audio_kit::read_f32le(tokio::io::stdin(), args.chunk));

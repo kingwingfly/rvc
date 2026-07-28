@@ -74,9 +74,17 @@ what a subtitle file — or a TTS training manifest — needs:
 {"start":2.300,"end":4.760,"language":"zh","text":"欺软怕硬的家伙算什么好汉"}
 ```
 
+Two runtimes, one command. `--backend auto` reads the model directory: an
+`optimum`-style ONNX export (`encoder_model.onnx` +
+`decoder_model_merged.onnx`) runs on ONNX Runtime, `model.safetensors` runs on
+the fastest available Burn backend. Name one explicitly with `--backend
+onnx|tch|cuda|wgpu`. The two agree token for token on the same weights, which is
+how the Burn port is checked against an independent implementation.
+
 Weights come from `openai/whisper-large-v3-turbo`, downloaded on first use;
-`--repo owner/name` picks a different one and every dimension is read from that
-repo's own `config.json`, so a different size costs no code.
+`--repo owner/name` picks a different one — `onnx-community/whisper-large-v3-turbo`
+for the ONNX export — and every dimension is read from that repo's own
+`config.json`, so a different size costs no code.
 
 Input is **buffered, not streamed** — segmentation looks for silences across the
 whole recording, and Whisper normalises each 30 s window against its own peak.
@@ -112,7 +120,7 @@ Three tiers, and the names say which is which.
 | crate | role |
 |-------|------|
 | `rvc-core` + `rvc-train` + `rvc-cli` | voice conversion → binary `rvc` |
-| `stt-core` + `stt-cli` | speech recognition → binary `stt` |
+| `stt-core` + `stt-cli` | speech recognition, Burn **or** ONNX Runtime → binary `stt` |
 | `voice-cli` | the integration → binary `voice` |
 
 Two rules keep it that way. **No engine depends on another engine** — anything

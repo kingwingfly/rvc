@@ -6629,6 +6629,7 @@ dependencies = [
  "burn-kit",
  "burn-ndarray",
  "burn-whisper",
+ "ort",
  "rustfft",
  "serde_json",
  "thiserror 2.0.19",

@@ -14,6 +14,10 @@ default = []
 cuda = ["burn/cuda", "burn-kit/cuda"]
 tch = ["burn/tch", "burn-kit/tch"]
 wgpu = ["burn/wgpu", "burn-kit/wgpu"]
+# ONNX Runtime as a second runtime for the same model. Opt-in: it is a linked C++
+# library located at run time via ORT_DYLIB_PATH, and a Burn-only `stt` should
+# not require one to exist.
+onnx = ["dep:ort"]
 
 [dependencies]
 burn = { workspace = true }
@@ -23,6 +27,7 @@ audio-kit.workspace = true
 rustfft.workspace = true
 tokenizers.workspace = true
 serde_json.workspace = true
+ort = { workspace = true, optional = true }
 thiserror.workspace = true
 tracing.workspace = true
 

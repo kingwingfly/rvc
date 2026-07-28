@@ -7,22 +7,32 @@
 //! fill it. Feeding it speech-shaped pieces is the standard defence, and the
 //! toolkit already has a slicer tuned not to cut soft or breathy passages.
 //!
+//! Two runtimes sit behind one [`Transcriber`]: the native Burn port, and ONNX
+//! Runtime. They are picked by constructor and are otherwise indistinguishable —
+//! the decode loop deals in token ids and `f32` logits, which is the most either
+//! has to agree on.
+//!
 //! ```no_run
 //! # use stt_core::{Transcriber, TranscribeOptions};
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! # type B = burn_ndarray::NdArray;
 //! # let audio: Vec<f32> = vec![];
-//! let mut stt = Transcriber::<B>::load("models/whisper".as_ref(), &Default::default())?;
+//! # #[cfg(feature = "tch")] {
+//! let mut stt = Transcriber::libtorch("models/whisper".as_ref(), Default::default())?;
 //! for segment in stt.transcribe(&audio, &TranscribeOptions::default())? {
 //!     println!("[{:.2} -> {:.2}] {}", segment.start, segment.end, segment.text);
 //! }
+//! # }
 //! # Ok(())
 //! # }
 //! ```
 
+mod burn_engine;
 mod decode;
+mod engine;
 mod error;
 mod mel;
+#[cfg(feature = "onnx")]
+mod onnx_engine;
 mod tokenizer;
 
 pub use decode::DecodeOptions;
@@ -33,9 +43,8 @@ pub use tokenizer::{Tokens, Vocabulary};
 use std::path::Path;
 
 use audio_kit::slice::{SliceOptions, slice};
-use burn::tensor::backend::Backend;
-use burn::tensor::{Tensor, TensorData};
-use burn_whisper::{Whisper, WhisperConfig};
+use burn_whisper::WhisperConfig;
+use engine::Engine;
 
 /// One transcribed stretch of speech.
 #[derive(Debug, Clone)]
@@ -51,8 +60,8 @@ pub struct Segment {
 /// How to cut the input up and what to ask the model for.
 #[derive(Debug, Clone)]
 pub struct TranscribeOptions {
-    /// Where to cut. Defaults match `voice rvc preprocess`: energy is used only
-    /// to find long silent gaps, never to gate quiet-but-present sound.
+    /// Where to cut. Defaults match `rvc preprocess`: energy is used only to
+    /// find long silent gaps, never to gate quiet-but-present sound.
     pub slice: SliceOptions,
     pub decode: DecodeOptions,
 }
@@ -72,73 +81,118 @@ impl Default for TranscribeOptions {
 }
 
 /// A loaded Whisper model, ready to transcribe.
-pub struct Transcriber<B: Backend> {
-    model: Whisper<B>,
+///
+/// Not generic over a compute backend — the backend lives behind the engine
+/// trait instead, so picking one is a constructor call and callers never name a
+/// Burn type. `&mut self` throughout, because a decode carries key/value caches.
+pub struct Transcriber {
+    engine: Box<dyn Engine>,
     mel: mel::LogMel,
     tokens: Tokens,
     vocab: Vocabulary,
-    device: B::Device,
 }
 
-impl<B: Backend> Transcriber<B> {
-    /// Load from a directory holding a Hugging Face Whisper repo:
-    /// `model.safetensors`, `config.json`, `generation_config.json` and
-    /// `tokenizer.json`.
-    pub fn load(dir: &Path, device: &B::Device) -> Result<Self> {
-        let cfg = read_config(&dir.join("config.json"))?;
-        let mut model = Whisper::<B>::new(&cfg, device);
-        let applied = model
-            .load_safetensors(dir.join("model.safetensors"))
-            .map_err(|e| SttError::Weights(e.to_string()))?;
-        if !applied.missing.is_empty() {
-            return Err(SttError::Weights(format!(
-                "{} parameters had no tensor in the checkpoint (first: {})",
-                applied.missing.len(),
-                applied.missing[0].0
-            )));
-        }
-
+impl Transcriber {
+    /// Pair a loaded engine with the JSON that shipped beside the weights.
+    fn assemble(engine: Box<dyn Engine>, dir: &Path) -> Result<Self> {
         Ok(Self {
-            mel: mel::LogMel::new(cfg.num_mel_bins),
-            model,
+            mel: mel::LogMel::new(engine.mel_bins()),
+            engine,
             tokens: Tokens::load(&dir.join("generation_config.json"))?,
             vocab: Vocabulary::load(&dir.join("tokenizer.json"))?,
-            device: device.clone(),
         })
     }
 
+    /// Native Burn on the CubeCL/CUDA backend.
+    #[cfg(feature = "cuda")]
+    pub fn cuda(dir: &Path, device: burn_kit::DeviceSpec) -> Result<Self> {
+        let device = burn_kit::cuda_device(device)?;
+        let cfg = read_config(&dir.join("config.json"))?;
+        let engine = burn_kit::guard_init("cuda", || {
+            burn_engine::BurnEngine::<burn::backend::Cuda>::load(
+                &cfg,
+                &dir.join("model.safetensors"),
+                &device,
+            )
+        })??;
+        Self::assemble(Box::new(engine), dir)
+    }
+
+    /// Native Burn on LibTorch — CUDA, MPS, Vulkan or CPU.
+    #[cfg(feature = "tch")]
+    pub fn libtorch(dir: &Path, device: burn_kit::DeviceSpec) -> Result<Self> {
+        let device = burn_kit::libtorch_device(device)?;
+        let cfg = read_config(&dir.join("config.json"))?;
+        let engine = burn_kit::guard_init("tch", || {
+            burn_engine::BurnEngine::<burn::backend::LibTorch<f32>>::load(
+                &cfg,
+                &dir.join("model.safetensors"),
+                &device,
+            )
+        })??;
+        Self::assemble(Box::new(engine), dir)
+    }
+
+    /// Native Burn on WebGPU.
+    #[cfg(feature = "wgpu")]
+    pub fn wgpu(dir: &Path, device: burn_kit::DeviceSpec) -> Result<Self> {
+        let device = burn_kit::wgpu_device(device)?;
+        let cfg = read_config(&dir.join("config.json"))?;
+        let engine = burn_kit::guard_init("wgpu", || {
+            burn_engine::BurnEngine::<burn::backend::Wgpu>::load(
+                &cfg,
+                &dir.join("model.safetensors"),
+                &device,
+            )
+        })??;
+        Self::assemble(Box::new(engine), dir)
+    }
+
+    /// ONNX Runtime, from an `optimum`-style two-graph export.
+    ///
+    /// Takes no device: `ort` picks its own execution provider — CUDA if the
+    /// runtime was built with it, else CPU.
+    #[cfg(feature = "onnx")]
+    pub fn onnx(dir: &Path) -> Result<Self> {
+        let cfg = read_config(&dir.join("config.json"))?;
+        let engine = onnx_engine::OnnxEngine::load(
+            dir,
+            cfg.num_mel_bins,
+            cfg.decoder_layers,
+            cfg.decoder_attention_heads,
+            cfg.d_model,
+        )?;
+        Self::assemble(Box::new(engine), dir)
+    }
+
     /// Transcribe mono 16 kHz audio.
-    pub fn transcribe(&self, audio: &[f32], opts: &TranscribeOptions) -> Result<Vec<Segment>> {
+    pub fn transcribe(&mut self, audio: &[f32], opts: &TranscribeOptions) -> Result<Vec<Segment>> {
         let spans = slice(audio, SAMPLE_RATE, &opts.slice);
         let mut out = Vec::with_capacity(spans.len());
         for (start, end) in spans {
-            let text = self.window(&audio[start..end], &opts.decode)?;
-            if text.text.trim().is_empty() {
+            let segment = self.window(&audio[start..end], &opts.decode)?;
+            if segment.text.trim().is_empty() {
                 continue;
             }
             out.push(Segment {
                 start: start as f32 / SAMPLE_RATE as f32,
                 end: end as f32 / SAMPLE_RATE as f32,
-                ..text
+                ..segment
             });
         }
         Ok(out)
     }
 
     /// Transcribe one span, which must fit a single 30 s encoder window.
-    fn window(&self, audio: &[f32], opts: &DecodeOptions) -> Result<Segment> {
+    fn window(&mut self, audio: &[f32], opts: &DecodeOptions) -> Result<Segment> {
         let (frames, data) = self.mel.compute(audio);
-        let mel: Tensor<B, 3> = Tensor::from_data(
-            TensorData::new(data, [1, self.mel.bins(), frames]),
-            &self.device,
-        );
+        self.engine.encode(&data, frames)?;
 
-        let encoded = self.model.encoder.forward(mel);
-        let decoded = decode::greedy(&self.model, encoded, &self.tokens, opts, &self.device)?;
+        let decoded = decode::greedy(self.engine.as_mut(), &self.tokens, opts)?;
         if decoded.truncated {
             tracing::warn!(
-                "a segment hit the {}-token cap and was cut off — raise --max-tokens, \
-                 or split it with a shorter --max-clip",
+                "a segment hit the {}-token cap and was cut off — raise the token \
+                 cap, or split it with a shorter maximum clip length",
                 opts.max_tokens
             );
         }
@@ -187,51 +241,4 @@ fn read_config(path: &Path) -> Result<WhisperConfig> {
         decoder_ffn_dim: get("decoder_ffn_dim")?,
         vocab_size: get("vocab_size")?,
     })
-}
-
-/// A loaded transcriber with its compute backend erased, so `voice-cli` never
-/// names a Burn type and `--backend` stays a run-time choice.
-///
-/// The same shape as `rvc_core::Generator`, and for the same reason.
-pub trait Transcribe: Send {
-    fn transcribe(&self, audio: &[f32], opts: &TranscribeOptions) -> Result<Vec<Segment>>;
-}
-
-impl<B: Backend> Transcribe for Transcriber<B> {
-    fn transcribe(&self, audio: &[f32], opts: &TranscribeOptions) -> Result<Vec<Segment>> {
-        Transcriber::transcribe(self, audio, opts)
-    }
-}
-
-/// Load a transcriber onto the CubeCL/CUDA backend.
-#[cfg(feature = "cuda")]
-pub fn cuda_transcriber(dir: &Path, device: burn_kit::DeviceSpec) -> Result<Box<dyn Transcribe>> {
-    let device = burn_kit::cuda_device(device)?;
-    let model = burn_kit::guard_init("cuda", || {
-        Transcriber::<burn::backend::Cuda>::load(dir, &device)
-    })??;
-    Ok(Box::new(model))
-}
-
-/// Load a transcriber onto LibTorch — CUDA, MPS, Vulkan or CPU.
-#[cfg(feature = "tch")]
-pub fn libtorch_transcriber(
-    dir: &Path,
-    device: burn_kit::DeviceSpec,
-) -> Result<Box<dyn Transcribe>> {
-    let device = burn_kit::libtorch_device(device)?;
-    let model = burn_kit::guard_init("tch", || {
-        Transcriber::<burn::backend::LibTorch<f32>>::load(dir, &device)
-    })??;
-    Ok(Box::new(model))
-}
-
-/// Load a transcriber onto WebGPU.
-#[cfg(feature = "wgpu")]
-pub fn wgpu_transcriber(dir: &Path, device: burn_kit::DeviceSpec) -> Result<Box<dyn Transcribe>> {
-    let device = burn_kit::wgpu_device(device)?;
-    let model = burn_kit::guard_init("wgpu", || {
-        Transcriber::<burn::backend::Wgpu>::load(dir, &device)
-    })??;
-    Ok(Box::new(model))
 }

@@ -14,8 +14,8 @@ use burn::tensor::backend::Backend;
 use burn::tensor::{DType, TensorData};
 use burn_store::pytorch::PytorchReader;
 use burn_store::{
-    ApplyResult, HalfPrecisionAdapter, KeyRemapper, ModuleAdapter, ModuleSnapshot,
-    PyTorchToBurnAdapter, SafetensorsStore, TensorSnapshot,
+    ApplyResult, KeyRemapper, ModuleAdapter, ModuleSnapshot, PyTorchToBurnAdapter,
+    SafetensorsStore, TensorSnapshot,
 };
 
 /// Build the key remapper from `(regex, replacement)` pairs, applied in order.
@@ -85,9 +85,29 @@ where
     // arrive `[out, in]` where Burn wants `[in, out]`.
     let mut store = SafetensorsStore::from_file(path)
         .remap(remapper(remaps))
-        .with_from_adapter(HalfPrecisionAdapter::new().chain(PyTorchToBurnAdapter))
+        .with_from_adapter(Upcast.chain(PyTorchToBurnAdapter))
         .allow_partial(true);
     Ok(module.load_from(&mut store)?)
+}
+
+/// Widen fp16 tensors to fp32 on the way in, and never the other way.
+///
+/// `burn_store::HalfPrecisionAdapter` looks like exactly this and is a trap: it
+/// is bidirectional, so it *narrows* an fp32 checkpoint to fp16 on load. That is
+/// silent almost everywhere — the model simply loses half its mantissa — and
+/// surfaces only where something checks, such as LibTorch refusing a conv whose
+/// bias dtype no longer matches its input.
+#[derive(Clone)]
+struct Upcast;
+
+impl ModuleAdapter for Upcast {
+    fn adapt(&self, snapshot: &TensorSnapshot) -> TensorSnapshot {
+        upcast_f16(snapshot.clone())
+    }
+
+    fn clone_box(&self) -> Box<dyn ModuleAdapter> {
+        Box::new(self.clone())
+    }
 }
 
 /// Upcast an fp16 tensor snapshot to fp32, preserving its path/id.
@@ -106,4 +126,41 @@ fn upcast_f16(s: TensorSnapshot) -> TensorSnapshot {
         s.container_stack.clone().unwrap_or_default(),
         s.tensor_id.unwrap_or_default(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use burn_store::ModuleAdapter;
+
+    fn snapshot(dtype: DType, data: TensorData) -> TensorSnapshot {
+        TensorSnapshot::from_closure(
+            Rc::new(move || Ok(data.clone())),
+            dtype,
+            burn::tensor::Shape::from([2]),
+            vec!["w".to_string()],
+            vec!["Linear".to_string()],
+            Default::default(),
+        )
+    }
+
+    #[test]
+    fn loading_widens_fp16_and_leaves_fp32_alone() {
+        // The second half is the regression: `burn_store::HalfPrecisionAdapter`
+        // converts *both* directions, so using it here quietly halved the
+        // precision of every fp32 checkpoint. It went unnoticed until LibTorch
+        // rejected a conv whose bias no longer matched its input dtype.
+        let half = snapshot(
+            DType::F16,
+            TensorData::from([1.0f32, 2.0]).convert_dtype(DType::F16),
+        );
+        assert_eq!(Upcast.adapt(&half).dtype, DType::F32, "fp16 must widen");
+
+        let full = snapshot(DType::F32, TensorData::from([1.0f32, 2.0]));
+        assert_eq!(
+            Upcast.adapt(&full).dtype,
+            DType::F32,
+            "fp32 must be left alone, not narrowed"
+        );
+    }
 }

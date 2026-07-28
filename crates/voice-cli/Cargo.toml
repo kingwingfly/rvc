@@ -16,10 +16,11 @@ path = "src/main.rs"
 # binaries: `--no-default-features --features cuda` on a machine with no
 # LibTorch install.
 [features]
-default = ["cuda", "tch", "wgpu"]
+default = ["cuda", "tch", "wgpu", "onnx"]
 cuda = ["rvc-cli/cuda", "stt-cli/cuda"]
 tch = ["rvc-cli/tch", "stt-cli/tch"]
 wgpu = ["rvc-cli/wgpu", "stt-cli/wgpu"]
+onnx = ["stt-cli/onnx"]
 
 [dependencies]
 rvc-cli.workspace = true
