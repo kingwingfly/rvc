@@ -1,0 +1,16 @@
+[package]
+name = "text-kit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Grapheme-to-phoneme for the voice toolkit's TTS: pure Rust, no model"
+
+[dependencies]
+# Chinese word segmentation — needed for tone sandhi, which is word-scoped, and
+# for keeping polyphone overrides addressable by word.
+jieba-rs = "0.10"
+# Per-character Mandarin readings. Not a phrase dictionary; see `chinese.rs`.
+pinyin = "0.11"
+thiserror.workspace = true

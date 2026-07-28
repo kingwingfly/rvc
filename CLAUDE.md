@@ -142,6 +142,7 @@ Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper
 | `stt-cli` | lib **and** the `stt` binary |
 | `cli-kit` | logging, shell completions and `--device` parsing, shared by all three binaries |
 | `train-kit` | training scaffolding with no model knowledge: `Checkpoint`, `ema_update`, `accumulate`, `materialize`, `Dashboard`. Generic over the module trained, so a GAN and a cross-entropy loop share it |
+| `text-kit` | grapheme-to-phoneme: script-based language splitting, Mandarin g2p (jieba + pinyin + opencpop + tone sandhi), and GPT-SoVITS's 732-symbol table. Pure Rust, no ML, no backend — so it is fully testable without weights |
 | `voice-cli` | the `voice` binary: `rvc-cli` and `stt-cli` nested as `voice rvc …` and `voice stt` |
 
 ### Three runtimes, one path (the key abstraction)
@@ -177,6 +178,20 @@ would otherwise be a multi-GB download of a **CPU-only** LibTorch.
 `crates/{rvc,stt,voice}-cli/build.rs` bake `$LIBTORCH/lib` into the binary as a
 `RUNPATH`; without it a missing `libtorch.so` aborts in `ld.so` before `main`, on
 every subcommand. They are deliberate duplicates — an rpath is per-executable.
+
+### The phoneme table is a compatibility contract (`text-kit`)
+`text_kit::symbols::SYMBOLS` is GPT-SoVITS's v2 vocabulary verbatim, 732 entries
+in order, because those indices address the T2S model's phoneme embedding. It is
+embedded as data rather than rebuilt from upstream's construction (which sorts a
+union of per-language sets and then appends two groups *unsorted*) — off by one
+entry and the model produces confident nonsense rather than an error. Same reason
+`opencpop-strict.txt` is `include_str!`d rather than read at run time.
+
+Known ceiling: upstream reads pronunciations with `pypinyin` and its ~130k-entry
+phrase dictionary; the `pinyin` crate is per-character, so word-dependent
+polyphones (银行 as *hang*, not *xing*) fall back to the commonest reading.
+`chinese.rs::POLYPHONES` patches the frequent cases. A real phrase dictionary, or
+g2pw, is the fix.
 
 ### Lazy parameters (`train_kit::materialize`)
 Burn allocates parameters lazily, and two things go wrong while a module is still

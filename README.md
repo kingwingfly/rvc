@@ -108,6 +108,7 @@ Three tiers, and the names say which is which.
 | `hub-kit` | model downloads from Hugging Face |
 | `cli-kit` | logging, shell completions, `--device` parsing |
 | `train-kit` | checkpoints, weight EMA, gradient accumulation, the live dashboard — generic over the module being trained |
+| `text-kit` | grapheme-to-phoneme for TTS: language splitting, Mandarin g2p, GPT-SoVITS's phoneme table. No model, no tensors |
 
 **Networks**, named after the model, holding no app dependencies:
 
