@@ -4,23 +4,22 @@
 //! saved weight. `AutodiffBackend` guarantees both share a device type, so one
 //! `device` serves the whole loop. [`crate::train`] picks `AB` at run time.
 
-use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 
 use anyhow::{Context, Result, anyhow};
-use burn::module::{AutodiffModule, Module, ModuleMapper, ModuleVisitor, Param};
+use burn::module::{AutodiffModule, Module};
 use burn::optim::{AdamWConfig, GradientsParams, Optimizer};
-use burn::tensor::backend::{AutodiffBackend, Backend};
-use burn::tensor::{Int, Tensor, TensorData, TensorPrimitive};
+use burn::tensor::backend::AutodiffBackend;
+use burn::tensor::{Int, Tensor, TensorData};
 use burn_rvc::{MultiPeriodDiscriminator, Synthesizer, SynthesizerConfig};
 
 use crate::TrainRequest;
-use crate::checkpoint::{BestMeta, Checkpoint};
-use crate::dashboard::Dashboard;
 use crate::dataset::{CONTENT_DIM, Clip, HOP, Rng, clip_weights, sample_batch};
-use crate::losses::{disc_loss, feature_matching, gen_adv, kl, mel_l1};
-use crate::spectral::{Spectral, SpectralConfig};
+use burn_vits::{Spectral, SpectralConfig, disc_loss, feature_matching, gen_adv, kl, mel_l1};
+use train_kit::{
+    BestMeta, Checkpoint, Dashboard, accumulate, ema_update, human, materialize, scalar,
+};
 
 const SEGMENT_FRAMES: usize = 36; // 17280 samples / 480 hop
 /// Context window (frames) fed to enc_q/flow each step; clips must be at least
@@ -213,6 +212,7 @@ pub fn run<AB: AutodiffBackend>(
         req.settings.use_tui,
         steps_per_epoch,
         req.settings.epochs as usize,
+        &["g_loss", "d_loss", "mel_loss"],
     );
 
     // Burn initialises parameters lazily, and a replica cloned from a module
@@ -221,9 +221,8 @@ pub fn run<AB: AutodiffBackend>(
     // silence. Warm-start and resume materialise on load, but training from
     // scratch does not, so force it before any replica is made.
     if devices.len() > 1 {
-        let mut touch = ParamCollector::<AB> { prims: Vec::new() };
-        net_g.visit(&mut touch);
-        disc.visit(&mut touch);
+        materialize(&net_g);
+        materialize(&disc);
     }
 
     let started = std::time::Instant::now();
@@ -337,7 +336,7 @@ pub fn run<AB: AutodiffBackend>(
         if !d_losses.is_empty() {
             last_d = d_losses.into_iter().map(scalar).sum::<f32>() * inv;
         }
-        dash.update(step, g_scalar, last_d, mel_scalar, cur_lr);
+        dash.update(step, &[g_scalar, last_d, mel_scalar], cur_lr);
         // Always log the losses (throttled). With the TUI, `init_logging` routes
         // tracing to `{work_dir}/train.log` (not stderr), so this stays off the
         // dashboard while still recording every run's curves.
@@ -395,7 +394,7 @@ pub fn run<AB: AutodiffBackend>(
         }
     }
 
-    out.save(ema.as_ref(), &net_g.valid(), &disc.valid())
+    out.save(ema.as_ref(), &net_g.valid(), Some(&disc.valid()))
         .context("saving trained weights")?;
     tracing::info!(
         "done:  {} steps in {}{}",
@@ -444,7 +443,7 @@ fn keep_best<AB: AutodiffBackend>(
     if mean.is_nan() || mean >= *best {
         return false;
     }
-    match ck.save(ema, &net_g.valid(), &disc.valid()) {
+    match ck.save(ema, &net_g.valid(), Some(&disc.valid())) {
         Ok(()) => {
             tracing::info!("       best mel {mean:.3} (step {step}) saved");
             *best = mean;
@@ -570,179 +569,5 @@ fn micro_step<AB: AutodiffBackend>(input: MicroIn<'_, AB>) -> MicroOut<AB> {
         d,
         g_grads: GradientsParams::from_grads(g_loss.backward(), net_g),
         d_grads,
-    }
-}
-
-/// `1h02m`, `7m30s`, `45s` — short enough to sit inside a progress line.
-fn human(d: std::time::Duration) -> String {
-    let s = d.as_secs();
-    match (s / 3600, (s % 3600) / 60, s % 60) {
-        (0, 0, s) => format!("{s}s"),
-        (0, m, s) => format!("{m}m{s:02}s"),
-        (h, m, _) => format!("{h}h{m:02}m"),
-    }
-}
-
-/// Extract a scalar loss value to `f32` for logging. Syncs the device.
-fn scalar<B: Backend>(t: Tensor<B, 1>) -> f32 {
-    t.into_data()
-        .to_vec::<f32>()
-        .map(|v| v.first().copied().unwrap_or(f32::NAN))
-        .unwrap_or(f32::NAN)
-}
-
-/// Sums `incoming` (scaled) into `acc`, matched by `ParamId`. Gradients live on
-/// `AB::InnerBackend` even though the module is autodiff-wrapped, which is why
-/// the lookups below name it.
-struct GradAccum<AB> {
-    acc: GradientsParams,
-    incoming: GradientsParams,
-    scale: f32,
-    /// `AB` appears only in the trait we implement, never in a field.
-    _ab: PhantomData<AB>,
-}
-
-impl<AB: AutodiffBackend> ModuleVisitor<AB> for GradAccum<AB> {
-    fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<AB, D>>) {
-        let id = param.id;
-        if let Some(g) = self.incoming.remove::<AB::InnerBackend, D>(id) {
-            let g = if (self.scale - 1.0).abs() > f32::EPSILON {
-                g.mul_scalar(self.scale)
-            } else {
-                g
-            };
-            let merged = match self.acc.remove::<AB::InnerBackend, D>(id) {
-                Some(a) => a + g,
-                None => g,
-            };
-            self.acc.register::<AB::InnerBackend, D>(id, merged);
-        }
-    }
-}
-
-/// Add `incoming * scale` into `acc`, param by param (for gradient
-/// accumulation). `module` supplies the traversal over parameter ids.
-fn accumulate<AB: AutodiffBackend, M: Module<AB>>(
-    acc: GradientsParams,
-    incoming: GradientsParams,
-    module: &M,
-    scale: f32,
-) -> GradientsParams {
-    let mut v = GradAccum::<AB> {
-        acc,
-        incoming,
-        scale,
-        _ab: PhantomData,
-    };
-    module.visit(&mut v);
-    v.acc
-}
-
-/// Collects a module's float parameters (in traversal order) as rank-erased
-/// primitives, so a same-typed module can be blended against them element-wise.
-struct ParamCollector<B: Backend> {
-    prims: Vec<TensorPrimitive<B>>,
-}
-
-impl<B: Backend> ModuleVisitor<B> for ParamCollector<B> {
-    fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<B, D>>) {
-        self.prims.push(param.val().into_primitive());
-    }
-}
-
-/// [`ModuleMapper`] applying `ema = keep*ema + (1-keep)*src`, consuming the
-/// collected source primitives in the same traversal order.
-struct EmaBlend<B: Backend> {
-    prims: Vec<TensorPrimitive<B>>,
-    keep: f64,
-}
-
-impl<B: Backend> ModuleMapper<B> for EmaBlend<B> {
-    fn map_float<const D: usize>(&mut self, param: Param<Tensor<B, D>>) -> Param<Tensor<B, D>> {
-        let (id, dst, mapper) = param.consume();
-        let src = Tensor::<B, D>::from_primitive(self.prims.pop().expect("ema source underflow"));
-        let blended = dst.mul_scalar(self.keep) + src.mul_scalar(1.0 - self.keep);
-        Param::from_mapped_value(id, blended, mapper)
-    }
-}
-
-/// Update the generator weight EMA toward the current live weights.
-fn ema_update<AB: AutodiffBackend>(
-    ema: Synthesizer<AB::InnerBackend>,
-    net_g: &Synthesizer<AB>,
-    keep: f64,
-) -> Synthesizer<AB::InnerBackend> {
-    let src = net_g.valid();
-    let mut collect = ParamCollector { prims: Vec::new() };
-    src.visit(&mut collect);
-    // `map` traverses in the same order as `visit`; reverse so `pop()` yields
-    // the source params in that order.
-    collect.prims.reverse();
-    let mut blend = EmaBlend {
-        prims: collect.prims,
-        keep,
-    };
-    let blended = ema.map(&mut blend);
-    // Pairing is positional, so a `map`/`visit` order drift would silently blend
-    // the wrong weights together. Leftovers prove the two disagreed on the count.
-    assert!(blend.prims.is_empty(), "ema source overflow");
-    blended
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use burn::backend::Autodiff;
-    use burn::nn::{Linear, LinearConfig};
-
-    type B = Autodiff<burn_ndarray::NdArray>;
-
-    /// The load-bearing assumption of data-parallel training: a replica made with
-    /// `clone().to_device(..)` still produces gradients, and they carry the *same*
-    /// `ParamId`s as the master so `accumulate` can find them.
-    ///
-    /// If replicas silently lost `require_grad`, every extra device would
-    /// contribute nothing and training would look fine while using one device's
-    /// data. Nothing in a multi-GPU run would reveal that, hence this test.
-    #[test]
-    fn a_replica_contributes_gradients_to_the_master() {
-        let device = Default::default();
-        let master: Linear<B> = LinearConfig::new(4, 4).init(&device);
-        // Burn initialises parameters lazily, and a module whose parameters
-        // materialise *during* the pass being differentiated yields no gradients
-        // for them. `run` never hits this — warm-start or resume fills the
-        // generator in before any replica is cloned — so force it here too.
-        let replica = master.clone().to_device(&device);
-        let warm = Tensor::<B, 2>::ones([2, 4], &device);
-        let _ = GradientsParams::from_grads(replica.forward(warm).sum().backward(), &replica);
-
-        // Exactly the non-master path in `run`: backward on the replica, ship the
-        // gradients to the master's device, fold them in with the accumulator.
-        let x = Tensor::<B, 2>::ones([2, 4], &device);
-        let grads = GradientsParams::from_grads(replica.forward(x).sum().backward(), &replica);
-        let moved = grads.to_device(&device, &master);
-        assert_eq!(
-            moved.len(),
-            2,
-            "weight and bias gradients should survive the move"
-        );
-
-        let mut acc = accumulate::<B, _>(GradientsParams::new(), moved, &master, 1.0);
-        assert!(
-            acc.remove::<<B as AutodiffBackend>::InnerBackend, 2>(master.weight.id)
-                .is_some(),
-            "the master could not claim the replica's weight gradient — every extra \
-             device would contribute nothing and training would silently use one"
-        );
-    }
-
-    /// Scaling has to average over devices as well as accumulation steps,
-    /// otherwise adding a device silently inflates the effective learning rate.
-    #[test]
-    fn gradient_scale_averages_over_devices_and_accumulation() {
-        for (accum, devices) in [(1, 1), (1, 2), (4, 1), (2, 3)] {
-            let inv = 1.0 / (accum * devices) as f32;
-            assert!((inv * (accum * devices) as f32 - 1.0).abs() < f32::EPSILON);
-        }
     }
 }

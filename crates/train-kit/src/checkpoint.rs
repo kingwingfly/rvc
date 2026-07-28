@@ -23,9 +23,10 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
-use burn_rvc::{MultiPeriodDiscriminator, Synthesizer};
 
 use burn::tensor::backend::Backend;
+use burn_kit::store::save_safetensors;
+use burn_store::ModuleSnapshot;
 
 const SUFFIX: &str = "safetensors";
 
@@ -131,27 +132,30 @@ impl Checkpoint {
     ///
     /// Reports what landed and how long it took (a full family is hundreds of MB,
     /// so it's worth seeing in the log); callers report *why* they saved.
-    pub fn save<B: Backend>(
-        &self,
-        ema: Option<&Synthesizer<B>>,
-        live: &Synthesizer<B>,
-        disc: &MultiPeriodDiscriminator<B>,
-    ) -> Result<()> {
+    /// `disc` is optional because not every model has an adversary: a GAN stage
+    /// writes one, a plain cross-entropy stage does not. Pass
+    /// `Option::<&G>::None` when there is none.
+    pub fn save<B, G, D>(&self, ema: Option<&G>, live: &G, disc: Option<&D>) -> Result<()>
+    where
+        B: Backend,
+        G: ModuleSnapshot<B>,
+        D: ModuleSnapshot<B>,
+    {
         let started = Instant::now();
         if !self.dir.as_os_str().is_empty() {
             std::fs::create_dir_all(&self.dir)
                 .with_context(|| format!("creating {}", self.dir.display()))?;
         }
         let g = self.generator();
-        ema.unwrap_or(live)
-            .save_safetensors(&g)
-            .map_err(|e| failed(&g, e))?;
+        save_safetensors::<B, _>(ema.unwrap_or(live), &g).map_err(|e| failed(&g, e))?;
         if ema.is_some() {
             let raw = self.raw();
-            live.save_safetensors(&raw).map_err(|e| failed(&raw, e))?;
+            save_safetensors::<B, _>(live, &raw).map_err(|e| failed(&raw, e))?;
         }
-        let d = self.disc();
-        disc.save_safetensors(&d).map_err(|e| failed(&d, e))?;
+        if let Some(disc) = disc {
+            let d = self.disc();
+            save_safetensors::<B, _>(disc, &d).map_err(|e| failed(&d, e))?;
+        }
         tracing::debug!(
             "saved {} in {:.1}s",
             g.display(),

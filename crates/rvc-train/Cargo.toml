@@ -20,6 +20,8 @@ audio-kit.workspace = true
 rvc-core.workspace = true
 burn-rvc.workspace = true
 burn-kit.workspace = true
+burn-vits.workspace = true
+train-kit.workspace = true
 tokio = { workspace = true }
 futures.workspace = true
 anyhow.workspace = true

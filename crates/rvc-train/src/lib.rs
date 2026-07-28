@@ -10,11 +10,7 @@
 //! module picks the concrete one from [`TrainRequest::backend`]. Weights are
 //! backend-independent: a model trained on LibTorch loads on CubeCL and back.
 
-mod checkpoint;
-mod dashboard;
 mod dataset;
-mod losses;
-mod spectral;
 mod trainer;
 
 use std::path::PathBuf;

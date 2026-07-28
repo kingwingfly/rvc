@@ -132,7 +132,7 @@ Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper
 | `burn-kit` | Burn plumbing with no model knowledge: `--device` resolution and checkpoint loading, shared by every network crate |
 | `audio-kit` | ffmpeg decode/resample + WAV/raw-PCM I/O, all as `futures::Stream<f32>` |
 | `rvc-core` | the voice-conversion pipeline: `FeatureExtractor` (ContentVec + RMVPE), coarse-pitch/upsample/pitch-shift DSP, streaming `Converter` (block/overlap with an **overlapping** crossfade — consecutive kept blocks share `xf_out` output samples so the blend adds, never deletes, audio), an optional post de-hiss stage (`denoise.rs`, `--denoise`), and **all three** generator backends (ort, Burn/LibTorch, Burn/CubeCL) behind one `Generator` trait |
-| `burn-vits` | the VITS blocks RVC and GPT-SoVITS share (both descend from the same source, which is why their `state_dict` names line up): attention stack, `Wn`, flow, posterior encoder, `ResBlock1`, weight-norm convs, discriminators |
+| `burn-vits` | the VITS blocks RVC and GPT-SoVITS share (both descend from the same source, which is why their `state_dict` names line up): attention stack, `Wn`, flow, posterior encoder, `ResBlock1`, weight-norm convs, discriminators, the family's losses, the differentiable STFT |
 | `burn-rvc` | what is RVC's alone: `SourceModule` (NSF), the 768-dim `TextEncoder`, `GeneratorNsf`, the synthesizer wiring; re-exports `burn-vits` so it still reads as one model |
 | `burn-whisper` | the Whisper network (standalone Burn port); mirrors HF's `state_dict` layout so `openai/whisper-large-v3-turbo` loads unchanged |
 | `rvc-train` | native Rust/Burn adversarial training loop (see `crates/rvc-train/ARCHITECTURE.md`) |
@@ -141,6 +141,7 @@ Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper
 | `stt-core` | speech recognition: Whisper log-mel front-end, BPE vocabulary, KV-cached greedy decode, segmentation via `audio-kit`'s slicer, and **two runtimes** (native Burn, ONNX Runtime) behind one `Engine` trait |
 | `stt-cli` | lib **and** the `stt` binary |
 | `cli-kit` | logging, shell completions and `--device` parsing, shared by all three binaries |
+| `train-kit` | training scaffolding with no model knowledge: `Checkpoint`, `ema_update`, `accumulate`, `materialize`, `Dashboard`. Generic over the module trained, so a GAN and a cross-entropy loop share it |
 | `voice-cli` | the `voice` binary: `rvc-cli` and `stt-cli` nested as `voice rvc …` and `voice stt` |
 
 ### Three runtimes, one path (the key abstraction)
@@ -176,6 +177,15 @@ would otherwise be a multi-GB download of a **CPU-only** LibTorch.
 `crates/{rvc,stt,voice}-cli/build.rs` bake `$LIBTORCH/lib` into the binary as a
 `RUNPATH`; without it a missing `libtorch.so` aborts in `ld.so` before `main`, on
 every subcommand. They are deliberate duplicates — an rpath is per-executable.
+
+### Lazy parameters (`train_kit::materialize`)
+Burn allocates parameters lazily, and two things go wrong while a module is still
+lazy: a clone taken beforehand gets **fresh `ParamId`s**, and parameters that
+materialise *during* the differentiated pass yield no gradients at all. Either
+way a data-parallel replica's gradients stop matching the master's and are
+dropped silently — every extra device contributes nothing while the run looks
+healthy. Warm-start and resume materialise on load; training from scratch does
+not, so `materialize` is called before any replica is made.
 
 ### Moving a module between crates is free
 Burn derives parameter paths from the field names of the struct that *contains* a

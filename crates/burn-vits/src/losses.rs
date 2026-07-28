@@ -1,4 +1,4 @@
-//! RVC/VITS training losses.
+//! The VITS training objectives, shared by every model in the family.
 
 use burn::tensor::Tensor;
 use burn::tensor::backend::Backend;

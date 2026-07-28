@@ -6121,10 +6121,12 @@ dependencies = [
  "burn-kit",
  "burn-ndarray",
  "burn-rvc",
+ "burn-vits",
  "futures",
  "rvc-core",
  "tokio",
  "tracing",
+ "train-kit",
 ]
 
 [[package]]
@@ -7471,6 +7473,18 @@ dependencies = [
  "tracing-core",
  "tracing-log",
  "tracing-serde",
+]
+
+[[package]]
+name = "train-kit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "burn",
+ "burn-kit",
+ "burn-ndarray",
+ "burn-store",
+ "tracing",
 ]
 
 [[package]]

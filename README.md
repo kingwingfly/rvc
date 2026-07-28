@@ -107,12 +107,13 @@ Three tiers, and the names say which is which.
 | `audio-kit` | ffmpeg decode/resample, WAV/raw-PCM I/O, the sentence slicer — all `futures::Stream<f32>` |
 | `hub-kit` | model downloads from Hugging Face |
 | `cli-kit` | logging, shell completions, `--device` parsing |
+| `train-kit` | checkpoints, weight EMA, gradient accumulation, the live dashboard — generic over the module being trained |
 
 **Networks**, named after the model, holding no app dependencies:
 
 | crate | role |
 |-------|------|
-| `burn-vits` | the VITS blocks RVC and GPT-SoVITS share — attention, WaveNet, flow, posterior encoder, ResBlock1, discriminators |
+| `burn-vits` | the VITS blocks RVC and GPT-SoVITS share — attention, WaveNet, flow, posterior encoder, ResBlock1, discriminators — plus the family's losses and its differentiable STFT |
 | `burn-rvc` | what is RVC's alone: the NSF source module, the 768-dim content encoder, the synthesizer wiring |
 | `burn-whisper` | the Whisper network; loads HF safetensors unchanged |
 

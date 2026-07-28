@@ -57,30 +57,32 @@ pub struct Dashboard {
 impl Dashboard {
     /// Build the dashboard. When `enabled`, spawn Burn's TUI (it takes over the
     /// terminal) and register the metrics; otherwise this is inert.
-    pub fn new(enabled: bool, steps_per_epoch: usize, total_epochs: usize) -> Self {
+    ///
+    /// `losses` names the curves to plot, in the order [`Dashboard::update`]
+    /// will supply them; the learning rate is appended automatically. A GAN
+    /// passes three, a cross-entropy stage one.
+    pub fn new(
+        enabled: bool,
+        steps_per_epoch: usize,
+        total_epochs: usize,
+        losses: &[&'static str],
+    ) -> Self {
         let interrupter = Interrupter::new();
-        let plots = vec![
-            PlotMetric {
-                id: metric_id("g_loss"),
-                name: "g_loss",
+        let mut plots: Vec<PlotMetric> = losses
+            .iter()
+            .map(|&name| PlotMetric {
+                id: metric_id(name),
+                name,
                 sci: false,
-            },
-            PlotMetric {
-                id: metric_id("d_loss"),
-                name: "d_loss",
-                sci: false,
-            },
-            PlotMetric {
-                id: metric_id("mel_loss"),
-                name: "mel_loss",
-                sci: false,
-            },
-            PlotMetric {
-                id: metric_id("lr"),
-                name: "lr",
-                sci: true,
-            },
-        ];
+            })
+            .collect();
+        // The learning rate rides along with the losses, formatted differently
+        // because it is orders of magnitude smaller than any of them.
+        plots.push(PlotMetric {
+            id: metric_id("lr"),
+            name: "lr",
+            sci: true,
+        });
 
         let (renderer, cpu, gpu) = if enabled {
             let mut r = TuiMetricsRendererWrapper::new(interrupter.clone(), None);
@@ -129,12 +131,14 @@ impl Dashboard {
     }
 
     /// Push the current step's losses, learning rate, system usage, and progress.
-    pub fn update(&mut self, step: usize, g: f32, d: f32, mel: f32, lr: f64) {
+    ///
+    /// `losses` must match the names given to [`Dashboard::new`], in order.
+    pub fn update(&mut self, step: usize, losses: &[f32], lr: f64) {
         let Some(r) = self.renderer.as_mut() else {
             return;
         };
 
-        let values = [g as f64, d as f64, mel as f64, lr];
+        let values: Vec<f64> = losses.iter().map(|&v| v as f64).chain([lr]).collect();
         for (m, &v) in self.plots.iter().zip(values.iter()) {
             let formatted = if m.sci {
                 format!("{v:.3e}")

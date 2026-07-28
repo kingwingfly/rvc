@@ -90,6 +90,20 @@ where
     Ok(module.load_from(&mut store)?)
 }
 
+/// Write a module to a safetensors file, replacing whatever was there.
+///
+/// Overwrite rather than fail: re-running training to an existing output must
+/// replace it, not error at save time and lose the weights just trained.
+pub fn save_safetensors<B, M>(module: &M, path: &Path) -> Result<(), Box<dyn Error>>
+where
+    B: Backend,
+    M: ModuleSnapshot<B>,
+{
+    let mut store = SafetensorsStore::from_file(path).overwrite(true);
+    module.save_into(&mut store)?;
+    Ok(())
+}
+
 /// Widen fp16 tensors to fp32 on the way in, and never the other way.
 ///
 /// `burn_store::HalfPrecisionAdapter` looks like exactly this and is a trap: it
