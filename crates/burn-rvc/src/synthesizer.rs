@@ -21,6 +21,8 @@ use burn_vits::PosteriorEncoder;
 use burn_vits::ResidualCouplingBlock;
 
 /// Number of coupling layers in the flow.
+/// WaveNet depth inside each coupling layer. RVC's three; GPT-SoVITS uses four.
+const FLOW_N_LAYERS: usize = 3;
 const N_FLOWS: usize = 4;
 
 /// Outputs of [`Synthesizer::forward_train`] needed by the losses.
@@ -70,6 +72,7 @@ impl<B: Backend> Synthesizer<B> {
                 cfg.hidden_channels,
                 cfg.gin_channels,
                 N_FLOWS,
+                FLOW_N_LAYERS,
                 device,
             ),
             emb_g: EmbeddingConfig::new(cfg.spk_embed_dim, cfg.gin_channels).init(device),

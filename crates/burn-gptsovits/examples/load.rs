@@ -12,7 +12,9 @@
 mod common;
 
 use burn::tensor::backend::Backend;
-use burn_gptsovits::{Hubert, HubertConfig, Quantizer, QuantizerConfig};
+use burn_gptsovits::{
+    Hubert, HubertConfig, Quantizer, QuantizerConfig, SovitsConfig, SovitsPartial,
+};
 
 struct Load {
     component: String,
@@ -30,8 +32,12 @@ impl common::Job for Load {
                 let mut model = Quantizer::<B>::new(&QuantizerConfig::default(), 1, device);
                 model.load_pytorch(&self.weights)
             }
+            "sovits" => {
+                let mut model = SovitsPartial::<B>::new(&SovitsConfig::default(), device);
+                model.load_pytorch(&self.weights)
+            }
             other => {
-                eprintln!("unknown component `{other}` (known: hubert, quantizer)");
+                eprintln!("unknown component `{other}` (known: hubert, quantizer, sovits)");
                 std::process::exit(2);
             }
         }

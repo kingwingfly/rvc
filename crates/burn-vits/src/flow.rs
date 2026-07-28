@@ -13,7 +13,6 @@ use crate::wavenet::Wn;
 
 const FLOW_KERNEL: usize = 5;
 const FLOW_DILATION_RATE: usize = 1;
-const FLOW_N_LAYERS: usize = 3;
 
 /// One additive coupling layer.
 #[derive(Module, Debug)]
@@ -25,10 +24,14 @@ pub struct ResidualCouplingLayer<B: Backend> {
 }
 
 impl<B: Backend> ResidualCouplingLayer<B> {
+    /// `n_layers` is the depth of the coupling's WaveNet — 3 in RVC, 4 in
+    /// GPT-SoVITS. A parameter rather than a constant because that is the only
+    /// thing that differs between them here.
     pub fn new(
         channels: usize,
         hidden_channels: usize,
         gin_channels: usize,
+        n_layers: usize,
         device: &B::Device,
     ) -> Self {
         let half = channels / 2;
@@ -38,7 +41,7 @@ impl<B: Backend> ResidualCouplingLayer<B> {
                 hidden_channels,
                 FLOW_KERNEL,
                 FLOW_DILATION_RATE,
-                FLOW_N_LAYERS,
+                n_layers,
                 gin_channels,
                 device,
             ),
@@ -77,16 +80,26 @@ pub struct ResidualCouplingBlock<B: Backend> {
 }
 
 impl<B: Backend> ResidualCouplingBlock<B> {
-    /// `n_flows` coupling layers (RVC uses 4).
+    /// `n_flows` coupling layers, each `n_layers` deep. Both RVC and GPT-SoVITS
+    /// use four flows; they differ in the depth.
     pub fn new(
         channels: usize,
         hidden_channels: usize,
         gin_channels: usize,
         n_flows: usize,
+        n_layers: usize,
         device: &B::Device,
     ) -> Self {
         let flows = (0..n_flows)
-            .map(|_| ResidualCouplingLayer::new(channels, hidden_channels, gin_channels, device))
+            .map(|_| {
+                ResidualCouplingLayer::new(
+                    channels,
+                    hidden_channels,
+                    gin_channels,
+                    n_layers,
+                    device,
+                )
+            })
             .collect();
         Self { flows }
     }

@@ -14,6 +14,8 @@
 
 mod hubert;
 mod quantizer;
+mod sovits;
 
 pub use hubert::{Hubert, HubertConfig};
 pub use quantizer::{Codebook, Quantizer, QuantizerConfig, Vq};
+pub use sovits::{SovitsConfig, SovitsPartial};
