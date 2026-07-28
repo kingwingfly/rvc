@@ -112,7 +112,8 @@ Three tiers, and the names say which is which.
 
 | crate | role |
 |-------|------|
-| `burn-rvc` | the RVC v2 network (`SynthesizerTrnMs768NSFsid` + discriminators) |
+| `burn-vits` | the VITS blocks RVC and GPT-SoVITS share — attention, WaveNet, flow, posterior encoder, ResBlock1, discriminators |
+| `burn-rvc` | what is RVC's alone: the NSF source module, the 768-dim content encoder, the synthesizer wiring |
 | `burn-whisper` | the Whisper network; loads HF safetensors unchanged |
 
 **Engines**, one `-core` and one `-cli` apiece, all the same shape:

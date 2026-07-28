@@ -1,0 +1,14 @@
+[package]
+name = "burn-vits"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "The VITS building blocks shared by RVC and GPT-SoVITS, in Burn"
+
+[dependencies]
+burn = { version = "0.21", default-features = false, features = ["std"] }
+burn-store.workspace = true
+# Checkpoint loading, shared with every other network crate.
+burn-kit = { workspace = true, features = ["store"] }

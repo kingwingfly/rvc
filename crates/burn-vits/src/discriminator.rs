@@ -1,5 +1,9 @@
-//! HiFi-GAN discriminators (`MultiPeriodDiscriminatorV2`) for adversarial
-//! training: one scale discriminator + eight period discriminators.
+//! HiFi-GAN discriminators for adversarial training: one scale discriminator
+//! plus a period discriminator for each period the model asks for.
+//!
+//! The period list is the only thing that differs across the family — RVC v2
+//! uses eight, GPT-SoVITS v2 five, v2Pro seven — so it is a parameter, and the
+//! checkpoint remap below is generated from its length rather than written out.
 
 use std::error::Error;
 use std::path::Path;
@@ -13,10 +17,7 @@ use crate::nn::leaky_relu;
 use crate::weightnorm::{WeightNormConv1d, WeightNormConv2d};
 use burn_kit::store::load_pytorch_into;
 
-const LRELU_SLOPE: f64 = 0.1;
-
-/// RVC v2 period list.
-const PERIODS: [usize; 8] = [2, 3, 5, 7, 11, 17, 23, 37];
+use crate::resblock::LRELU_SLOPE;
 
 /// Scale discriminator over the raw waveform (`DiscriminatorS`).
 #[derive(Module, Debug)]
@@ -26,7 +27,7 @@ pub struct DiscriminatorS<B: Backend> {
 }
 
 impl<B: Backend> DiscriminatorS<B> {
-    fn new(device: &B::Device) -> Self {
+    pub fn new(device: &B::Device) -> Self {
         let convs = vec![
             WeightNormConv1d::new(1, 16, 15, 1, 7, 1, device),
             WeightNormConv1d::new_grouped(16, 64, 41, 4, 20, 1, 4, device),
@@ -76,7 +77,7 @@ pub struct DiscriminatorP<B: Backend> {
 }
 
 impl<B: Backend> DiscriminatorP<B> {
-    fn new(period: usize, device: &B::Device) -> Self {
+    pub fn new(period: usize, device: &B::Device) -> Self {
         // kernel (5,1), stride (3,1) except last (1,1); padding (2,0).
         let convs = vec![
             WeightNormConv2d::new(1, 32, [5, 1], [3, 1], [2, 0], device),
@@ -118,7 +119,7 @@ impl<B: Backend> DiscriminatorP<B> {
 }
 
 /// Product of the strides of `DiscriminatorS`'s four `k=41, s=4` convolutions.
-const SCALE_ALIGN: usize = 4 * 4 * 4 * 4;
+pub const SCALE_ALIGN: usize = 4 * 4 * 4 * 4;
 
 /// Reflect-pad the last dim of a `[b, c, t]` tensor by `n` (numpy `reflect`:
 /// mirror without repeating the edge sample).
@@ -143,30 +144,34 @@ pub struct MultiPeriodDiscriminator<B: Backend> {
 
 impl<B: Backend> MultiPeriodDiscriminator<B> {
     /// Build the standard v2 discriminator bank.
-    pub fn new(device: &B::Device) -> Self {
+    pub fn new(periods: &[usize], device: &B::Device) -> Self {
         Self {
             scale: DiscriminatorS::new(device),
-            periods: PERIODS
+            periods: periods
                 .iter()
                 .map(|&p| DiscriminatorP::new(p, device))
                 .collect(),
         }
     }
 
-    /// Load the reference discriminator checkpoint (`f0D*.pth`), remapping the
-    /// flat `discriminators.N` list onto `scale` + `periods`.
+    /// Load a reference discriminator checkpoint, remapping the flat
+    /// `discriminators.N` list onto `scale` + `periods`.
+    ///
+    /// Entry 0 is always the scale discriminator and the rest are the periods in
+    /// order — the layout every VITS-lineage project inherited, so the mapping is
+    /// derived from the period count rather than spelled out per model.
     pub fn load_pytorch(&mut self, path: impl AsRef<Path>) -> Result<ApplyResult, Box<dyn Error>> {
-        let remaps = [
-            (r"^discriminators\.0\.", "scale."),
-            (r"^discriminators\.1\.", "periods.0."),
-            (r"^discriminators\.2\.", "periods.1."),
-            (r"^discriminators\.3\.", "periods.2."),
-            (r"^discriminators\.4\.", "periods.3."),
-            (r"^discriminators\.5\.", "periods.4."),
-            (r"^discriminators\.6\.", "periods.5."),
-            (r"^discriminators\.7\.", "periods.6."),
-            (r"^discriminators\.8\.", "periods.7."),
-        ];
+        let mut remaps = vec![(r"^discriminators\.0\.".to_string(), "scale.".to_string())];
+        for i in 0..self.periods.len() {
+            remaps.push((
+                format!(r"^discriminators\.{}\.", i + 1),
+                format!("periods.{i}."),
+            ));
+        }
+        let remaps: Vec<(&str, &str)> = remaps
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
         load_pytorch_into::<B, _>(self, path.as_ref(), "model", &remaps)
     }
 

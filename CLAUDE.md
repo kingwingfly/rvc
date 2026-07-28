@@ -132,7 +132,8 @@ Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper
 | `burn-kit` | Burn plumbing with no model knowledge: `--device` resolution and checkpoint loading, shared by every network crate |
 | `audio-kit` | ffmpeg decode/resample + WAV/raw-PCM I/O, all as `futures::Stream<f32>` |
 | `rvc-core` | the voice-conversion pipeline: `FeatureExtractor` (ContentVec + RMVPE), coarse-pitch/upsample/pitch-shift DSP, streaming `Converter` (block/overlap with an **overlapping** crossfade — consecutive kept blocks share `xf_out` output samples so the blend adds, never deletes, audio), an optional post de-hiss stage (`denoise.rs`, `--denoise`), and **all three** generator backends (ort, Burn/LibTorch, Burn/CubeCL) behind one `Generator` trait |
-| `burn-rvc` | the RVC v2 network itself (standalone Burn port of `SynthesizerTrnMs768NSFsid` + `MultiPeriodDiscriminator`); no app deps |
+| `burn-vits` | the VITS blocks RVC and GPT-SoVITS share (both descend from the same source, which is why their `state_dict` names line up): attention stack, `Wn`, flow, posterior encoder, `ResBlock1`, weight-norm convs, discriminators |
+| `burn-rvc` | what is RVC's alone: `SourceModule` (NSF), the 768-dim `TextEncoder`, `GeneratorNsf`, the synthesizer wiring; re-exports `burn-vits` so it still reads as one model |
 | `burn-whisper` | the Whisper network (standalone Burn port); mirrors HF's `state_dict` layout so `openai/whisper-large-v3-turbo` loads unchanged |
 | `rvc-train` | native Rust/Burn adversarial training loop (see `crates/rvc-train/ARCHITECTURE.md`) |
 | `hub-kit` | auto-download ContentVec/RMVPE ONNX from Hugging Face |
@@ -175,6 +176,13 @@ would otherwise be a multi-GB download of a **CPU-only** LibTorch.
 `crates/{rvc,stt,voice}-cli/build.rs` bake `$LIBTORCH/lib` into the binary as a
 `RUNPATH`; without it a missing `libtorch.so` aborts in `ld.so` before `main`, on
 every subcommand. They are deliberate duplicates — an rpath is per-executable.
+
+### Moving a module between crates is free
+Burn derives parameter paths from the field names of the struct that *contains* a
+module, not from the crate it was declared in. That is what made `burn-vits`
+extractable with the checkpoints untouched, and the check is exact: `burn-rvc`'s
+`load` example still reports 560/0/0 and 165/0/0. Renaming a **field** does move
+a path; renaming a *type* or moving a *file* does not.
 
 ### Weight-compatibility constraint (important when editing `burn-rvc`)
 The Burn modules are kept **weight-compatible with RVC's PyTorch `state_dict`** so

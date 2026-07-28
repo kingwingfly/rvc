@@ -25,7 +25,7 @@ pub struct ResidualCouplingLayer<B: Backend> {
 }
 
 impl<B: Backend> ResidualCouplingLayer<B> {
-    fn new(
+    pub fn new(
         channels: usize,
         hidden_channels: usize,
         gin_channels: usize,

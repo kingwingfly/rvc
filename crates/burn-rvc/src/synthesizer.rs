@@ -14,11 +14,11 @@ use burn::tensor::{Distribution, Int, Tensor};
 use burn_store::{ApplyResult, ModuleSnapshot, SafetensorsStore};
 
 use crate::config::SynthesizerConfig;
-use crate::flow::ResidualCouplingBlock;
 use crate::generator::GeneratorNsf;
-use crate::posterior::PosteriorEncoder;
 use crate::text_encoder::TextEncoder;
 use burn_kit::store::load_pytorch_into;
+use burn_vits::PosteriorEncoder;
+use burn_vits::ResidualCouplingBlock;
 
 /// Number of coupling layers in the flow.
 const N_FLOWS: usize = 4;

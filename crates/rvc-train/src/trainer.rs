@@ -79,7 +79,7 @@ pub fn run<AB: AutodiffBackend>(
     }
 
     // ---- Discriminator: resume from the sidecar if present, else warm-start -
-    let mut disc = MultiPeriodDiscriminator::<AB>::new(device);
+    let mut disc = MultiPeriodDiscriminator::<AB>::new(&burn_rvc::RVC_V2_PERIODS, device);
     let disc_resume = resume.as_ref().map(Checkpoint::disc).filter(|p| p.exists());
     if let Some(p) = &disc_resume {
         let res = disc

@@ -17,6 +17,7 @@ tch = ["burn/tch"]
 
 [dependencies]
 burn = { version = "0.21", default-features = false, features = ["std"] }
+burn-vits.workspace = true
 burn-store.workspace = true
 # Checkpoint loading lives in `burn-kit`, shared with every other network crate.
 burn-kit = { workspace = true, features = ["store"] }

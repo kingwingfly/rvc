@@ -80,3 +80,21 @@ impl SynthesizerConfig {
         self.upsample_rates.iter().product()
     }
 }
+
+/// The periods RVC v2's discriminator uses. GPT-SoVITS's list is different,
+/// which is why `burn-vits` takes it as an argument rather than defining one.
+pub const RVC_V2_PERIODS: [usize; 8] = [2, 3, 5, 7, 11, 17, 23, 37];
+
+impl SynthesizerConfig {
+    /// The shape of the shared VITS attention stack this configuration implies.
+    pub fn encoder(&self) -> burn_vits::EncoderConfig {
+        burn_vits::EncoderConfig {
+            hidden_channels: self.hidden_channels,
+            filter_channels: self.filter_channels,
+            n_heads: self.n_heads,
+            n_layers: self.n_layers,
+            kernel_size: self.kernel_size,
+            window_size: self.window_size,
+        }
+    }
+}

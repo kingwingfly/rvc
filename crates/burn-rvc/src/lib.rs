@@ -14,23 +14,19 @@
 //! The model is generic over the Burn [`Backend`](burn::tensor::backend::Backend).
 
 mod config;
-mod discriminator;
-mod flow;
 mod generator;
-mod nn;
-mod posterior;
 mod synthesizer;
 mod text_encoder;
-mod wavenet;
-mod weightnorm;
 
-pub use config::SynthesizerConfig;
-pub use discriminator::{DiscriminatorP, DiscriminatorS, MultiPeriodDiscriminator};
-pub use flow::{ResidualCouplingBlock, ResidualCouplingLayer};
-pub use generator::{GeneratorNsf, ResBlock1, SourceModule};
-pub use nn::RvcLayerNorm;
-pub use posterior::PosteriorEncoder;
+pub use config::{RVC_V2_PERIODS, SynthesizerConfig};
+pub use generator::{GeneratorNsf, SourceModule};
 pub use synthesizer::{Synthesizer, TrainForward};
-pub use text_encoder::{Encoder, Ffn, MultiHeadAttention, TextEncoder};
-pub use wavenet::Wn;
-pub use weightnorm::{WeightNormConv1d, WeightNormConv2d, WeightNormConvTranspose1d};
+pub use text_encoder::TextEncoder;
+
+// The VITS blocks live in `burn-vits`, shared with GPT-SoVITS. Re-exported so
+// this crate still reads as one model to its consumers.
+pub use burn_vits::{
+    DiscriminatorP, DiscriminatorS, Encoder, Ffn, MultiHeadAttention, MultiPeriodDiscriminator,
+    PosteriorEncoder, ResBlock1, ResidualCouplingBlock, ResidualCouplingLayer, VitsLayerNorm,
+    WeightNormConv1d, WeightNormConv2d, WeightNormConvTranspose1d, Wn,
+};
