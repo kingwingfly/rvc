@@ -1,9 +1,9 @@
-//! `voice stt` — speech recognition as a Unix filter.
+//! `stt` — speech recognition as a Unix filter.
 //!
 //! Raw f32le mono PCM at 16 kHz on stdin, text on stdout, logs on stderr:
 //!
 //! ```sh
-//! ffmpeg -i take.mp3 -f f32le -ar 16000 -ac 1 - | voice stt
+//! ffmpeg -i take.mp3 -f f32le -ar 16000 -ac 1 - | stt
 //! ```
 //!
 //! `--format text` (the default) writes one line per segment so it pipes
@@ -11,7 +11,7 @@
 //! the detected language, which is what a subtitle file or a TTS training
 //! manifest needs.
 //!
-//! Unlike `voice rvc serve` this is **not** streaming: the whole input is read
+//! Unlike `rvc serve` this is **not** streaming: the whole input is read
 //! before anything is transcribed, because segmentation looks for silences
 //! across the recording and Whisper's own mel normalisation is per 30 s window.
 
@@ -19,8 +19,8 @@ use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
 use futures::StreamExt;
 use std::path::PathBuf;
+use stt_core::{DecodeOptions, TranscribeOptions};
 use tokio::io::{AsyncWriteExt, BufWriter};
-use voice_stt::{DecodeOptions, TranscribeOptions};
 
 use crate::backend::{SttBackend, load_transcriber};
 
@@ -60,7 +60,7 @@ pub struct SttArgs {
     #[arg(long, value_enum, default_value_t = SttBackend::Auto)]
     pub backend: SttBackend,
     /// Compute device: `auto`, `cpu`, `gpu`, `gpu:N`, `mps` or `vulkan`.
-    #[arg(long, default_value = "auto", value_name = "DEVICE", value_parser = crate::args::parse_device)]
+    #[arg(long, default_value = "auto", value_name = "DEVICE", value_parser = cli_kit::parse_device)]
     pub device: burn_kit::DeviceSpec,
     /// Samples per input read chunk from stdin.
     #[arg(long, default_value_t = 16000)]
@@ -95,7 +95,7 @@ pub async fn run(args: SttArgs) -> Result<()> {
         Some(dir) => dir.clone(),
         None => {
             tracing::info!("resolving Whisper weights from Hugging Face...");
-            voice_hub::fetch_whisper(args.repo.as_deref(), args.cache_dir.as_deref())
+            hub_kit::fetch_whisper(args.repo.as_deref(), args.cache_dir.as_deref())
                 .await
                 .context("failed to fetch the Whisper model")?
                 .dir
@@ -105,18 +105,18 @@ pub async fn run(args: SttArgs) -> Result<()> {
     let stt = tokio::task::block_in_place(|| load_transcriber(&dir, args.backend, args.device))?;
 
     // Buffered, not streamed: see the module docs.
-    let mut input = Box::pin(voice_audio::read_f32le(tokio::io::stdin(), args.chunk));
+    let mut input = Box::pin(audio_kit::read_f32le(tokio::io::stdin(), args.chunk));
     let mut audio: Vec<f32> = Vec::new();
     while let Some(chunk) = input.next().await {
         audio.extend_from_slice(&chunk.context("reading stdin")?);
     }
     tracing::info!(
         "transcribing {:.1} s of audio",
-        audio.len() as f32 / voice_stt::SAMPLE_RATE as f32
+        audio.len() as f32 / stt_core::SAMPLE_RATE as f32
     );
 
     let opts = TranscribeOptions {
-        slice: voice_audio::SliceOptions {
+        slice: audio_kit::SliceOptions {
             silence_db: args.silence_db,
             min_silence: args.min_silence,
             min_clip: args.min_clip,

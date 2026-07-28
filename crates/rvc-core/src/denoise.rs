@@ -15,13 +15,13 @@
 //! with none of the warbly musical-noise `afftdn` leaves behind — and it runs
 //! ~12× faster than realtime, so `serve` stays realtime.
 //!
-//! The heavy lifting lives in [`voice_audio::AudioFilter`]; this is a thin,
+//! The heavy lifting lives in [`audio_kit::AudioFilter`]; this is a thin,
 //! streaming wrapper that keeps the same `process`/`flush`/`reset` shape the
 //! [`crate::Converter`] expects. The graph is built lazily and, if ffmpeg
 //! cannot build it (e.g. a build without `anlmdn`), the stage fails **open** —
 //! audio passes through unchanged with a warning rather than being dropped.
 
-use voice_audio::AudioFilter;
+use audio_kit::AudioFilter;
 
 /// Tunable de-hiss settings. Defaults are tuned for ASMR (`strength` is the one
 /// knob most worth touching: raise it for more hiss removal, lower it if soft

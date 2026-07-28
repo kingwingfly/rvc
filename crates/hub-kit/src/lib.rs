@@ -118,7 +118,7 @@ pub async fn fetch_shared(
 /// the dimensions, the control-token ids and the BPE vocabulary.
 #[derive(Debug, Clone)]
 pub struct WhisperAssets {
-    /// The directory holding all four, which is what `voice-stt` loads from.
+    /// The directory holding all four, which is what `stt-core` loads from.
     pub dir: PathBuf,
 }
 
@@ -129,7 +129,7 @@ pub struct WhisperAssets {
 /// toolkit ports models rather than consuming somebody's conversion of one.
 pub const DEFAULT_WHISPER: (&str, &str) = ("openai", "whisper-large-v3-turbo");
 
-/// Files that must be present for `voice-stt` to load a checkpoint.
+/// Files that must be present for `stt-core` to load a checkpoint.
 const WHISPER_FILES: [&str; 4] = [
     "model.safetensors",
     "config.json",
@@ -140,7 +140,7 @@ const WHISPER_FILES: [&str; 4] = [
 /// Fetch a Whisper repo, returning the directory the files landed in.
 ///
 /// `repo` overrides the default as `owner/name` — that is how a different size
-/// (`openai/whisper-large-v3`) or a fine-tune is selected, since `voice-stt`
+/// (`openai/whisper-large-v3`) or a fine-tune is selected, since `stt-core`
 /// reads every dimension from the repo's own `config.json`.
 pub async fn fetch_whisper(repo: Option<&str>, cache_dir: Option<&Path>) -> Result<WhisperAssets> {
     let (owner, name) = match repo {

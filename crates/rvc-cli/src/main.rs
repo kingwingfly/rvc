@@ -32,6 +32,6 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Rvc(c) => rvc_cli::run_rvc(*c).await,
         Command::Models(a) => commands::models::run(a).await,
-        Command::Completions(a) => commands::completions::run(a, Cli::command()).await,
+        Command::Completions(a) => cli_kit::completions(a, Cli::command()),
     }
 }

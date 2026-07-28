@@ -2,9 +2,11 @@
 resolver = "3"
 members = [
     "crates/burn-kit",
-    "crates/voice-audio",
-    "crates/voice-hub",
-    "crates/voice-stt",
+    "crates/audio-kit",
+    "crates/hub-kit",
+    "crates/stt-core",
+    "crates/cli-kit",
+    "crates/stt-cli",
     "crates/rvc-core",
     "crates/burn-rvc",
     "crates/burn-whisper",
@@ -24,8 +26,8 @@ rust-version = "1.85"
 # Local crates
 # Named `voice-*`, not `rvc-*`: three engines share these, and an engine must
 # never appear to depend on another engine.
-voice-audio = { path = "crates/voice-audio" }
-voice-hub = { path = "crates/voice-hub" }
+audio-kit = { path = "crates/audio-kit" }
+hub-kit = { path = "crates/hub-kit" }
 rvc-core = { path = "crates/rvc-core" }
 rvc-train = { path = "crates/rvc-train" }
 # No default features: `voice-cli` re-declares the same backend feature names and
@@ -35,7 +37,11 @@ rvc-cli = { path = "crates/rvc-cli", default-features = false }
 burn-rvc = { path = "crates/burn-rvc" }
 burn-kit = { path = "crates/burn-kit" }
 burn-whisper = { path = "crates/burn-whisper" }
-voice-stt = { path = "crates/voice-stt" }
+stt-core = { path = "crates/stt-core" }
+cli-kit = { path = "crates/cli-kit" }
+# Same reason as `rvc-cli`: `voice-cli` re-declares the backend features and
+# forwards them, and cargo forbids overriding an inherited `default-features`.
+stt-cli = { path = "crates/stt-cli", default-features = false }
 burn = { version = "0.21", default-features = false, features = ["std", "ndarray"] }
 # Checkpoint readers. `burn-kit` owns the loading helpers; `burn-rvc` and every
 # later network crate go through it rather than depending on this directly.
@@ -92,3 +98,25 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 opt-level = 3
 lto = "thin"
 codegen-units = 1
+
+# A debug build has to be able to actually run a model, or every check turns into
+# a release build and a release build of this workspace is minutes of `lto`.
+# Dependencies carry all the tensor math (burn, ndarray, tch, rustfft, ffmpeg) and
+# they change almost never, so optimise them fully and cache that. Our own crates
+# stay at `opt-level = 1`: still quick to compile, but not the 10-100x penalty
+# that unoptimised Rust numeric loops pay.
+#
+# Changing either line invalidates the whole cache — expect one slow rebuild.
+[profile.dev]
+opt-level = 1
+# Full debuginfo makes each binary ~1 GB, and linking that dominates every
+# incremental rebuild. Line tables keep panic backtraces useful — which is what
+# this workspace actually debugs with — at a fraction of the size.
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+
+[profile.dev.package."*"]
+opt-level = 3
+# Dependencies are not what anyone here steps through, and they are most of the
+# debuginfo.
+debug = false

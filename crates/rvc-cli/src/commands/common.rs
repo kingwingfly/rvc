@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use burn_kit::DeviceSpec;
+use hub_kit::ModelRef;
 use rvc_core::{
     ConvertParams, Converter, DenoiseParams, ModelPaths, RvcConfig, RvcModel, StreamParams,
 };
-use voice_hub::ModelRef;
 
 use crate::args::{InferBackend, ModelOpts};
 
@@ -161,13 +161,13 @@ pub async fn resolve_feature_models(opts: &ModelOpts) -> Result<(PathBuf, PathBu
     let cache = opts.cache_dir.as_deref();
     let content = match &opts.content {
         Some(p) => p.clone(),
-        None => voice_hub::fetch(&voice_hub::default_contentvec(), cache)
+        None => hub_kit::fetch(&hub_kit::default_contentvec(), cache)
             .await
             .context("failed to fetch ContentVec ONNX (override with --content)")?,
     };
     let rmvpe = match &opts.rmvpe {
         Some(p) => p.clone(),
-        None => voice_hub::fetch(&voice_hub::default_rmvpe(), cache)
+        None => hub_kit::fetch(&hub_kit::default_rmvpe(), cache)
             .await
             .context("failed to fetch RMVPE ONNX (override with --rmvpe)")?,
     };
@@ -183,7 +183,7 @@ pub async fn build_rvc_config(opts: &ModelOpts) -> Result<RvcConfig> {
         Some(p) => p.clone(),
         None => {
             tracing::info!("resolving ContentVec ONNX from Hugging Face...");
-            voice_hub::fetch(&voice_hub::default_contentvec(), cache)
+            hub_kit::fetch(&hub_kit::default_contentvec(), cache)
                 .await
                 .context("failed to fetch ContentVec ONNX (override with --content)")?
         }
@@ -193,7 +193,7 @@ pub async fn build_rvc_config(opts: &ModelOpts) -> Result<RvcConfig> {
         Some(p) => p.clone(),
         None => {
             tracing::info!("resolving RMVPE ONNX from Hugging Face...");
-            voice_hub::fetch(&voice_hub::default_rmvpe(), cache)
+            hub_kit::fetch(&hub_kit::default_rmvpe(), cache)
                 .await
                 .context("failed to fetch RMVPE ONNX (override with --rmvpe)")?
         }

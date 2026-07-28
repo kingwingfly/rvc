@@ -6,9 +6,9 @@
 //! short linear crossfade to suppress seams. Everything is mono `f32`: input at
 //! 16 kHz (the analysis rate), output at the generator's sample rate.
 
+use audio_kit::Samples;
 use futures::{Stream, StreamExt};
 use tokio::sync::mpsc;
-use voice_audio::Samples;
 
 use crate::backend::Generator;
 use crate::config::{ANALYSIS_SR, ConvertParams};
@@ -239,10 +239,7 @@ pub fn convert_stream<S>(
     mut input: S,
 ) -> impl Stream<Item = Result<Samples>>
 where
-    S: Stream<Item = std::result::Result<Samples, voice_audio::AudioError>>
-        + Unpin
-        + Send
-        + 'static,
+    S: Stream<Item = std::result::Result<Samples, audio_kit::AudioError>> + Unpin + Send + 'static,
 {
     let (in_tx, mut in_rx) = mpsc::channel::<Samples>(32);
     let (out_tx, mut out_rx) = mpsc::channel::<Result<Samples>>(32);

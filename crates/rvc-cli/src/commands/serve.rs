@@ -47,7 +47,7 @@ pub async fn run(args: ServeArgs) -> Result<()> {
 
     // stdin -> stream of f32 chunks -> converter -> stdout. Box::pin so the
     // async-generator streams satisfy the Unpin + Send + 'static bounds.
-    let input = Box::pin(voice_audio::read_f32le(tokio::io::stdin(), args.chunk));
+    let input = Box::pin(audio_kit::read_f32le(tokio::io::stdin(), args.chunk));
     let mut output = Box::pin(convert_stream(converter, input));
 
     let mut stdout = BufWriter::new(tokio::io::stdout());

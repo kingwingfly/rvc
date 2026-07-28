@@ -27,21 +27,33 @@ for the authors and unusable for anyone else. The single `.safetensors → ONNX`
 exporter under `export/` is the last exception, gains no new responsibilities,
 and should eventually go.
 
-**Two binaries.** `rvc` (`crates/rvc-cli`) is voice conversion on its own;
-`voice` (`crates/voice-cli`) is the whole toolkit and hosts the same subcommands
-as `voice rvc …`. `rvc-cli` is a **library as well as a binary** and `voice-cli`
-depends on it, so an argument is defined exactly once — never copy a flag between
-them. `rvc-cli::args::RvcCommand` is `#[command(flatten)]`ed by `rvc` and nested
-by `voice`. User-facing strings in shared code must not name a binary
-("train one with the `train` subcommand", not "`rvc train`").
+**One binary per engine, plus `voice`.** `rvc` and `stt` each stand alone and
+pull in only what they use — installing `stt` costs no ONNX Runtime and none of
+the RVC stack. `voice` is the *integration*: it depends on `rvc-cli` and
+`stt-cli` **as libraries**, so an argument is defined exactly once and never
+copied between binaries. Every `*-cli` crate is therefore a lib **and** a bin.
+`rvc-cli::args::RvcCommand` is `#[command(flatten)]`ed by `rvc` and nested by
+`voice`; `stt-cli::SttArgs` is `#[command(flatten)]`ed by `stt` and nested by
+`voice`. User-facing strings in shared code must not name a binary ("train one
+with the `train` subcommand", not "`rvc train`").
 
 **No engine depends on another engine.** Voice conversion, recognition and
 synthesis are siblings. Anything two of them need moves to a neutral crate first.
 
 ### Naming conventions
-Network crates are named after the **model** (`burn-rvc`, reads like
-`burn_dinov3`) and hold no app dependencies. App crates are named after the
-**job** (`rvc-core` is the voice-conversion pipeline, not one model).
+Three tiers, and the name says which tier a crate is in:
+
+- **`*-kit`** — shared plumbing with no model and no engine knowledge, safe for
+  anything to depend on: `burn-kit` (devices, checkpoints), `audio-kit` (ffmpeg
+  I/O, the slicer), `hub-kit` (downloads), `cli-kit` (logging, completions).
+- **`burn-*`** — one network each, named after the **model** (`burn-rvc` reads
+  like `burn_dinov3`), holding no app dependencies and naming no compute backend.
+- **`<engine>-core` / `<engine>-cli`** — one engine each, all the same shape:
+  `rvc-core`+`rvc-train`+`rvc-cli`, `stt-core`+`stt-cli`, later `tts-core`+`tts-cli`.
+
+**`voice-` is reserved for the top.** It marks the integration, so a crate that
+an engine depends on must never be named `voice-*` — that is why the shared
+crates are `*-kit`. `voice-cli` is the only `voice-*` crate.
 
 ## Build / run / verify
 
@@ -50,8 +62,14 @@ Network crates are named after the **model** (`burn-rvc`, reads like
 export ORT_DYLIB_PATH=/usr/lib/libonnxruntime.so
 export LIBTORCH=$PWD/libtorch   # must be exactly 2.9.0 (what tch 0.22 targets)
 
-cargo build --release           # both binaries: `rvc` and `voice`
-cargo build --release -p rvc-cli   # just `rvc`
+cargo build                     # all three binaries: `rvc`, `stt`, `voice`
+cargo build --release -p rvc-cli   # just `rvc`, optimised
+
+# `cargo build` (dev) is the right default even for running models: the profile
+# gives dependencies `opt-level = 3` — that is where every tensor op lives — and
+# leaves workspace crates cheap to recompile. Transcribing 24 s of audio takes
+# 19 s in debug against 18 s in release, for a fraction of the build. Reach for
+# `--release` to benchmark, not to test.
 cargo check -p rvc-core  --features cuda,tch
 cargo check -p rvc-train --features cuda,tch    # where the trait bounds bite
 cargo clippy --workspace        # workspace is kept clippy-clean
@@ -96,15 +114,17 @@ Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper
 | crate | role |
 |-------|------|
 | `burn-kit` | Burn plumbing with no model knowledge: `--device` resolution and checkpoint loading, shared by every network crate |
-| `voice-audio` | ffmpeg decode/resample + WAV/raw-PCM I/O, all as `futures::Stream<f32>` |
+| `audio-kit` | ffmpeg decode/resample + WAV/raw-PCM I/O, all as `futures::Stream<f32>` |
 | `rvc-core` | the voice-conversion pipeline: `FeatureExtractor` (ContentVec + RMVPE), coarse-pitch/upsample/pitch-shift DSP, streaming `Converter` (block/overlap with an **overlapping** crossfade — consecutive kept blocks share `xf_out` output samples so the blend adds, never deletes, audio), an optional post de-hiss stage (`denoise.rs`, `--denoise`), and **all three** generator backends (ort, Burn/LibTorch, Burn/CubeCL) behind one `Generator` trait |
 | `burn-rvc` | the RVC v2 network itself (standalone Burn port of `SynthesizerTrnMs768NSFsid` + `MultiPeriodDiscriminator`); no app deps |
 | `burn-whisper` | the Whisper network (standalone Burn port); mirrors HF's `state_dict` layout so `openai/whisper-large-v3-turbo` loads unchanged |
 | `rvc-train` | native Rust/Burn adversarial training loop (see `crates/rvc-train/ARCHITECTURE.md`) |
-| `voice-hub` | auto-download ContentVec/RMVPE ONNX from Hugging Face |
+| `hub-kit` | auto-download ContentVec/RMVPE ONNX from Hugging Face |
 | `rvc-cli` | lib **and** the `rvc` binary (clap): `convert`, `serve`, `models`, `train`, `preprocess` |
-| `voice-stt` | speech recognition: Whisper log-mel front-end, BPE vocabulary, KV-cached greedy decode, segmentation via `voice-audio`'s slicer |
-| `voice-cli` | the `voice` binary: `rvc-cli`'s subcommands nested under `voice rvc …`, plus `stt` |
+| `stt-core` | speech recognition: Whisper log-mel front-end, BPE vocabulary, KV-cached greedy decode, segmentation via `audio-kit`'s slicer |
+| `stt-cli` | lib **and** the `stt` binary |
+| `cli-kit` | logging, shell completions and `--device` parsing, shared by all three binaries |
+| `voice-cli` | the `voice` binary: `rvc-cli` and `stt-cli` nested as `voice rvc …` and `voice stt` |
 
 ### Three runtimes, one path (the key abstraction)
 Everything downstream of the generator is shared: the same `FeatureExtractor`, the
@@ -136,7 +156,7 @@ one binary, run-time choice. — and `crates/rvc-core/build.rs`
 refuses a `tch` build with no `LIBTORCH`, because `burn-tch` hardcodes
 `tch/download-libtorch` and cargo features are additive, so the silent fallback
 would otherwise be a multi-GB download of a **CPU-only** LibTorch.
-`crates/{rvc,voice}-cli/build.rs` bake `$LIBTORCH/lib` into the binary as a
+`crates/{rvc,stt,voice}-cli/build.rs` bake `$LIBTORCH/lib` into the binary as a
 `RUNPATH`; without it a missing `libtorch.so` aborts in `ld.so` before `main`, on
 every subcommand. They are deliberate duplicates — an rpath is per-executable.
 
@@ -192,7 +212,7 @@ raw/*.mp3 -o clips/` then `rvc train clips/*.wav ...` slices the corpus into
 clean per-sentence clips first — it removes between-sentence dead-air while
 **preserving soft/breathy ASMR content** (energy is used only to find long
 silent gaps, never to gate quiet-but-present sound). The shared slicer lives in
-`crates/voice-audio/src/slice.rs` (`SliceOptions`, `slice`); the two tuning knobs
+`crates/audio-kit/src/slice.rs` (`SliceOptions`, `slice`); the two tuning knobs
 are `--silence-db` (energy floor; lower to keep the softest passages) and
 `--min-silence` (how long a quiet gap must last to be a cut, so sentences are
 never split). Training itself is unchanged — it just consumes the cleaned folder.

@@ -27,7 +27,7 @@ tch = ["burn", "burn/tch", "dep:tch", "burn-kit/tch"]
 wgpu = ["burn", "burn/wgpu", "burn-kit/wgpu"]
 
 [dependencies]
-voice-audio.workspace = true
+audio-kit.workspace = true
 # Device selection: shared with every engine so `auto` cannot mean two things.
 burn-kit.workspace = true
 tokio.workspace = true

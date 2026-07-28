@@ -8,13 +8,7 @@
 use clap::{Parser, Subcommand};
 use rvc_cli::args::{CompletionsArgs, ModelsArgs, RvcCommand};
 
-use crate::stt::SttArgs;
-
-/// Parse `--device` in clap, so a typo is a usage error rather than a late
-/// failure after the model has already been loaded.
-pub fn parse_device(s: &str) -> Result<burn_kit::DeviceSpec, String> {
-    s.parse()
-}
+use stt_cli::SttArgs;
 
 /// voice — speech toolkit: recognition, synthesis and voice conversion, each a
 /// filter that composes in a pipe.

@@ -6,9 +6,9 @@ pub enum VcError {
     /// An error from the ONNX Runtime (`ort`) — session build, run, extract.
     #[error("onnxruntime error: {0}")]
     Ort(#[from] ort::Error),
-    /// Audio decode/encode error bubbled up from `voice-audio`.
+    /// Audio decode/encode error bubbled up from `audio-kit`.
     #[error("audio error: {0}")]
-    Audio(#[from] voice_audio::AudioError),
+    Audio(#[from] audio_kit::AudioError),
     /// A model produced an output whose shape we could not interpret.
     #[error("unexpected tensor shape {got:?} for {what} (expected axis of size {expected})")]
     Shape {

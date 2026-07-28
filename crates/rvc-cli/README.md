@@ -512,10 +512,10 @@ LD_LIBRARY_PATH=$PWD/libtorch/lib \
 
 | crate | role |
 |-------|------|
-| `voice-audio` | ffmpeg (8.1) mp3/wav decode, resample, WAV/raw-PCM I/O — all as `futures::Stream` of mono `f32` |
+| `audio-kit` | ffmpeg (8.1) mp3/wav decode, resample, WAV/raw-PCM I/O — all as `futures::Stream` of mono `f32` |
 | `rvc-core` | the voice-conversion pipeline: ContentVec + RMVPE feature extraction, and **every** generator backend (ONNX Runtime via `ort`; native Burn on LibTorch or CubeCL/CUDA, behind the `tch`/`cuda` features) behind one `Generator` trait; `Stream`-in → `Stream`-out `Converter`; reusable `FeatureExtractor` |
 | `burn-rvc` | the RVC v2 network itself, a standalone Burn port of `SynthesizerTrnMs768NSFsid` |
-| `voice-hub` | auto-download ContentVec/RMVPE ONNX from Hugging Face |
+| `hub-kit` | auto-download ContentVec/RMVPE ONNX from Hugging Face |
 | `rvc-train` | native (Rust/burn) RVC generator training — see `crates/rvc-train/ARCHITECTURE.md` |
 | `rvc-cli` | the `rvc` binary (clap) — also a library, so `voice` can host the same subcommands |
 | `voice-cli` | the `voice` binary: `rvc-cli`'s subcommands under `voice rvc …`, plus the rest of the toolkit |

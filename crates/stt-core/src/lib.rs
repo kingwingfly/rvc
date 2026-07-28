@@ -8,7 +8,7 @@
 //! toolkit already has a slicer tuned not to cut soft or breathy passages.
 //!
 //! ```no_run
-//! # use voice_stt::{Transcriber, TranscribeOptions};
+//! # use stt_core::{Transcriber, TranscribeOptions};
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! # type B = burn_ndarray::NdArray;
 //! # let audio: Vec<f32> = vec![];
@@ -32,10 +32,10 @@ pub use tokenizer::{Tokens, Vocabulary};
 
 use std::path::Path;
 
+use audio_kit::slice::{SliceOptions, slice};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorData};
 use burn_whisper::{Whisper, WhisperConfig};
-use voice_audio::slice::{SliceOptions, slice};
 
 /// One transcribed stretch of speech.
 #[derive(Debug, Clone)]

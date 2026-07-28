@@ -1,0 +1,36 @@
+[package]
+name = "stt-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "stt — speech recognition CLI, a Unix filter over Whisper"
+
+# A library as well as a binary, so the `voice` tool can host `voice stt` from
+# this exact code rather than a copy of every flag.
+[lib]
+name = "stt_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "stt"
+path = "src/main.rs"
+
+[features]
+default = ["cuda", "tch", "wgpu"]
+cuda = ["stt-core/cuda"]
+tch = ["stt-core/tch"]
+wgpu = ["stt-core/wgpu"]
+
+[dependencies]
+stt-core.workspace = true
+audio-kit.workspace = true
+hub-kit.workspace = true
+cli-kit.workspace = true
+burn-kit.workspace = true
+tokio = { workspace = true }
+futures.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+tracing.workspace = true

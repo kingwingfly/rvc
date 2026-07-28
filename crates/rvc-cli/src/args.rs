@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use clap_complete::Shell;
+pub use cli_kit::CompletionsArgs;
 
 /// Which generator backend runs inference.
 ///
@@ -57,12 +57,6 @@ impl From<ComputeBackend> for rvc_train::TrainBackend {
     }
 }
 
-/// Parse `--device` in clap, so a typo is a usage error rather than a late
-/// failure after the model has already been loaded.
-fn parse_device(s: &str) -> Result<burn_kit::DeviceSpec, String> {
-    s.parse()
-}
-
 /// rvc — RVC voice conversion toolkit (ONNX Runtime + native Burn).
 #[derive(Debug, Parser)]
 #[command(name = "rvc", version, about)]
@@ -96,13 +90,6 @@ pub enum Command {
     Models(ModelsArgs),
     /// Print a shell completion script (bash, zsh, fish, powershell, elvish).
     Completions(CompletionsArgs),
-}
-
-#[derive(Debug, Args)]
-pub struct CompletionsArgs {
-    /// Shell to generate the completion script for.
-    #[arg(value_enum)]
-    pub shell: Shell,
 }
 
 /// Shared options for locating the three ONNX models.
@@ -148,7 +135,7 @@ pub struct ConvertArgs {
     pub backend: InferBackend,
     /// Compute device: `auto` (fastest visible), `cpu`, `gpu`, `gpu:N`, `mps` or
     /// `vulkan` (`cuda`/`cuda:N` also accepted). The `cuda` backend has GPUs only.
-    #[arg(long, default_value = "auto", value_name = "DEVICE", value_parser = parse_device)]
+    #[arg(long, default_value = "auto", value_name = "DEVICE", value_parser = cli_kit::parse_device)]
     pub device: burn_kit::DeviceSpec,
     #[command(flatten)]
     pub denoise: DenoiseOpts,
@@ -171,7 +158,7 @@ pub struct ServeArgs {
     pub backend: InferBackend,
     /// Compute device: `auto` (fastest visible), `cpu`, `gpu`, `gpu:N`, `mps` or
     /// `vulkan` (`cuda`/`cuda:N` also accepted). The `cuda` backend has GPUs only.
-    #[arg(long, default_value = "auto", value_name = "DEVICE", value_parser = parse_device)]
+    #[arg(long, default_value = "auto", value_name = "DEVICE", value_parser = cli_kit::parse_device)]
     pub device: burn_kit::DeviceSpec,
     #[command(flatten)]
     pub denoise: DenoiseOpts,
@@ -343,7 +330,7 @@ pub struct TrainArgs {
         default_value = "auto",
         value_name = "DEVICE",
         value_delimiter = ',',
-        value_parser = parse_device
+        value_parser = cli_kit::parse_device
     )]
     pub device: Vec<burn_kit::DeviceSpec>,
     /// Directory for the training log and saved weights.

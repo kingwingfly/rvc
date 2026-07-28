@@ -1,5 +1,5 @@
 [package]
-name = "voice-audio"
+name = "audio-kit"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

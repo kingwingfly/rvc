@@ -1,9 +1,9 @@
 //! `rvc convert` — batch file conversion to WAV (Burn or ONNX generator).
 
 use anyhow::{Context, Result};
+use audio_kit::{DecodeOptions, decode_paths, write_wav_file};
 use futures::{StreamExt, stream};
 use rvc_core::{ANALYSIS_SR, StreamParams};
-use voice_audio::{DecodeOptions, decode_paths, write_wav_file};
 
 use crate::args::ConvertArgs;
 use crate::commands::common::{build_converter, resolve_runtime};
@@ -63,7 +63,7 @@ async fn write_out(
         .and_then(|s| s.to_str())
         .unwrap_or("model");
     let out_path = dir.join(format!("{stem}_{model_name}.wav"));
-    let out_stream = stream::iter([Ok::<_, voice_audio::AudioError>(out)]);
+    let out_stream = stream::iter([Ok::<_, audio_kit::AudioError>(out)]);
     write_wav_file(&out_path, sr, out_stream)
         .await
         .with_context(|| format!("writing {}", out_path.display()))?;

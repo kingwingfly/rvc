@@ -29,9 +29,10 @@ tch = ["rvc-core/tch", "rvc-train/tch", "burn-kit/tch"]
 wgpu = ["rvc-core/wgpu", "rvc-train/wgpu", "burn-kit/wgpu"]
 
 [dependencies]
-voice-audio.workspace = true
+audio-kit.workspace = true
 burn-kit.workspace = true
-voice-hub.workspace = true
+cli-kit.workspace = true
+hub-kit.workspace = true
 # `burn` feature brings in the native Burn generator backend (BurnGenerator).
 rvc-core = { workspace = true, features = ["burn"] }
 rvc-train.workspace = true

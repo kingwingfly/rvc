@@ -16,7 +16,7 @@ tch = ["burn/tch", "rvc-core/tch", "burn-kit/tch"]
 wgpu = ["burn/wgpu", "rvc-core/wgpu", "burn-kit/wgpu"]
 
 [dependencies]
-voice-audio.workspace = true
+audio-kit.workspace = true
 rvc-core.workspace = true
 burn-rvc.workspace = true
 burn-kit.workspace = true

@@ -8,7 +8,7 @@ produces the `phone/phone_lengths/pitch/pitchf/ds/rnd → audio` graph that
 ## Pipeline
 
 1. **Dataset prep** — *implemented* (`lib.rs`).
-   Decode each corpus clip with `voice-audio` to 16 kHz (for analysis) and to the
+   Decode each corpus clip with `audio-kit` to 16 kHz (for analysis) and to the
    model rate (the generator target), then extract per-frame **ContentVec**
    features and an **RMVPE F0** contour with `rvc_core::FeatureExtractor` — the
    same ONNX models the inference path uses, so features are identical at train

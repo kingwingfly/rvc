@@ -17,18 +17,14 @@ path = "src/main.rs"
 # LibTorch install.
 [features]
 default = ["cuda", "tch", "wgpu"]
-cuda = ["rvc-cli/cuda", "voice-stt/cuda"]
-tch = ["rvc-cli/tch", "voice-stt/tch"]
-wgpu = ["rvc-cli/wgpu", "voice-stt/wgpu"]
+cuda = ["rvc-cli/cuda", "stt-cli/cuda"]
+tch = ["rvc-cli/tch", "stt-cli/tch"]
+wgpu = ["rvc-cli/wgpu", "stt-cli/wgpu"]
 
 [dependencies]
 rvc-cli.workspace = true
-voice-stt.workspace = true
-voice-audio.workspace = true
-voice-hub.workspace = true
-burn-kit.workspace = true
-futures.workspace = true
-tracing.workspace = true
+stt-cli.workspace = true
+cli-kit.workspace = true
 tokio = { workspace = true }
 clap.workspace = true
 anyhow.workspace = true

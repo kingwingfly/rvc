@@ -1,5 +1,5 @@
 [package]
-name = "voice-stt"
+name = "stt-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -19,7 +19,7 @@ wgpu = ["burn/wgpu", "burn-kit/wgpu"]
 burn = { workspace = true }
 burn-whisper.workspace = true
 burn-kit.workspace = true
-voice-audio.workspace = true
+audio-kit.workspace = true
 rustfft.workspace = true
 tokenizers.workspace = true
 serde_json.workspace = true

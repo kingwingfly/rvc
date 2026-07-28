@@ -17,22 +17,31 @@ directly; training is native Rust too. The one remaining exception, the optional
 `.safetensors → ONNX` exporter under [`export/`](export/README.md), is on its way
 out.
 
-## Two binaries
+## One binary per engine, plus one that has them all
 
 | | what it is | install it if |
 |---|---|---|
-| **`rvc`** | voice conversion on its own — `convert`, `serve`, `train`, `preprocess` | retimbring recordings is all you need |
-| **`voice`** | the whole toolkit; hosts the above as `voice rvc …` | you want recognition and synthesis too |
+| **`rvc`** | voice conversion — `convert`, `serve`, `train`, `preprocess` | retimbring recordings is all you need |
+| **`stt`** | speech recognition — PCM in, text out | transcription is all you need |
+| **`voice`** | the whole toolkit: `voice rvc …`, `voice stt` | you want them together |
 
-They share one implementation — `voice-cli` depends on `rvc-cli` as a library,
-so a flag cannot exist on one and not the other.
+Each engine stands alone and pulls in only what it uses — installing `stt` costs
+you no ONNX Runtime and none of the RVC stack. `voice` is an *integration*: it
+depends on `rvc-cli` and `stt-cli` as libraries, so a flag cannot exist on one
+spelling and not the other.
 
 ```sh
 export ORT_DYLIB_PATH=/usr/lib/libonnxruntime.so   # onnxruntime is never bundled
 export LIBTORCH=$PWD/libtorch                      # optional; must be 2.9.0
-cargo build --release                              # both binaries
+cargo build --release                              # all three binaries
 cargo build --release -p rvc-cli                   # just `rvc`
+cargo build --release -p stt-cli                   # just `stt`
 ```
+
+A **debug build can run models at full speed** — the `dev` profile optimises
+dependencies (`opt-level = 3`), where all the tensor math lives, while leaving
+workspace crates cheap to recompile. Use `cargo build` for everything except
+benchmarking; `--release` costs minutes of `lto` for a few percent.
 
 Full setup, backend and device documentation lives in the `rvc` tool's README —
 the requirements are the same for both binaries.
@@ -55,7 +64,7 @@ Burn on either LibTorch or CubeCL/CUDA or WebGPU — chosen at run time with
 Raw f32le mono PCM at 16 kHz on stdin, text on stdout:
 
 ```sh
-ffmpeg -i take.mp3 -f f32le -ar 16000 -ac 1 - | voice stt
+ffmpeg -i take.mp3 -f f32le -ar 16000 -ac 1 - | stt      # or: voice stt
 ```
 
 `--format jsonl` adds per-segment timings and the detected language, which is
@@ -80,22 +89,36 @@ quiet-but-present sound, so soft and breathy speech survives the cut.
 
 ## Crate layout
 
+Three tiers, and the names say which is which.
+
+**Shared plumbing** — no model, no engine, safe for anything to depend on:
+
 | crate | role |
 |-------|------|
-| `burn-kit` | Burn plumbing tied to no model: device selection, checkpoint loading |
-| `voice-audio` | ffmpeg decode/resample + WAV/raw-PCM I/O, all as `futures::Stream<f32>` |
-| `voice-hub` | auto-download model assets from Hugging Face |
-| `rvc-core` | the voice-conversion pipeline: feature extraction, DSP, streaming `Converter`, all three generator backends |
-| `burn-rvc` | the RVC v2 network itself (standalone Burn port); no app deps |
-| `burn-whisper` | the Whisper network (standalone Burn port); loads HF safetensors unchanged |
-| `voice-stt` | speech recognition: log-mel front-end, BPE vocabulary, greedy decode, segmentation |
-| `rvc-train` | native Rust/Burn adversarial training — see [ARCHITECTURE.md](crates/rvc-train/ARCHITECTURE.md) |
-| `rvc-cli` | the `rvc` binary, and the library behind `voice rvc …` |
-| `voice-cli` | the `voice` binary |
+| `burn-kit` | device selection and checkpoint loading |
+| `audio-kit` | ffmpeg decode/resample, WAV/raw-PCM I/O, the sentence slicer — all `futures::Stream<f32>` |
+| `hub-kit` | model downloads from Hugging Face |
+| `cli-kit` | logging, shell completions, `--device` parsing |
 
-Two conventions hold: network crates are named after the **model** (`burn-rvc`),
-app crates after the **job** (`rvc-core`). And **no engine depends on another
-engine** — anything two of them need moves to a neutral crate first.
+**Networks**, named after the model, holding no app dependencies:
+
+| crate | role |
+|-------|------|
+| `burn-rvc` | the RVC v2 network (`SynthesizerTrnMs768NSFsid` + discriminators) |
+| `burn-whisper` | the Whisper network; loads HF safetensors unchanged |
+
+**Engines**, one `-core` and one `-cli` apiece, all the same shape:
+
+| crate | role |
+|-------|------|
+| `rvc-core` + `rvc-train` + `rvc-cli` | voice conversion → binary `rvc` |
+| `stt-core` + `stt-cli` | speech recognition → binary `stt` |
+| `voice-cli` | the integration → binary `voice` |
+
+Two rules keep it that way. **No engine depends on another engine** — anything
+two of them need moves into the plumbing tier first. And **`voice-` is reserved
+for the top**: a crate an engine depends on may not be named after the
+integration, which is why the shared crates are `*-kit` rather than `voice-*`.
 
 ## Contributing
 

@@ -9,7 +9,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use clap::ValueEnum;
-use voice_stt::Transcribe;
+use stt_core::Transcribe;
 
 /// Which Burn compute backend runs recognition. There is no ONNX path.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
@@ -51,13 +51,13 @@ pub fn load_transcriber(
 
     match backend {
         #[cfg(feature = "tch")]
-        SttBackend::Tch => voice_stt::libtorch_transcriber(dir, device)
+        SttBackend::Tch => stt_core::libtorch_transcriber(dir, device)
             .context("failed to load Whisper on the LibTorch backend"),
         #[cfg(feature = "cuda")]
-        SttBackend::Cuda => voice_stt::cuda_transcriber(dir, device)
+        SttBackend::Cuda => stt_core::cuda_transcriber(dir, device)
             .context("failed to load Whisper on the CubeCL/CUDA backend"),
         #[cfg(feature = "wgpu")]
-        SttBackend::Wgpu => voice_stt::wgpu_transcriber(dir, device)
+        SttBackend::Wgpu => stt_core::wgpu_transcriber(dir, device)
             .context("failed to load Whisper on the WebGPU backend"),
         SttBackend::Auto => unreachable!("resolved above"),
         // Only reachable on a `--no-default-features` build.
