@@ -13,7 +13,7 @@ mod common;
 
 use burn::tensor::backend::Backend;
 use burn_gptsovits::{
-    Hubert, HubertConfig, Quantizer, QuantizerConfig, SovitsConfig, SovitsPartial,
+    Hubert, HubertConfig, Quantizer, QuantizerConfig, SovitsConfig, SovitsPartial, T2s, T2sConfig,
 };
 
 struct Load {
@@ -36,8 +36,12 @@ impl common::Job for Load {
                 let mut model = SovitsPartial::<B>::new(&SovitsConfig::default(), device);
                 model.load_pytorch(&self.weights)
             }
+            "t2s" => {
+                let mut model = T2s::<B>::new(&T2sConfig::default(), device);
+                model.load_pytorch(&self.weights)
+            }
             other => {
-                eprintln!("unknown component `{other}` (known: hubert, quantizer, sovits)");
+                eprintln!("unknown component `{other}` (known: hubert, quantizer, sovits, t2s)");
                 std::process::exit(2);
             }
         }
@@ -54,10 +58,11 @@ impl common::Job for Load {
         // Every norm's weight/bias shows up here even though it applied: the
         // adapter consumes them as Burn's gamma/beta and the store still counts
         // the original key as unconsumed. Anything else in this list is real.
-        let (norms, real): (Vec<_>, Vec<_>) = res
-            .unused
-            .iter()
-            .partition(|k| k.ends_with("_norm.weight") || k.ends_with("_norm.bias"));
+        let (norms, real): (Vec<_>, Vec<_>) = res.unused.iter().partition(|k| {
+            let stem = k.rsplit_once('.').map(|(s, _)| s).unwrap_or(k);
+            (k.ends_with(".weight") || k.ends_with(".bias"))
+                && (stem.contains("norm") || stem.ends_with("_ln"))
+        });
         println!(
             "unused  : {} ({} norm gamma/beta, reported but applied; {} genuinely unused)",
             res.unused.len(),
