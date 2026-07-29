@@ -21,7 +21,7 @@ use clap::{Args, ValueEnum};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tts_core::{OUTPUT_SR, SampleOptions, SynthOptions};
 
-use crate::backend::{Loaded, ModelPaths, TtsBackend, load};
+use crate::backend::{ModelPaths, TtsBackend, load};
 
 /// Which language front-end to phonemize with.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
@@ -81,10 +81,13 @@ pub struct TtsArgs {
     /// resampled, which is how this feeds `rvc serve` at 16 kHz.
     #[arg(long, default_value_t = OUTPUT_SR)]
     pub sr: u32,
-    /// Compute backend: `auto`, `cuda`, `tch` (`libtorch`) or `wgpu`.
+    /// Runtime: `auto`, `onnx`, `cuda`, `tch` (`libtorch`) or `wgpu`. `auto`
+    /// takes an ONNX export from `--models` if there is one, else the fastest
+    /// Burn backend.
     #[arg(long, value_enum, default_value_t = TtsBackend::Auto)]
     pub backend: TtsBackend,
     /// Compute device: `auto`, `cpu`, `gpu`, `gpu:N`, `mps` or `vulkan`.
+    /// Ignored by `--backend onnx`, which uses CUDA where it is available.
     #[arg(long, default_value = "auto", value_name = "DEVICE", value_parser = cli_kit::parse_device)]
     pub device: burn_kit::DeviceSpec,
     /// Sample from the `k` highest-scoring tokens. Lower is steadier, higher is
@@ -173,6 +176,7 @@ pub async fn run(args: TtsArgs) -> Result<()> {
     let mut model = tokio::task::block_in_place(|| {
         load(
             ModelPaths {
+                dir: &dir,
                 hubert: &paths.hubert,
                 s1: &paths.s1,
                 s2: &paths.s2,
@@ -200,34 +204,20 @@ pub async fn run(args: TtsArgs) -> Result<()> {
     let mut out = BufWriter::new(tokio::io::stdout());
     let mut spoken = 0usize;
 
-    // Each backend keeps its reference in its own tensor type, so the analysis
-    // and the loop live inside the match rather than around it.
-    macro_rules! speak {
-        ($model:expr) => {{
-            let reference = tokio::task::block_in_place(|| {
-                $model.reference(&audio, &reference_text, args.language.into())
-            })
-            .context("failed to analyse the reference recording")?;
-            while let Some(line) = lines.next_line().await? {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let pcm = tokio::task::block_in_place(|| $model.say(&line, &reference, &opts))
-                    .with_context(|| format!("synthesising {line:?}"))?;
-                tracing::info!("{:.2} s  {line}", pcm.len() as f32 / OUTPUT_SR as f32);
-                write_pcm(&mut out, &pcm, args.sr).await?;
-                spoken += 1;
-            }
-        }};
-    }
+    let reference = tokio::task::block_in_place(|| {
+        model.reference(&audio, &reference_text, args.language.into())
+    })
+    .context("failed to analyse the reference recording")?;
 
-    match &mut model {
-        #[cfg(feature = "tch")]
-        Loaded::Tch(m) => speak!(m),
-        #[cfg(feature = "cuda")]
-        Loaded::Cuda(m) => speak!(m),
-        #[cfg(feature = "wgpu")]
-        Loaded::Wgpu(m) => speak!(m),
+    while let Some(line) = lines.next_line().await? {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let pcm = tokio::task::block_in_place(|| model.say(&line, &reference, &opts))
+            .with_context(|| format!("synthesising {line:?}"))?;
+        tracing::info!("{:.2} s  {line}", pcm.len() as f32 / OUTPUT_SR as f32);
+        write_pcm(&mut out, &pcm, args.sr).await?;
+        spoken += 1;
     }
 
     out.flush().await.context("final flush")?;

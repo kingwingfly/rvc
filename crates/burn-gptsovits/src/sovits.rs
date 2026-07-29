@@ -162,13 +162,32 @@ impl<B: Backend> SovitsPartial<B> {
     ) -> Tensor<B, 3> {
         let quantized = self.quantizer_decode(codes);
         let (m, logs) = self.enc_p.forward(quantized, text, g.clone());
-
         let eps = Tensor::random(
             m.dims(),
             burn::tensor::Distribution::Normal(0.0, 1.0),
             &m.device(),
         );
         let z_p = m + eps * logs.exp() * noise_scale;
+        let z = self.flow.reverse(z_p, g.clone());
+        self.dec.forward(z, g)
+    }
+
+    /// As [`SovitsPartial::decode`], with the prior's sample supplied.
+    ///
+    /// `noise` is `[batch, inter_channels, tokens * 2]` and already scaled: what
+    /// [`SovitsPartial::decode`] would have drawn, handed in instead. That makes
+    /// the stage a pure function of its inputs, which is the only way a run here
+    /// and a run on another runtime can be compared rather than listened to.
+    pub fn decode_with_noise(
+        &self,
+        codes: Tensor<B, 2, Int>,
+        text: Tensor<B, 2, Int>,
+        g: Tensor<B, 3>,
+        noise: Tensor<B, 3>,
+    ) -> Tensor<B, 3> {
+        let quantized = self.quantizer_decode(codes);
+        let (m, logs) = self.enc_p.forward(quantized, text, g.clone());
+        let z_p = m + noise * logs.exp();
         // Inference runs the flow backwards: the prior is what `enc_p` produced,
         // and the decoder wants the latent it came from.
         let z = self.flow.reverse(z_p, g.clone());

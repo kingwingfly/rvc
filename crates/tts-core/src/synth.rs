@@ -15,15 +15,16 @@
 //! *semantic tokens* prime `s1`, so the generated speech continues its rhythm
 //! and delivery, and its *spectrogram* becomes the speaker vector, which is what
 //! makes the voice sound like it. Both come from the same few seconds of audio.
+//!
+//! Nothing here names a runtime. The networks sit behind
+//! [`Engine`](crate::Engine), so sampling, the repetition penalty and the stop
+//! rule are shared by the Burn and the ONNX Runtime paths rather than written
+//! twice — and a [`Reference`] is plain data, so it outlives whichever engine
+//! produced it.
 
-use std::path::Path;
-
-use burn::tensor::backend::Backend;
-use burn::tensor::{Int, Tensor, TensorData};
-use burn_gptsovits::{Hubert, HubertConfig, SovitsConfig, SovitsPartial, T2s, T2sConfig};
-use burn_vits::{Spectral, SpectralConfig};
 use text_kit::{Language, Phonemes};
 
+use crate::engine::{EOS, Engine, PRIOR_CHANNELS};
 use crate::error::{Result, TtsError};
 use crate::prosody::{ProsodyEncoder, ProsodyFeatures};
 use crate::sample::{Rng, SampleOptions, sample};
@@ -61,17 +62,6 @@ impl Default for SynthOptions {
     }
 }
 
-/// Read an integer tensor as ids, whichever width the backend stores.
-fn int_ids<B: Backend>(t: Tensor<B, 2, Int>) -> Result<Vec<u32>> {
-    let data = t.into_data();
-    if let Ok(v) = data.to_vec::<i64>() {
-        return Ok(v.into_iter().map(|x| x as u32).collect());
-    }
-    data.to_vec::<i32>()
-        .map(|v| v.into_iter().map(|x| x as u32).collect())
-        .map_err(|e| TtsError::Weights(format!("token ids: {e:?}")))
-}
-
 /// A reference voice, analysed once and reusable for every line.
 ///
 /// Carries the reference's *transcript* as well as its audio, and that is not
@@ -80,11 +70,11 @@ fn int_ids<B: Backend>(t: Tensor<B, 2, Int>) -> Result<Vec<u32>> {
 /// phonemes. Given only the target text it sees phonemes for one utterance next
 /// to audio of another, finds nothing to continue, and stops after a token or
 /// two.
-pub struct Reference<B: Backend> {
+pub struct Reference {
     /// Semantic tokens that prime `s1`.
-    tokens: Tensor<B, 2, Int>,
+    tokens: Vec<u32>,
     /// Speaker vector for `s2`.
-    speaker: Tensor<B, 3>,
+    speaker: Vec<f32>,
     /// The transcript's phonemes, prepended to every line's.
     phones: Phonemes,
     /// Its prosody features, likewise.
@@ -92,53 +82,18 @@ pub struct Reference<B: Backend> {
 }
 
 /// A loaded GPT-SoVITS.
-pub struct Synthesizer<B: Backend> {
-    hubert: Hubert<B>,
-    t2s: T2s<B>,
-    sovits: SovitsPartial<B>,
-    spectral: Spectral<B>,
+pub struct Synthesizer {
+    engine: Box<dyn Engine>,
     prosody: Option<Box<dyn ProsodyEncoder>>,
-    t2s_config: T2sConfig,
-    device: B::Device,
 }
 
-impl<B: Backend> Synthesizer<B> {
-    /// Load from a directory holding `chinese-hubert-base/`, an `s1*.ckpt` and
-    /// an `s2G*.pth`.
+impl Synthesizer {
+    /// Wrap a loaded engine.
     ///
     /// `prosody` is optional: without it the model is given zero features, which
     /// costs expressiveness on Chinese but still speaks.
-    pub fn load(
-        hubert: &Path,
-        s1: &Path,
-        s2: &Path,
-        prosody: Option<Box<dyn ProsodyEncoder>>,
-        device: &B::Device,
-    ) -> Result<Self> {
-        let weights =
-            |what: &str, e: Box<dyn std::error::Error>| TtsError::Weights(format!("{what}: {e}"));
-
-        let mut model = Hubert::<B>::new(&HubertConfig::chinese_base(), device);
-        model
-            .load_pytorch(hubert)
-            .map_err(|e| weights("cnhubert", e))?;
-
-        let t2s_config = T2sConfig::default();
-        let mut t2s = T2s::<B>::new(&t2s_config, device);
-        t2s.load_weights(s1).map_err(|e| weights("s1", e))?;
-
-        let mut sovits = SovitsPartial::<B>::new(&SovitsConfig::default(), device);
-        sovits.load_pytorch(s2).map_err(|e| weights("s2", e))?;
-
-        Ok(Self {
-            hubert: model,
-            t2s,
-            sovits,
-            spectral: Spectral::new(&SpectralConfig::gptsovits_v2_32k(), device),
-            prosody,
-            t2s_config,
-            device: device.clone(),
-        })
+    pub fn new(engine: Box<dyn Engine>, prosody: Option<Box<dyn ProsodyEncoder>>) -> Self {
+        Self { engine, prosody }
     }
 
     /// Analyse a reference clip and its transcript.
@@ -151,28 +106,13 @@ impl<B: Backend> Synthesizer<B> {
         audio: &[f32],
         text: &str,
         language: Language,
-    ) -> Result<Reference<B>> {
+    ) -> Result<Reference> {
         if audio.len() < ANALYSIS_SR as usize / 2 {
             return Err(TtsError::Weights(
                 "reference audio is under half a second — too little to describe a voice".into(),
             ));
         }
-        let wav: Tensor<B, 2> = Tensor::from_data(
-            TensorData::new(audio.to_vec(), [1, audio.len()]),
-            &self.device,
-        );
-        let ssl = self.hubert.forward(wav).swap_dims(1, 2);
-        let tokens = self.sovits.quantizer.encode(ssl);
-
-        // The speaker vector wants the synthesizer's own rate. Duplicating
-        // samples is a crude 2x resample, and adequate: `ref_enc` averages over
-        // time and the imaging artefacts land above the bins it reads.
-        let upsampled: Vec<f32> = audio.iter().flat_map(|&s| [s, s]).collect();
-        let wav32: Tensor<B, 2> = Tensor::from_data(
-            TensorData::new(upsampled, [1, audio.len() * 2]),
-            &self.device,
-        );
-        let speaker = self.sovits.speaker(self.spectral.linear(wav32));
+        let (tokens, speaker) = self.engine.analyse(audio)?;
 
         let phones = text_kit::phonemize(text, language)?;
         if phones.phones.is_empty() {
@@ -196,7 +136,7 @@ impl<B: Backend> Synthesizer<B> {
     pub fn say(
         &mut self,
         text: &str,
-        reference: &Reference<B>,
+        reference: &Reference,
         opts: &SynthOptions,
     ) -> Result<Vec<f32>> {
         let phonemes = text_kit::phonemize(text, opts.language)?;
@@ -209,30 +149,21 @@ impl<B: Backend> Synthesizer<B> {
             return Ok(Vec::new());
         }
 
-        let codes: Tensor<B, 2, Int> = Tensor::from_data(
-            TensorData::new(
-                codes.iter().map(|&c| c as i32).collect::<Vec<_>>(),
-                [1, codes.len()],
-            ),
-            &self.device,
-        );
+        // The prior's sample is drawn here rather than inside the engine, which
+        // makes `s2` a pure function of its inputs and is the only reason a Burn
+        // run and an ONNX run of the same tokens can be diffed. Its generator is
+        // seeded afresh, so the noise does not depend on how many tokens `s1`
+        // happened to draw before it.
+        let mut rng = Rng::new(opts.seed);
+        let noise: Vec<f32> = (0..PRIOR_CHANNELS * codes.len() * 2)
+            .map(|_| rng.next_normal() * opts.noise_scale as f32)
+            .collect();
+
         // The phonemes go to `s2` as well: `enc_p` conditions the prior on them,
         // not only on the tokens `s1` produced from them.
-        let text_ids: Tensor<B, 2, Int> = Tensor::from_data(
-            TensorData::new(
-                phonemes.ids().iter().map(|&i| i as i32).collect::<Vec<_>>(),
-                [1, phonemes.phones.len()],
-            ),
-            &self.device,
-        );
-
-        let audio =
-            self.sovits
-                .decode(codes, text_ids, reference.speaker.clone(), opts.noise_scale);
-        audio
-            .into_data()
-            .to_vec()
-            .map_err(|e| TtsError::Weights(format!("synthesised audio was not f32: {e:?}")))
+        let text_ids: Vec<u32> = phonemes.ids().iter().map(|&i| i as u32).collect();
+        self.engine
+            .s2(&codes, &text_ids, &reference.speaker, &noise)
     }
 
     /// Prosody features, or zeros where there is no encoder for the language.
@@ -249,65 +180,46 @@ impl<B: Backend> Synthesizer<B> {
 
     /// Run `s1` until it stops.
     fn generate(
-        &self,
+        &mut self,
         phonemes: &Phonemes,
         prosody: &ProsodyFeatures,
-        reference: &Reference<B>,
+        reference: &Reference,
         opts: &SynthOptions,
     ) -> Result<Vec<u32>> {
         // The reference's phonemes come first and the target's after, matching
         // the audio prompt: one sequence the model can continue.
-        let mut ids: Vec<i32> = reference.phones.ids().iter().map(|&i| i as i32).collect();
-        ids.extend(phonemes.ids().iter().map(|&i| i as i32));
+        let ids: Vec<u32> = reference
+            .phones
+            .ids()
+            .iter()
+            .chain(phonemes.ids().iter())
+            .map(|&i| i as u32)
+            .collect();
 
         let mut features = reference.prosody.data.clone();
         features.extend_from_slice(&prosody.data);
-        let hidden = prosody.hidden;
-        let n_phones = ids.len();
 
-        let phones: Tensor<B, 2, Int> =
-            Tensor::from_data(TensorData::new(ids, [1, n_phones]), &self.device);
-        let bert: Tensor<B, 3> = Tensor::from_data(
-            TensorData::new(features, [1, n_phones, hidden]),
-            &self.device,
-        );
-
-        let text = self.t2s.embed_text(phones, bert);
-        let prompt = reference.tokens.clone();
-        let audio = self.t2s.embed_audio(prompt.clone(), 0);
-
-        // First pass over the whole prompt. Text attends within itself, audio
+        // The whole prompt in one pass. Text attends within itself, audio
         // attends over all the text and causally over itself — not one causal
         // mask across the join, which would stop the text seeing its own end.
-        let mut state = self.t2s.state();
-        let mut logits = self.t2s.forward_prompt(text, audio, &mut state);
+        let mut logits =
+            self.engine
+                .s1_prompt(&ids, &features, prosody.hidden, &reference.tokens)?;
 
-        // `Int` is i64 on LibTorch and i32 on some others, so the width is read
-        // from the tensor rather than assumed.
-        let mut previous: Vec<u32> = int_ids(prompt)?;
+        let mut previous = reference.tokens.clone();
         let generated_from = previous.len();
 
-        let eos = self.t2s_config.eos();
         let mut rng = Rng::new(opts.seed);
         for _ in 0..opts.max_tokens {
-            let scores: Vec<f32> = logits
-                .clone()
-                .into_data()
-                .to_vec()
-                .map_err(|e| TtsError::Weights(format!("logits: {e:?}")))?;
-            let next = sample(&scores, &previous, &opts.sample, &mut rng);
-            if next == eos {
+            let next = sample(&logits, &previous, &opts.sample, &mut rng);
+            if next == EOS {
                 break;
             }
             previous.push(next);
-
-            let token: Tensor<B, 2, Int> =
-                Tensor::from_data(TensorData::new(vec![next as i32], [1, 1]), &self.device);
             // Audio positions restart at zero and are independent of the text's:
             // upstream applies the two positional encodings separately and only
             // then concatenates. So the offset counts audio tokens alone.
-            let x = self.t2s.embed_audio(token, previous.len() - 1);
-            logits = self.t2s.forward(x, &mut state);
+            logits = self.engine.s1_step(next, previous.len() - 1)?;
         }
 
         if previous.len() - generated_from == opts.max_tokens {
