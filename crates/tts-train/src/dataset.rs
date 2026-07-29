@@ -100,7 +100,7 @@ pub fn prepare<B: Backend>(
             continue;
         }
 
-        let phonemes = text_kit::phonemize(text, language)?;
+        let phonemes = text_kit::phonemize_mixed(text, language)?;
         if phonemes.phones.is_empty() {
             tracing::warn!("{} produced no phonemes; skipped", text_path.display());
             continue;

@@ -31,7 +31,7 @@ pub enum TextError {
     /// nonsense, and silence about it is worse than refusing.
     #[error(
         "no grapheme-to-phoneme front-end for {0} yet — \
-         Chinese and English are implemented"
+         Chinese and English are the two that are implemented"
     )]
     Unsupported(&'static str),
 }
@@ -48,6 +48,11 @@ pub struct Phonemes {
     /// `Some` for Chinese, where the T2S model uses it to spread per-character
     /// BERT features across phonemes; `None` for languages whose front-end has
     /// no per-character alignment to give. Sums to `phones.len()`.
+    ///
+    /// English is always `None`, as upstream returns it: normalization rewrites
+    /// whole spans ("$3.50" becomes five words), so no character of the input
+    /// owns a run of phonemes. Consumers feed the prosody encoder zeros
+    /// instead, which is why English is intelligible but flatter than Chinese.
     pub word2ph: Option<Vec<usize>>,
     /// The text the phonemes were actually derived from.
     pub normalized: String,
@@ -115,5 +120,33 @@ mod tests {
         let ids = out.ids();
         assert_eq!(ids.len(), out.phones.len());
         assert!(ids.iter().all(|&i| i < SYMBOLS.len()));
+    }
+
+    #[test]
+    fn a_code_switched_sentence_uses_both_front_ends() {
+        // The corpus this toolkit targets mixes the two constantly. Sending the
+        // whole line to one front-end drops the other language's characters
+        // silently, which reads as the model swallowing a word.
+        let out = phonemize_mixed("你好world", Language::Zh).unwrap();
+        assert_eq!(out.phones[..4], ["n", "i2", "h", "ao3"]);
+        assert_eq!(out.phones[4..], ["W", "ER1", "L", "D"]);
+        // One run without per-character counts makes the whole result's counts
+        // unusable, so a mixed line reports none at all.
+        assert_eq!(out.word2ph, None);
+    }
+
+    #[test]
+    fn every_phoneme_of_a_mixed_line_is_in_the_models_vocabulary() {
+        for text in ["我用 ChatGPT 写了 3 行代码。", "今天 the weather is 很好!"] {
+            let out = phonemize_mixed(text, Language::Zh).unwrap();
+            assert!(!out.phones.is_empty(), "{text} produced nothing");
+            for p in &out.phones {
+                assert_ne!(
+                    symbols::id(p),
+                    symbols::id(UNKNOWN),
+                    "{text}: `{p}` is not a known symbol"
+                );
+            }
+        }
     }
 }

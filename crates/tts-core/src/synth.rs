@@ -36,8 +36,12 @@ pub const OUTPUT_SR: u32 = 32_000;
 /// How to synthesise.
 #[derive(Debug, Clone)]
 pub struct SynthOptions {
-    /// Language of the text. Prosody features are Chinese-only; every other
-    /// language is given zeros, which is what upstream does too.
+    /// Language of the text, for the runs whose script does not say. Text is
+    /// split by script first and each run goes to its own front-end, so a
+    /// Chinese line with an English word in it phonemizes both halves.
+    ///
+    /// Prosody features are Chinese-only; every other language, and any line
+    /// that mixes two, is given zeros — which is what upstream does too.
     pub language: Language,
     pub sample: SampleOptions,
     /// Cap on generated tokens. At 25 Hz, 1500 is a minute — enough for any
@@ -174,7 +178,7 @@ impl<B: Backend> Synthesizer<B> {
         );
         let speaker = self.sovits.speaker(self.spectral.linear(wav32));
 
-        let phones = text_kit::phonemize(text, language)?;
+        let phones = text_kit::phonemize_mixed(text, language)?;
         if phones.phones.is_empty() {
             return Err(TtsError::Weights(
                 "the reference transcript produced no phonemes — `s1` needs it to \
@@ -199,7 +203,7 @@ impl<B: Backend> Synthesizer<B> {
         reference: &Reference<B>,
         opts: &SynthOptions,
     ) -> Result<Vec<f32>> {
-        let phonemes = text_kit::phonemize(text, opts.language)?;
+        let phonemes = text_kit::phonemize_mixed(text, opts.language)?;
         if phonemes.phones.is_empty() {
             return Ok(Vec::new());
         }

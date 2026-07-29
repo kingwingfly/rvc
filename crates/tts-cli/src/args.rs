@@ -29,7 +29,9 @@ pub enum Lang {
     /// Mandarin Chinese.
     #[default]
     Zh,
-    /// English. No grapheme-to-phoneme front-end yet — this errors.
+    /// English. Intelligible but flatter than Chinese: the prosody encoder
+    /// needs a per-character phoneme count and the English front-end has none
+    /// to give, so it is fed zeros.
     En,
     /// Japanese. No grapheme-to-phoneme front-end yet — this errors.
     Ja,

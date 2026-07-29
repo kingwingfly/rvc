@@ -245,7 +245,12 @@ fn expand_numbers(text: &str) -> String {
                 whole.push(chars[j]);
                 j += 1;
             } else if chars[j] == ','
-                && chars[j + 1..].iter().take(3).filter(|c| c.is_ascii_digit()).count() == 3
+                && chars[j + 1..]
+                    .iter()
+                    .take(3)
+                    .filter(|c| c.is_ascii_digit())
+                    .count()
+                    == 3
                 && !chars.get(j + 4).is_some_and(char::is_ascii_digit)
             {
                 j += 1;
@@ -340,8 +345,25 @@ fn expand_numbers(text: &str) -> String {
 }
 
 const ONES: [&str; 20] = [
-    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
-    "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen",
+    "zero",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "eleven",
+    "twelve",
+    "thirteen",
+    "fourteen",
+    "fifteen",
+    "sixteen",
+    "seventeen",
+    "eighteen",
     "nineteen",
 ];
 const TENS: [&str; 10] = [
@@ -540,7 +562,10 @@ mod tests {
     fn numbers_are_read_as_words() {
         assert_eq!(english("I have 3 apples"), "I have three apples");
         assert_eq!(english("42"), "forty-two");
-        assert_eq!(english("12,345"), "twelve thousand three hundred forty-five");
+        assert_eq!(
+            english("12,345"),
+            "twelve thousand three hundred forty-five"
+        );
     }
 
     #[test]
