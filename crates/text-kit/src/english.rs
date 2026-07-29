@@ -155,8 +155,13 @@ fn tokens(text: &str) -> Vec<Token> {
 /// Upstream's `qryword`, in its order, minus the name dictionary (a 760 kB
 /// pickle of surnames) and the neural last resort.
 fn pronounce(word: &str) -> Vec<&'static str> {
-    if let Some(entry) = cmudict().get(word) {
-        return entry.split(' ').collect();
+    // The length guard is upstream's and it matters: recursion can hand this a
+    // single letter, and the dictionary's entry for "a" is the *article* (AH0).
+    // A letter reached by spelling something out is the letter (EY1).
+    if word.chars().count() > 1 {
+        if let Some(entry) = cmudict().get(word) {
+            return entry.split(' ').collect();
+        }
     }
     // The tokenizer keeps a quote that opened a word; the dictionary does not.
     if let Some(bare) = word.strip_prefix('\'') {

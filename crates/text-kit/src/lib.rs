@@ -6,10 +6,20 @@
 //! a pile of language-specific rules that each upstream keeps in Python.
 //!
 //! ```
-//! # use text_kit::{Language, phonemize};
+//! # use text_kit::{Language, phonemize, phonemize_mixed};
 //! let out = phonemize("你好", Language::Zh).unwrap();
 //! assert_eq!(out.phones, ["n", "i2", "h", "ao3"]);
+//!
+//! // Mixed text is the normal case here, and each run gets its own front-end.
+//! let out = phonemize_mixed("你好world", Language::Zh).unwrap();
+//! assert_eq!(out.phones[4..], ["W", "ER1", "L", "D"]);
 //! ```
+//!
+//! Two front-ends today, and they are not symmetric. Mandarin is a pipeline of
+//! rules (jieba, pinyin, tone sandhi, the opencpop table) and reports a phoneme
+//! count per character. English is a 126k-entry dictionary with a cascade of
+//! fallbacks behind it, and reports no per-character count at all — see
+//! [`Phonemes::word2ph`].
 //!
 //! Testable without a GPU, without weights and without a network, which is why
 //! it is built before the network it feeds.
