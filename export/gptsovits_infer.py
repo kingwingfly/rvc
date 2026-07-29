@@ -872,12 +872,18 @@ def prompt_mask(n_text: torch.Tensor, n_audio: torch.Tensor, device) -> torch.Te
     directions — it is given, not predicted — while audio attends over all the
     text and causally over itself. A plain causal mask would stop each phoneme
     seeing the ones after it, which nothing would report.
+
+    Written as boolean algebra rather than the `torch.where` it reads as, and
+    not for elegance: ONNX Runtime's CUDA provider has no `Where` for boolean
+    outputs, and refuses to *load* a graph containing one ("Provider type for
+    Where node … is not set") rather than falling back for that node.
     """
     n = n_text + n_audio
     idx = torch.arange(n, device=device)
     row, col = idx.unsqueeze(1), idx.unsqueeze(0)
-    is_text_row = row < n_text
-    return torch.where(is_text_row, col >= n_text, (col >= n_text) & (col > row))
+    # A column in the audio half is blocked from every text row, and from an
+    # audio row that has not reached it yet. Nothing in the text half is blocked.
+    return (col >= n_text) & ((row < n_text) | (col > row))
 
 
 # ---- the four exported graphs -----------------------------------------------

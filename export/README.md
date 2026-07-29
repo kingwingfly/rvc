@@ -101,6 +101,22 @@ what upstream does too.
 Graphs whose weights exceed protobuf's limit spill into a sibling `*.onnx.data`
 file; keep the two together when moving an export.
 
+### What the export was checked against
+
+Synthesising one sentence twice — `tts --backend tch` and `tts --backend onnx`,
+same seed, same reference, the base `s1v2.ckpt` + `s2G2333k.pth` — produced
+**93 440 samples both times**, so `s1` sampled the identical token sequence on
+both runtimes, and the two waveforms differ by max 7.9e-03 on a signal of RMS
+5.2e-02 (RMS difference 3.2e-04, correlation 0.99998). That is f32 accumulation
+noise through five HiFiGAN upsample stages, not a difference in what the graphs
+compute, and it exercises the whole chain: cnhubert, the quantiser, `ref_enc`,
+`s1`'s prompt pass, 73 cached decode steps, and `s2`. Both transcribe back
+through `stt` to the same text.
+
+`s1_prompt` over a whole prompt also agrees with `s1_prompt` + `s1_step` to
+6.7e-06 — the incremental-versus-one-shot check `burn-gptsovits`'s own tests
+make, and the one that catches a wrong mask or a wrong position offset.
+
 ### Not covered
 
 - **Training.** These are inference graphs. The discriminators, `enc_q` and the
