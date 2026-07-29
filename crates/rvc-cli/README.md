@@ -53,9 +53,12 @@ export LIBTORCH=$PWD/libtorch
 At run time the binary finds LibTorch by itself — **`LD_LIBRARY_PATH` is never
 needed**. It searches in order:
 
-1. the `LIBTORCH` it was built against,
-2. `libtorch/` next to the binary,
-3. `libtorch/` in the current working directory.
+1. the `LIBTORCH` (or `LIBTORCH_LIB`) it was built against, if that directory
+   still exists at build time,
+2. `libtorch/` in the current working directory,
+3. `libtorch/` next to the binary,
+4. `../libtorch/` from the binary, for a `bin/` layout,
+5. whatever `ld.so.cache` already knows about.
 
 So keeping a `./libtorch` in your project directory is enough even after moving
 the binary.

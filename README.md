@@ -13,9 +13,12 @@ anything else that speaks text or PCM drops into the middle of one.
 
 **No Python.** Not to run it, not to install it, not to develop it. Models are
 ported to [Burn](https://burn.dev) and load their original Hugging Face weights
-directly; training is native Rust too. The one remaining exception, the optional
-`.safetensors → ONNX` exporter under [`export/`](export/README.md), is on its way
-out.
+directly; training is native Rust too. One exception stays on purpose: the
+`.safetensors → ONNX` exporter under [`export/`](export/README.md). Burn can
+*import* an ONNX graph but not emit one, so that script is the only route from a
+model fine-tuned here to ONNX Runtime — and ONNX is a deployment target this
+toolkit supports, not debt it is paying down. Nothing you run, install or train
+touches it.
 
 ## One binary per engine, plus one that has them all
 
@@ -27,14 +30,15 @@ out.
 | **`voice`** | the whole toolkit: `voice rvc …`, `voice stt`, `voice tts` | you want them together |
 
 Each engine stands alone and pulls in only what it uses — installing `stt` costs
-you no ONNX Runtime and none of the RVC stack. `voice` is an *integration*: it
+you none of the RVC stack, and `--no-default-features` drops ONNX Runtime from it
+too if you only ever want Burn. `voice` is an *integration*: it
 depends on `rvc-cli`, `stt-cli` and `tts-cli` as libraries, so a flag cannot exist on one
 spelling and not the other.
 
 ```sh
 export ORT_DYLIB_PATH=/usr/lib/libonnxruntime.so   # onnxruntime is never bundled
 export LIBTORCH=$PWD/libtorch                      # optional; must be 2.9.0
-cargo build --release                              # all three binaries
+cargo build --release                              # all four binaries
 cargo build --release -p rvc-cli                   # just `rvc`
 cargo build --release -p stt-cli                   # just `stt`
 cargo build --release -p tts-cli                   # just `tts`
@@ -45,113 +49,86 @@ dependencies (`opt-level = 3`), where all the tensor math lives, while leaving
 workspace crates cheap to recompile. Use `cargo build` for everything except
 benchmarking; `--release` costs minutes of `lto` for a few percent.
 
-Full setup, backend and device documentation lives in the `rvc` tool's README —
-the requirements are the same for both binaries.
+Full setup, backend and device documentation lives in [the `rvc` tool's
+README](crates/rvc-cli/README.md) — ONNX Runtime, LibTorch and ffmpeg are found
+the same way for all four binaries, so it is written once there and the other
+engine READMEs point at it.
 
 ## Engines
 
 | | status | docs |
 |---|---|---|
 | **`rvc`** — voice conversion (RVC v2) | **works**, inference + native training | [crates/rvc-cli/README.md](crates/rvc-cli/README.md) |
-| **`stt`** — speech recognition (Whisper large-v3-turbo) | **works** — `voice stt` | below |
-| **`tts`** — speech synthesis (GPT-SoVITS v2) | **works** — `voice tts` | below |
+| **`stt`** — speech recognition (Whisper large-v3-turbo) | **works**, Burn **or** ONNX Runtime | [crates/stt-cli/README.md](crates/stt-cli/README.md) |
+| **`tts`** — speech synthesis (GPT-SoVITS v2) | **works**, inference + `s1` fine-tuning (`s2` in progress) | [crates/tts-cli/README.md](crates/tts-cli/README.md) |
 | **`translate`** | not started; pipe to any external tool meanwhile | — |
 
-`rvc` runs on three interchangeable compute backends — ONNX Runtime, and native
-Burn on either LibTorch or CubeCL/CUDA or WebGPU — chosen at run time with
-`--backend`. New engines are Burn-only.
-
-## `voice stt`
-
-Raw f32le mono PCM at 16 kHz on stdin, text on stdout:
+**`stt`** reads raw f32le mono PCM at 16 kHz and writes text; `--format jsonl`
+adds per-segment timings and the detected language, which is what a subtitle file
+— or a TTS training manifest — needs.
 
 ```sh
 ffmpeg -i take.mp3 -f f32le -ar 16000 -ac 1 - | stt      # or: voice stt
 ```
 
-`--format jsonl` adds per-segment timings and the detected language, which is
-what a subtitle file — or a TTS training manifest — needs:
-
-```json
-{"start":2.300,"end":4.760,"language":"zh","text":"欺软怕硬的家伙算什么好汉"}
-```
-
-Two runtimes, one command. `--backend auto` reads the model directory: an
-`optimum`-style ONNX export (`encoder_model.onnx` +
-`decoder_model_merged.onnx`) runs on ONNX Runtime, `model.safetensors` runs on
-the fastest available Burn backend. Name one explicitly with `--backend
-onnx|tch|cuda|wgpu`. The two agree token for token on the same weights, which is
-how the Burn port is checked against an independent implementation.
-
-Weights come from `openai/whisper-large-v3-turbo`, downloaded on first use;
-`--repo owner/name` picks a different one — `onnx-community/whisper-large-v3-turbo`
-for the ONNX export — and every dimension is read from that repo's own
-`config.json`, so a different size costs no code.
-
-Input is **buffered, not streamed** — segmentation looks for silences across the
-whole recording, and Whisper normalises each 30 s window against its own peak.
-Segmentation matters more than its size suggests: Whisper is a language model
-conditioned on audio, and handed a long quiet stretch it will invent fluent
-sentences to fill it. `voice stt` reuses the sentence slicer from `rvc
-preprocess`, which uses energy only to find silent gaps and never to gate
-quiet-but-present sound, so soft and breathy speech survives the cut.
-`--silence-db` and `--min-silence` tune where the cuts land.
-
-## `voice tts`
-
-Text on stdin, raw f32le mono PCM on stdout. GPT-SoVITS clones a voice from a
-few seconds of reference audio:
+**`tts`** reads text and writes raw f32le mono PCM, cloning a voice from a few
+seconds of reference audio. The reference's *transcript* is required beside its
+audio, because `s1` generates by continuation and has to see what the reference
+says:
 
 ```sh
 echo "今天天气很好" \
-  | tts --reference clip.wav --reference-text "不要再欺负他了" \
+  | tts --reference clip.wav --reference-text "这是一段示例录音" \
   | ffplay -f f32le -ar 32000 -ac 1 -
 ```
 
-`--reference-text` is required and is not bookkeeping. `s1` generates by
-*continuation*: it is primed with the reference's phonemes beside the
-reference's semantic tokens and then asked to keep going with your text. Given
-only the target text it sees phonemes and audio that disagree, finds nothing to
-continue, and stops after a token or two.
+Each engine's README has the rest — every flag, which weights are fetched and
+from where, the backends it accepts, and its fine-tuning loop.
 
-`--sr` resamples, which is what makes the pipeline this toolkit exists for:
+### Backends
+
+**`--backend` is a run-time choice on every engine, and ONNX Runtime is a
+first-class target rather than a legacy one.** `rvc` and `stt` each run under
+ONNX Runtime or under native Burn on LibTorch, CubeCL/CUDA or WebGPU; `tts` runs
+on Burn today and is gaining ONNX Runtime graphs one model at a time.
+
+Fine-tuning is always Burn. ONNX Runtime has no training path at all, which is
+why any model this toolkit trains must be a Burn port whatever else it also runs
+on — and why [`export/`](export/README.md) exists to carry the result back out to
+ONNX.
+
+The spellings are not quite uniform yet: `rvc` accepts `burn` as an alias for
+`cuda`, `stt` wants `burn-cuda`. Each engine's README lists what it takes.
+
+## Documentation
+
+Usage lives with the tool and this file stays an index — one README per engine,
+and `voice` inherits all three: [`rvc`](crates/rvc-cli/README.md),
+[`stt`](crates/stt-cli/README.md), [`tts`](crates/tts-cli/README.md).
+
+Under [`docs/`](docs/) there is one long-form architecture paper per network.
+They are written for *reviewing and maintaining the port* — what each block
+computes, what every loss term is for, why the training loop is shaped the way it
+is — rather than for driving the CLI:
+
+| paper | covers |
+|---|---|
+| [`docs/rvc-architecture.typ`](docs/rvc-architecture.typ) | RVC v2 — the VITS-derived synthesizer, the NSF source module, and the adversarial training objective |
+| [`docs/gptsovits-architecture.typ`](docs/gptsovits-architecture.typ) | GPT-SoVITS v2 — cnhubert, the semantic quantiser, `s1` (text → semantic tokens) and `s2` (tokens → waveform) |
+| [`docs/whisper-architecture.typ`](docs/whisper-architecture.typ) | Whisper large-v3-turbo — the log-mel front-end, the encoder/decoder stack, and KV-cached greedy decoding |
+
+The convention is a [Typst](https://typst.app) source with its rendered PDF
+committed beside it, so reading one needs no toolchain. Rebuild the PDF after an
+edit and commit it with the source:
 
 ```sh
-tts --reference clip.wav --reference-text "…" --sr 16000 < script.txt \
-  | rvc serve -m voice.safetensors --model-sr 48000 > out.f32le
+typst compile docs/rvc-architecture.typ
 ```
 
-One line of stdin is one utterance. Weights (cnhubert, `s1`, `s2` and the ONNX
-prosody encoder) download on first use.
-
-**Chinese only for now.** `--language en|ja` errors rather than guessing, because
-running Japanese through the Chinese front-end produces fluent-sounding wrong
-audio. The accuracy ceiling on Chinese is the polyphone dictionary — see
-`text-kit`.
-
-### Fine-tuning a voice
-
-Cloning from one reference clip gets the timbre. Fine-tuning adapts the
-*delivery* — pacing, emphasis, where a speaker breathes — because those live in
-the semantic token sequence `s1` predicts.
-
-A corpus is audio beside transcripts, `<stem>.wav` next to `<stem>.txt`. `stt`
-writes the transcripts:
-
-```sh
-for f in corpus/*.wav
-  ffmpeg -v quiet -i $f -f f32le -ar 16000 -ac 1 - | stt > (string replace .wav .txt $f)
-end
-
-tts train corpus/ -o tuned/voice --epochs 10
-tts --reference clip.wav --reference-text "…" --s1 tuned/voice.safetensors < script.txt
-```
-
-Training is plain next-token cross-entropy, so unlike an adversarial loop the
-loss means something on its own: it should fall and keep falling. Two files are
-written — `voice.safetensors` (the weight EMA, what you want) and
-`voice.raw.safetensors` (the live weights). `s2` fine-tuning is not implemented
-yet, so timbre still comes from the reference clip.
+Notes that only matter if you are *changing* the code — weight-compatibility
+constraints, backend genericity, and the traps that each cost a day to find —
+are in [CLAUDE.md](CLAUDE.md) and
+[`crates/rvc-train/ARCHITECTURE.md`](crates/rvc-train/ARCHITECTURE.md).
 
 ## Crate layout
 
@@ -166,7 +143,7 @@ Three tiers, and the names say which is which.
 | `hub-kit` | model downloads from Hugging Face |
 | `cli-kit` | logging, shell completions, `--device` parsing |
 | `train-kit` | checkpoints, weight EMA, gradient accumulation, the live dashboard — generic over the module being trained |
-| `text-kit` | grapheme-to-phoneme for TTS: language splitting, Mandarin g2p, GPT-SoVITS's phoneme table. No model, no tensors |
+| `text-kit` | grapheme-to-phoneme for TTS: language splitting by script, Mandarin g2p, GPT-SoVITS's phoneme table (English g2p in progress). No model, no tensors |
 
 **Networks**, named after the model, holding no app dependencies:
 
@@ -181,9 +158,9 @@ Three tiers, and the names say which is which.
 
 | crate | role |
 |-------|------|
-| `rvc-core` + `rvc-train` + `rvc-cli` | voice conversion → binary `rvc` |
+| `rvc-core` + `rvc-train` + `rvc-cli` | voice conversion, Burn **or** ONNX Runtime → binary `rvc` |
 | `stt-core` + `stt-cli` | speech recognition, Burn **or** ONNX Runtime → binary `stt` |
-| `tts-core` + `tts-train` + `tts-cli` | speech synthesis → binary `tts` |
+| `tts-core` + `tts-train` + `tts-cli` | speech synthesis, Burn (ONNX Runtime landing model by model) → binary `tts` |
 | `voice-cli` | the integration → binary `voice` |
 
 Two rules keep it that way. **No engine depends on another engine** — anything

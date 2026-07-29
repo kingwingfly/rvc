@@ -24,12 +24,17 @@ preprocessing script. Reading a cloned upstream repo as a porting reference is
 fine; running or shipping it is not. This is not a style preference: driving the
 RVC Python repo directly was tried and abandoned because it was unmaintainable
 for the authors and unusable for anyone else. The single `.safetensors → ONNX`
-exporter under `export/` is the last exception, gains no new responsibilities,
-and should eventually go.
+exporter under `export/` is the deliberate exception, and it **gains**
+responsibilities rather than losing them — Burn imports ONNX graphs and cannot
+emit one, so that script is the only bridge from a model fine-tuned here to ONNX
+Runtime, which this toolkit treats as a supported deployment target (see **Which
+runtime a model gets, and why**). What keeps the rule intact is that it stays a
+maintainer's build-time tool: no user, no test and no training run invokes it.
 
 **One binary per engine, plus `voice`.** `rvc`, `stt` and `tts` each stand alone
-and pull in only what they use — installing `stt` costs no ONNX Runtime and none of
-the RVC stack. `voice` is the *integration*: it depends on `rvc-cli` and
+and pull in only what they use — installing `stt` costs none of the RVC stack, and
+its `onnx` feature is opt-out, so a Burn-only `stt` links no ORT at all.
+`voice` is the *integration*: it depends on `rvc-cli` and
 `stt-cli` **as libraries**, so an argument is defined exactly once and never
 copied between binaries. Every `*-cli` crate is therefore a lib **and** a bin.
 `rvc-cli::args::RvcCommand` is `#[command(flatten)]`ed by `rvc` and nested by
@@ -54,6 +59,27 @@ Three tiers, and the name says which tier a crate is in:
 **`voice-` is reserved for the top.** It marks the integration, so a crate that
 an engine depends on must never be named `voice-*` — that is why the shared
 crates are `*-kit`. `voice-cli` is the only `voice-*` crate.
+
+### Where documentation goes
+Four places, and putting a paragraph in the wrong one is exactly how `README.md`
+once grew ninety lines of engine manual:
+
+- **`README.md`** is an *index*: what `voice` is, the pipeline, which binary to
+  install, one build block, links out. No engine documentation, ever — if a
+  passage names a flag, it belongs in an engine README.
+- **`crates/<engine>-cli/README.md`** is that engine's manual: every flag, which
+  weights are fetched from where, which backends it accepts, its training loop.
+  Setup shared by all four binaries (ORT, LibTorch, ffmpeg) is written once in
+  `crates/rvc-cli/README.md` and linked, not copied.
+- **`docs/*.typ`** are the long-form architecture papers, one per network —
+  `rvc-architecture`, `gptsovits-architecture`, `whisper-architecture` — for
+  *reviewing* a port rather than using it: what each block computes, what every
+  loss term is for, why the training loop has the shape it does. Typst sources
+  with the rendered PDF committed beside them, so reading needs no toolchain;
+  rebuild with `typst compile docs/<name>.typ` and commit both.
+- **this file** is the fourth: why a decision was made and which trap it avoids.
+  A fact that would be equally true of any VITS repo belongs in a `.typ` paper;
+  a fact that will bite whoever edits this code next belongs here.
 
 ## Build / run / verify
 
@@ -154,18 +180,18 @@ Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper
 | `burn-vits` | the VITS blocks RVC and GPT-SoVITS share (both descend from the same source, which is why their `state_dict` names line up): attention stack, `Wn`, flow, posterior encoder, `ResBlock1`, weight-norm convs, discriminators, the family's losses, the differentiable STFT |
 | `burn-rvc` | what is RVC's alone: `SourceModule` (NSF), the 768-dim `TextEncoder`, `GeneratorNsf`, the synthesizer wiring; re-exports `burn-vits` so it still reads as one model |
 | `burn-whisper` | the Whisper network (standalone Burn port); mirrors HF's `state_dict` layout so `openai/whisper-large-v3-turbo` loads unchanged |
-| `burn-gptsovits` | the GPT-SoVITS network. `hubert` at 210/0, `quantizer` at 3/0, and `s2` complete at 773/0 (the 3 unused are the codebook's EMA training statistics). **`s2` is verified numerically, not just structurally**: `examples/reconstruct` round-trips real audio through cnhubert, the quantiser and the synthesizer, and the output tracks the source's energy envelope at r=0.91 against a chance baseline of 0.30. `t2s` (`s1`) is at 295/0. Every network of GPT-SoVITS is now ported; `tts-core`/`tts-cli` wire them into a working `tts`, and `tts-train` fine-tunes `s1`. What remains is `s2` fine-tuning (the VITS GAN half). `examples/keys` lists any checkpoint's tensors, which is the first thing to run against a new one |
+| `burn-gptsovits` | the GPT-SoVITS network. `hubert` at 210/0, `quantizer` at 3/0, and `s2` complete at 773/0 (the 3 unused are the codebook's EMA training statistics). **`s2` is verified numerically, not just structurally**: `examples/reconstruct` round-trips real audio through cnhubert, the quantiser and the synthesizer, and the output tracks the source's energy envelope at r=0.91 against a chance baseline of 0.30. `t2s` (`s1`) is at 295/0. Every network of GPT-SoVITS is now ported; `tts-core`/`tts-cli` wire them into a working `tts`, and `tts-train` fine-tunes `s1`. `s2` fine-tuning (the VITS GAN half) is in progress — it is what moves *timbre*, where `s1` only moves delivery. `examples/keys` lists any checkpoint's tensors, which is the first thing to run against a new one |
 | `rvc-train` | native Rust/Burn adversarial training loop (see `crates/rvc-train/ARCHITECTURE.md`) |
 | `hub-kit` | auto-download every engine's assets from Hugging Face |
 | `rvc-cli` | lib **and** the `rvc` binary (clap): `convert`, `serve`, `models`, `train`, `preprocess` |
 | `stt-core` | speech recognition: Whisper log-mel front-end, BPE vocabulary, KV-cached greedy decode, segmentation via `audio-kit`'s slicer, and **two runtimes** (native Burn, ONNX Runtime) behind one `Engine` trait |
 | `stt-cli` | lib **and** the `stt` binary |
-| `tts-core` | speech synthesis: reference analysis, `s1` sampling with a KV cache, `s2` decode, and the ONNX prosody encoder behind a trait |
-| `tts-train` | fine-tuning GPT-SoVITS. `s1` is plain next-token cross-entropy over `T2s::forward_prompt_all` — one model, one optimizer, one loss, so unlike `rvc-train` the number means something on its own. A corpus is `<stem>.wav` + `<stem>.txt` pairs, and `stt` is how the transcripts get written |
+| `tts-core` | speech synthesis: reference analysis, `s1` sampling with a KV cache, `s2` decode, and the ONNX prosody encoder behind a trait. An ONNX Runtime inference path for the rest of the stack (`--backend onnx`) is being added graph by graph, so expect some models to have one and some not |
+| `tts-train` | fine-tuning GPT-SoVITS. `s1` is plain next-token cross-entropy over `T2s::forward_prompt_all` — one model, one optimizer, one loss, so unlike `rvc-train` the number means something on its own. `s2` is the other half and in progress: an adversarial VITS loop over `burn-vits`'s shared discriminators, so it inherits `rvc-train`'s loss family (mel-L1, KL, feature matching, LSGAN) rather than inventing one. A corpus is `<stem>.wav` + `<stem>.txt` pairs, and `stt` is how the transcripts get written |
 | `tts-cli` | lib **and** the `tts` binary |
-| `cli-kit` | logging, shell completions and `--device` parsing, shared by all three binaries |
+| `cli-kit` | logging, shell completions and `--device` parsing, shared by all four binaries |
 | `train-kit` | training scaffolding with no model knowledge: `Checkpoint`, `ema_update`, `accumulate`, `materialize`, `Dashboard`. Generic over the module trained, so a GAN and a cross-entropy loop share it |
-| `text-kit` | grapheme-to-phoneme: script-based language splitting, Mandarin g2p (jieba + pinyin + opencpop + tone sandhi), and GPT-SoVITS's 732-symbol table. Pure Rust, no ML, no backend — so it is fully testable without weights |
+| `text-kit` | grapheme-to-phoneme: script-based language splitting, Mandarin g2p (jieba + pinyin + opencpop + tone sandhi), and GPT-SoVITS's 732-symbol table. English g2p and a Mandarin phrase dictionary are in progress. Pure Rust, no ML, no backend — so it is fully testable without weights |
 | `voice-cli` | the `voice` binary: `rvc-cli`, `stt-cli` and `tts-cli` nested as `voice rvc …`, `voice stt` and `voice tts` |
 
 ### Three runtimes, one path (the key abstraction)
@@ -180,6 +206,11 @@ LibTorch-on-CPU. Naming a backend or device explicitly is an error if it is
 unavailable, never a fallback. The CubeCL/CUDA generator is still slower than
 realtime for `serve`; `--backend tch` is ~9x faster per file on an RTX 2060 and is
 what `auto` picks for `.safetensors` weights.
+
+The **alias sets are not yet uniform across engines** — `rvc` accepts a bare
+`burn` for `cuda`, `stt` only `burn-cuda` — which is a genuine inconsistency, not
+a documented distinction. Anything that unifies `--backend` parsing should move
+it into `cli-kit` beside `--device`, which every binary already shares.
 
 Device selection lives in `crates/burn-kit/src/device.rs` (`DeviceSpec`,
 `cuda_device`, `libtorch_device`, `wgpu_device`, `guard_init`) — a crate that knows
@@ -203,23 +234,42 @@ would otherwise be a multi-GB download of a **CPU-only** LibTorch.
 every subcommand. They are deliberate duplicates — an rpath is per-executable.
 
 ### Which runtime a model gets, and why
-A model that is **trained here** must be a Burn port — there is no ONNX training
-path. A model that is **frozen** may be either, and the deciding question is not
-loyalty to Burn:
+The target is that **the user picks the backend — for inference and for
+fine-tuning alike — and ONNX Runtime is a first-class deployment target for every
+model, not legacy to be retired.** Two asymmetries decide how far each model gets
+toward that:
+
+- **ONNX Runtime cannot train.** So a model that is fine-tuned here *must* be a
+  Burn port, whatever else it also runs on. That is not a preference for Burn; it
+  is the only way a `train` subcommand can exist at all, and it is why Burn is
+  always available for tuning even where ONNX is the faster inference path.
+- **Burn imports ONNX and cannot emit it.** So a checkpoint trained here reaches
+  ONNX Runtime only through `export/`. That is why the exporter gains scope
+  instead of being deleted: `rvc`'s generator today, GPT-SoVITS next.
+
+Where a model is **frozen** and an export already exists, ONNX is often simply
+the cheaper answer:
 
 - `tts-core`'s prosody BERT is ONNX. It is frozen, an export exists, and one
   sentence through 24 layers is launch-overhead bound, so a port would not be
   meaningfully faster. The trait (`ProsodyEncoder`) leaves the slot open.
 - `burn-gptsovits`'s cnhubert is a Burn port, done before that reasoning was
-  settled. Keeping it costs nothing and it is verified at 210/0.
-- GPT-SoVITS `s1`/`s2` must be Burn: they are fine-tuned.
+  settled. Keeping it costs nothing, it is verified at 210/0, and it is what lets
+  `tts` run without ORT once `--prosody` is left off.
+- GPT-SoVITS `s1`/`s2` are Burn because they are fine-tuned — and are gaining an
+  ONNX inference path *alongside* Burn, not instead of it.
 
-Where a port *would* pay is dropping ONNX Runtime from the toolkit entirely,
-which would remove `ORT_DYLIB_PATH` from setup. `rvc-core`'s ContentVec and RMVPE
-are the two that stand in the way — and ContentVec is a HuBERT variant, so
-`burn-gptsovits`'s `hubert.rs` already covers its architecture. Porting it would
-mean lifting that module into a `burn-hubert` of its own, since two engines would
-then share it.
+**This reverses an earlier position on purpose, so do not "restore" it.** The old
+plan was to port `rvc-core`'s ContentVec and RMVPE to Burn *in order to* drop
+ONNX Runtime from the toolkit entirely and take `ORT_DYLIB_PATH` out of setup.
+Backend choice turned out to be worth more than one environment variable: people
+deploy where they deploy, and on plenty of targets ORT is the only runtime
+available. Porting ContentVec and RMVPE is still worth doing — it would give
+`rvc`'s feature extraction the same run-time choice its generator already has,
+and demote ORT from a hard requirement to an option — but as an **addition**.
+ContentVec is a HuBERT variant, so `burn-gptsovits`'s `hubert.rs` already covers
+its architecture; doing it means lifting that module into a `burn-hubert` of its
+own, since two engines would then share it.
 
 ### `s1` generates by continuation (`tts-core`)
 The reference's **transcript** is part of the prompt, not metadata: `s1` is shown
@@ -264,11 +314,21 @@ union of per-language sets and then appends two groups *unsorted*) — off by on
 entry and the model produces confident nonsense rather than an error. Same reason
 `opencpop-strict.txt` is `include_str!`d rather than read at run time.
 
-Known ceiling: upstream reads pronunciations with `pypinyin` and its ~130k-entry
-phrase dictionary; the `pinyin` crate is per-character, so word-dependent
-polyphones (银行 as *hang*, not *xing*) fall back to the commonest reading.
-`chinese.rs::POLYPHONES` patches the frequent cases. A real phrase dictionary, or
-g2pw, is the fix.
+The same table is what makes **English** cheap to add: GPT-SoVITS v2's symbol
+list already carries the ARPAbet phones, so `--language en` needs no new indices
+— only a g2p that emits them. That work is in progress; until it lands, `en`
+still errors rather than guessing, which is the right failure. Splitting is by
+script, so a mixed sentence routes each run to its own front-end and the phoneme
+streams concatenate into one sequence — the reason language selection is a
+per-run property and not a global mode.
+
+Known ceiling on Mandarin: upstream reads pronunciations with `pypinyin` and its
+~130k-entry phrase dictionary; the `pinyin` crate is per-character, so
+word-dependent polyphones (银行 as *hang*, not *xing*) fall back to the commonest
+reading. `chinese.rs::POLYPHONES` patches the frequent cases, and a phrase
+dictionary consulted on the jieba segmentation — the principled version of the
+same fix — is in progress. It will narrow the gap rather than close it, since it
+will be smaller than `pypinyin`'s; g2pw is the endgame.
 
 ### Lazy parameters (`train_kit::materialize`)
 Burn allocates parameters lazily, and two things go wrong while a module is still
@@ -301,6 +361,12 @@ The only Python: a standalone `uv` project that converts a Burn `.safetensors` t
 ONNX. `rvc_infer.py` is a **clean-room** torch reimplementation mirroring the
 `burn-rvc` layout (it does NOT depend on the RVC-Project repo). Native Burn inference
 needs no export — this is only for ONNX Runtime / cross-framework deploy.
+
+It is the **only** direction that needs Python, and only because Burn reads ONNX
+without writing it. Extending it to a new model means adding another clean-room
+mirror of that network's Burn layout beside `rvc_infer.py` (GPT-SoVITS is the
+next one, in progress) — never importing the upstream project, and never adding a
+step a user has to run.
 
 ```sh
 uv run --project export python export/export_onnx.py models/voice.safetensors models/voice.onnx
