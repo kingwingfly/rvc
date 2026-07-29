@@ -15,6 +15,7 @@
 //! it is built before the network it feeds.
 
 mod chinese;
+mod english;
 mod normalize;
 mod segment;
 pub mod symbols;
@@ -63,7 +64,7 @@ impl Phonemes {
 pub fn phonemize(text: &str, language: Language) -> Result<Phonemes> {
     match language {
         Language::Zh => Ok(chinese::phonemize(text)),
-        Language::En => Err(TextError::Unsupported("English")),
+        Language::En => Ok(english::phonemize(text)),
         Language::Ja => Err(TextError::Unsupported("Japanese")),
     }
 }
