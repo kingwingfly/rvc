@@ -66,6 +66,26 @@ impl Default for SovitsConfig {
     }
 }
 
+/// The periods GPT-SoVITS v2's discriminator bank uses.
+///
+/// Five, where RVC v2 uses eight — confirmed against `s2D2333k.pth`, which holds
+/// six `discriminators.N` entries: the scale discriminator plus one per period.
+pub const GPTSOVITS_V2_PERIODS: [usize; 5] = [2, 3, 5, 7, 11];
+
+/// What [`SovitsPartial::forward_train`] hands the losses.
+pub struct TrainForward<B: Backend> {
+    /// The decoded audio segment, `[batch, 1, segment_frames * 640]`.
+    pub y_hat: Tensor<B, 3>,
+    /// The posterior sample pushed through the flow, `[batch, inter, frames]`.
+    pub z_p: Tensor<B, 3>,
+    /// Prior mean from `enc_p`, `[batch, inter, frames]`.
+    pub m_p: Tensor<B, 3>,
+    /// Prior log-std from `enc_p`.
+    pub logs_p: Tensor<B, 3>,
+    /// Posterior log-std from `enc_q`.
+    pub logs_q: Tensor<B, 3>,
+}
+
 /// The parts of `s2` that exist so far.
 ///
 /// Deliberately not called `Synthesizer` yet: it cannot synthesise until `enc_p`
@@ -175,6 +195,54 @@ impl<B: Backend> SovitsPartial<B> {
         self.dec.forward(z, g)
     }
 
+    /// The training forward pass: both encoders over the whole utterance, then
+    /// the decoder over one random segment of it.
+    ///
+    /// `codes`: `[batch, tokens]` at 25 Hz, `text`: `[batch, phones]`, `spec`:
+    /// the clip's own linear spectrogram `[batch, spec_channels, frames]` at
+    /// `frames == tokens * 2`. `ids_slice[i]` is sample `i`'s start frame and
+    /// `segment_frames` frames are decoded from there.
+    ///
+    /// The speaker vector comes from `spec` — the clip conditions on itself, as
+    /// upstream's `ge = ref_enc(y)` does. That is the same call inference makes,
+    /// so fine-tuning cannot drift away from how the weights are later used.
+    ///
+    /// Only a segment is decoded because the decoder is the expensive half and
+    /// the adversarial losses are local anyway; `enc_p`, `enc_q` and the flow all
+    /// see the full sequence, which is what the KL term is computed over.
+    pub fn forward_train(
+        &self,
+        codes: Tensor<B, 2, Int>,
+        text: Tensor<B, 2, Int>,
+        spec: Tensor<B, 3>,
+        ids_slice: &[usize],
+        segment_frames: usize,
+    ) -> TrainForward<B> {
+        let g = self.speaker(spec.clone());
+
+        let (m_p, logs_p) = self
+            .enc_p
+            .forward(self.quantizer_decode(codes), text, g.clone());
+        let (z, _m_q, logs_q) = self.encode(spec, g.clone());
+        let z_p = self.flow.forward(z.clone(), g.clone());
+
+        // Gather each sample's own segment. `narrow` twice rather than one
+        // `slice`, because the start frame differs per sample.
+        let mut slices = Vec::with_capacity(ids_slice.len());
+        for (i, &s) in ids_slice.iter().enumerate() {
+            slices.push(z.clone().narrow(0, i, 1).narrow(2, s, segment_frames));
+        }
+        let y_hat = self.dec.forward(Tensor::cat(slices, 0), g);
+
+        TrainForward {
+            y_hat,
+            z_p,
+            m_p,
+            logs_p,
+            logs_q,
+        }
+    }
+
     /// Codes to the 50 Hz features `enc_p` expects.
     ///
     /// The quantiser works at 25 Hz and `enc_p` at 50, so every token is
@@ -189,6 +257,44 @@ impl<B: Backend> SovitsPartial<B> {
             .unsqueeze_dim::<4>(3)
             .expand([batch, dim, tokens, 2])
             .reshape([batch, dim, tokens * 2])
+    }
+
+    /// Load weights, dispatching on extension: an `s2G*.pth` from upstream, or a
+    /// `.safetensors` this toolkit fine-tuned. Both are `s2`; only the container
+    /// differs, which is what lets `--s2 tuned.safetensors` stand in for the base
+    /// model everywhere the base model is accepted.
+    pub fn load_weights(
+        &mut self,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<burn_store::ApplyResult, Box<dyn std::error::Error>> {
+        let path = path.as_ref();
+        match path.extension().and_then(|e| e.to_str()) {
+            Some("safetensors") => burn_kit::store::load_burn_safetensors_into::<B, _>(self, path),
+            _ => self.load_pytorch(path),
+        }
+    }
+
+    /// Write the module in Burn's own safetensors layout.
+    pub fn save_safetensors(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        burn_kit::store::save_safetensors::<B, _>(self, path.as_ref())
+    }
+
+    /// Load a file [`SovitsPartial::save_safetensors`] wrote.
+    ///
+    /// Note which loader this uses: `load_burn_safetensors_into`, *not*
+    /// `load_safetensors_into`. The latter applies `PyTorchToBurnAdapter`, which
+    /// transposes Linear weights from `[out, in]` to `[in, out]` — right for a
+    /// Hugging Face checkpoint and wrong for one already in Burn's layout, where
+    /// it transposes a second time. A rectangular weight then fails loudly on
+    /// shape, but a square one is silently wrong.
+    pub fn load_safetensors(
+        &mut self,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<burn_store::ApplyResult, Box<dyn std::error::Error>> {
+        burn_kit::store::load_burn_safetensors_into::<B, _>(self, path.as_ref())
     }
 
     /// Load the parts of an `s2G*.pth` that are modelled so far.

@@ -9,7 +9,7 @@
 //! Simpler than `rvc-train`'s GAN in every way that matters: one model, one
 //! optimizer, one loss, and a number that means something on its own.
 
-use burn::module::AutodiffModule;
+use burn::module::{AutodiffModule, Module};
 use burn::optim::{AdamWConfig, GradientsParams, Optimizer};
 use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::{Int, Tensor, TensorData};
@@ -53,17 +53,28 @@ impl Default for S1Settings {
 }
 
 /// Fine-tune `s1` on a prepared corpus, returning where the weights were saved.
+///
+/// `devices[0]` is the master: it owns the weights, the optimizer and the EMA,
+/// and the others only ever produce gradients for it. A clip is the unit of
+/// work, so with N devices each step processes N clips at once.
 pub fn run<AB: AutodiffBackend>(
     s1_path: &std::path::Path,
     clips: &[Clip],
     settings: &S1Settings,
     out: &Checkpoint,
-    device: &AB::Device,
+    stop: &std::sync::atomic::AtomicBool,
+    devices: &[AB::Device],
 ) -> Result<std::path::PathBuf> {
+    if devices.is_empty() {
+        return Err(crate::error::TrainError::Device(
+            "no compute device selected".into(),
+        ));
+    }
+    let device = &devices[0];
     let cfg = T2sConfig::default();
     let mut model = T2s::<AB>::new(&cfg, device);
     model
-        .load_pytorch(s1_path)
+        .load_weights(s1_path)
         .map_err(|e| crate::error::TrainError::Weights(format!("s1: {e}")))?;
 
     let usable: Vec<&Clip> = clips
@@ -81,7 +92,10 @@ pub fn run<AB: AutodiffBackend>(
         tracing::warn!("{skipped} clips over the token cap were left out");
     }
 
-    let steps_per_epoch = usable.len().div_ceil(settings.batch_size.max(1));
+    // A step consumes `batch_size` clips per device, so more devices make each
+    // step wider rather than the run longer.
+    let per_step = settings.batch_size.max(1) * devices.len();
+    let steps_per_epoch = usable.len().div_ceil(per_step);
     let total_steps = steps_per_epoch * settings.epochs as usize;
     tracing::info!(
         "fine-tuning s1 on {} clips ({:.1} min), {total_steps} steps",
@@ -102,13 +116,21 @@ pub fn run<AB: AutodiffBackend>(
     let ema_keep = ema_keep(settings.ema_frac, total_steps);
     let mut ema = ema_keep.map(|_| model.valid());
 
+    // Burn allocates parameters lazily, and a replica cloned before they
+    // materialise gets fresh `ParamId`s — its gradients would then never match
+    // the master's and would be dropped in silence, leaving every extra device
+    // contributing nothing while the run looked healthy.
+    if devices.len() > 1 {
+        train_kit::materialize(&model);
+    }
+
     let started = std::time::Instant::now();
     let mut step = 0usize;
     let mut stopped_early = false;
 
     'training: for epoch in 0..settings.epochs {
-        for chunk in usable.chunks(settings.batch_size.max(1)) {
-            if dash.interrupted() {
+        for chunk in usable.chunks(per_step) {
+            if stop.load(std::sync::atomic::Ordering::Relaxed) || dash.interrupted() {
                 tracing::info!("stopping early at step {step}");
                 stopped_early = true;
                 break 'training;
@@ -119,13 +141,35 @@ pub fn run<AB: AutodiffBackend>(
             let progress = step as f64 / total_steps.max(1) as f64;
             let lr = settings.lr * settings.lr_final.powf(progress);
 
+            // Replicas for the non-master devices, rebuilt each step because only
+            // the master is optimized. Empty when there is one device, so that
+            // path is exactly the single-device one with no copy.
+            let replicas: Vec<T2s<AB>> = devices[1..]
+                .iter()
+                .map(|d| model.clone().to_device(d))
+                .collect();
+
             let mut grads = GradientsParams::new();
             let mut total = 0.0f32;
-            for clip in chunk {
-                let loss = clip_loss(&model, clip, device);
+            let inv = 1.0 / chunk.len() as f32;
+            for (i, clip) in chunk.iter().enumerate() {
+                // Round-robin across devices, so a chunk of N*batch clips is N
+                // independent forward/backward passes running side by side.
+                let d = i % devices.len();
+                let m = match d.checked_sub(1) {
+                    None => &model,
+                    Some(r) => &replicas[r],
+                };
+                let loss = clip_loss(m, clip, &devices[d]);
                 total += scalar(loss.clone().inner());
-                let g = GradientsParams::from_grads(loss.backward(), &model);
-                grads = train_kit::accumulate(grads, g, &model, 1.0 / chunk.len() as f32);
+                let g = GradientsParams::from_grads(loss.backward(), m);
+                // Gradients come home to the master before they are summed; only
+                // the master's optimizer state and weights ever advance.
+                let g = match d {
+                    0 => g,
+                    _ => g.to_device(device, &model),
+                };
+                grads = train_kit::accumulate(grads, g, &model, inv);
             }
             model = optim.step(lr, model, grads);
 
@@ -133,7 +177,7 @@ pub fn run<AB: AutodiffBackend>(
                 ema = Some(ema_update(current, &model, keep));
             }
 
-            let mean = total / chunk.len() as f32;
+            let mean = total * inv;
             dash.update(step, &[mean], lr);
             if step % 20 == 0 || step + 1 == total_steps {
                 tracing::info!(

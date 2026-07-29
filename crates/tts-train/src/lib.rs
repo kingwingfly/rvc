@@ -12,10 +12,12 @@ pub mod audio;
 pub mod dataset;
 mod error;
 pub mod s1;
+pub mod s2;
 
-pub use dataset::{Clip, encoders, pairs, prepare};
+pub use dataset::{Clip, SAMPLES_PER_FRAME, encoders, pairs, prepare};
 pub use error::{Result, TrainError};
 pub use s1::S1Settings;
+pub use s2::S2Settings;
 
 use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor};

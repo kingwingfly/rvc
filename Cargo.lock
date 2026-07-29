@@ -7743,6 +7743,7 @@ dependencies = [
  "burn-gptsovits",
  "burn-kit",
  "burn-ndarray",
+ "burn-vits",
  "futures",
  "text-kit",
  "thiserror 2.0.19",

@@ -92,7 +92,7 @@ pub fn run<AB: AutodiffBackend>(
         tracing::info!("resumed discriminator from {}", p.display());
     } else if let Some(p) = &req.pretrained_d {
         let res = disc
-            .load_pytorch(p)
+            .load_pytorch(p, Some("model"))
             .map_err(|e| anyhow!("loading D {}: {e}", p.display()))?;
         anyhow::ensure!(
             res.missing.is_empty(),
