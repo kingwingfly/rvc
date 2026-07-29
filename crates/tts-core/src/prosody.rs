@@ -65,7 +65,9 @@ pub trait ProsodyEncoder: Send {
 /// The ONNX implementation.
 #[cfg(feature = "onnx")]
 pub struct OnnxProsody {
-    session: ort::session::Session,
+    /// Never dropped — see [`crate::onnx_engine`], which owns four of these for
+    /// the same reason.
+    session: std::mem::ManuallyDrop<ort::session::Session>,
     tokenizer: tokenizers::Tokenizer,
     hidden: usize,
 }
@@ -103,7 +105,7 @@ impl OnnxProsody {
             .map_err(|e| TtsError::Vocabulary(format!("failed to read tokenizer.json: {e}")))?;
 
         Ok(Self {
-            session,
+            session: std::mem::ManuallyDrop::new(session),
             tokenizer,
             hidden,
         })

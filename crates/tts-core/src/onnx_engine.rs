@@ -23,11 +23,23 @@ use crate::error::{Result, TtsError};
 /// One tensor on its way back into a graph: flat data with its shape.
 type Cached = (Vec<i64>, Vec<f32>);
 
+/// A session that is never dropped.
+///
+/// Unwinding an ONNX Runtime session on the CUDA execution provider aborts the
+/// process with glibc's "corrupted double-linked list" — *after* all work is
+/// done, so a run that produced perfect audio exits 134 instead of 0. Leaking is
+/// the fix, and it belongs here rather than at each call site: `tts` used to
+/// `mem::forget` its models at the end of a successful run, which left every
+/// early return — including the honest "you asked for `--backend onnx` and there
+/// is no export" — aborting instead of reporting. A session holds memory until
+/// the process exits either way; the kernel reclaims it a moment later.
+type Leaked = std::mem::ManuallyDrop<Session>;
+
 pub struct OnnxEngine {
-    reference: Session,
-    s1_prompt: Session,
-    s1_step: Session,
-    s2: Session,
+    reference: Leaked,
+    s1_prompt: Leaked,
+    s1_step: Leaked,
+    s2: Leaked,
     /// `2 * n_layer` entries, key and value interleaved as the graph names them.
     cache: Vec<Cached>,
     layers: usize,
@@ -217,13 +229,17 @@ fn ids(values: &[u32]) -> Result<Tensor<i64>> {
 
 /// Build a session with CUDA-then-CPU execution providers.
 ///
+/// Returns it already [`Leaked`], so that loading the second of four graphs and
+/// failing on the third cannot unwind the first — which is precisely how this
+/// abort was found.
+///
 /// `stt-core` and `rvc-core` each have the same six lines. They are not shared
 /// because engines do not depend on each other, and a third copy is the moment
 /// to consider a kit crate rather than the moment to reach across.
-fn session(path: &Path) -> Result<Session> {
+fn session(path: &Path) -> Result<Leaked> {
     use ort::execution_providers::{CPUExecutionProvider, CUDAExecutionProvider};
 
-    Session::builder()
+    let session = Session::builder()
         .map_err(onnx)?
         .with_execution_providers([
             CUDAExecutionProvider::default().build(),
@@ -231,7 +247,8 @@ fn session(path: &Path) -> Result<Session> {
         ])
         .map_err(|e| TtsError::Weights(e.to_string()))?
         .commit_from_file(path)
-        .map_err(|e| TtsError::Weights(format!("{}: {e}", path.display())))
+        .map_err(|e| TtsError::Weights(format!("{}: {e}", path.display())))?;
+    Ok(std::mem::ManuallyDrop::new(session))
 }
 
 fn onnx(e: ort::Error) -> TtsError {
