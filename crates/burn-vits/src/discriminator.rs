@@ -160,7 +160,17 @@ impl<B: Backend> MultiPeriodDiscriminator<B> {
     /// Entry 0 is always the scale discriminator and the rest are the periods in
     /// order — the layout every VITS-lineage project inherited, so the mapping is
     /// derived from the period count rather than spelled out per model.
-    pub fn load_pytorch(&mut self, path: impl AsRef<Path>) -> Result<ApplyResult, Box<dyn Error>> {
+    ///
+    /// `top_level_key` is where the state dict sits inside the archive, and the
+    /// family does *not* agree on it: RVC's `f0D*.pth` uses `model`, GPT-SoVITS's
+    /// `s2D*.pth` uses `weight`. It is a parameter for that reason — hardcoding
+    /// either one loads nothing at all from the other, and a checkpoint that
+    /// applies zero tensors still returns `Ok`.
+    pub fn load_pytorch(
+        &mut self,
+        path: impl AsRef<Path>,
+        top_level_key: Option<&str>,
+    ) -> Result<ApplyResult, Box<dyn Error>> {
         let mut remaps = vec![(r"^discriminators\.0\.".to_string(), "scale.".to_string())];
         for i in 0..self.periods.len() {
             remaps.push((
@@ -172,7 +182,7 @@ impl<B: Backend> MultiPeriodDiscriminator<B> {
             .iter()
             .map(|(a, b)| (a.as_str(), b.as_str()))
             .collect();
-        load_pytorch_into::<B, _>(self, path.as_ref(), Some("model"), &remaps)
+        load_pytorch_into::<B, _>(self, path.as_ref(), top_level_key, &remaps)
     }
 
     /// Save the discriminator in Burn-native safetensors (round-trips with

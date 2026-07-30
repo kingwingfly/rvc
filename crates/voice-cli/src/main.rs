@@ -25,13 +25,17 @@ use args::{Cli, Command};
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    rvc_cli::init_logging(match &cli.command {
-        Command::Rvc { command } => match command.as_ref() {
+    // Both trainers put a TUI on the terminal, so both need their tracing sent
+    // to a file instead of stderr. Each engine owns the decision for its own
+    // subcommand — `voice` only routes to the right one.
+    match &cli.command {
+        Command::Rvc { command } => rvc_cli::init_logging(match command.as_ref() {
             RvcCommand::Train(a) => Some(a),
             _ => None,
-        },
-        _ => None,
-    });
+        }),
+        Command::TtsTrain(a) => tts_cli::init_logging(Some(a)),
+        _ => rvc_cli::init_logging(None),
+    }
     match cli.command {
         Command::Rvc { command } => rvc_cli::run_rvc(*command).await,
         Command::Stt(a) => stt_cli::run(*a).await,

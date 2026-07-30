@@ -17,6 +17,7 @@ onnx = ["tts-core/onnx"]
 
 [dependencies]
 burn-gptsovits.workspace = true
+burn-vits.workspace = true
 burn-kit.workspace = true
 train-kit.workspace = true
 text-kit.workspace = true

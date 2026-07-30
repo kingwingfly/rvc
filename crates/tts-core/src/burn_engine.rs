@@ -25,8 +25,12 @@ pub struct BurnEngine<B: Backend> {
 }
 
 impl<B: Backend> BurnEngine<B> {
-    /// Load from a `chinese-hubert-base/pytorch_model.bin`, an `s1*.ckpt` (or a
-    /// `.safetensors` from `tts train`) and an `s2G*.pth`.
+    /// Load from a `chinese-hubert-base/pytorch_model.bin`, an `s1*.ckpt` and an
+    /// `s2G*.pth`.
+    ///
+    /// `s1` and `s2` are each taken as either an upstream checkpoint or a
+    /// `.safetensors` from a fine-tune — the extension decides, so a tuned stage
+    /// substitutes for its base wherever the base is accepted.
     pub fn load(hubert: &Path, s1: &Path, s2: &Path, device: &B::Device) -> Result<Self> {
         let weights =
             |what: &str, e: Box<dyn std::error::Error>| TtsError::Weights(format!("{what}: {e}"));
@@ -40,7 +44,7 @@ impl<B: Backend> BurnEngine<B> {
         t2s.load_weights(s1).map_err(|e| weights("s1", e))?;
 
         let mut sovits = SovitsPartial::<B>::new(&SovitsConfig::default(), device);
-        sovits.load_pytorch(s2).map_err(|e| weights("s2", e))?;
+        sovits.load_weights(s2).map_err(|e| weights("s2", e))?;
 
         Ok(Self {
             hubert: model,
