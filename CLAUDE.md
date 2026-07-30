@@ -412,11 +412,35 @@ It is the **only** direction that needs Python, and only because Burn reads ONNX
 without writing it. Extending it to a new model means adding another clean-room
 mirror of that network's Burn layout beside `rvc_infer.py` — `gptsovits_infer.py`
 is the second — never importing the upstream project, and never adding a step a
-user has to run. `export_gptsovits.py` reads *either* weight layout: an original
+user has to run. `export_gptsovits.py` accepts *either* weight layout: an original
 `.pth`/`.ckpt` through the same key remaps the Rust loaders apply, or a Burn
-`.safetensors` from `tts train` with its `Linear` weights transposed back. That
-second path is the point of the whole exercise — it is how a voice fine-tuned
-here reaches ONNX Runtime.
+`.safetensors` from `tts train`. That second path is the point of the whole
+exercise — it is how a voice fine-tuned here would reach ONNX Runtime.
+
+**The Burn-`.safetensors` branch is currently wrong, and only the `.pth` branch is
+trustworthy.** Both export without error and both produce intelligible speech, so
+nothing complains; the difference only shows in a cross-runtime comparison at a
+fixed seed, with the caller-drawn noise held identical:
+
+| weights exported from | ONNX vs Burn |
+|---|---|
+| `s2G2333k.pth` | max abs 2.5e-03, RMS-diff/RMS **0.0035** |
+| a fine-tuned `.safetensors` | max abs 3.1e-01, RMS-diff/RMS **1.14** |
+
+A ratio above 1 means the two waveforms are less alike than one is to silence, so
+the exported graph is not the model that was trained. It went unnoticed because
+the branch could not be exercised until `s2` fine-tuning existed to produce a
+`.safetensors` to feed it — the exporter and the trainer landed in the same batch.
+
+Two candidates are already eliminated. Weight-norm folding is **not** it: Burn
+mirrors torch exactly, `weight_g` as `[out,1,1]` and `weight_v` as `[out,in,k]`,
+so `fold_weight_norm`'s axis inference behaves the same for both sources. Nor is
+it a missing parameter: `build_state_dict` is strict and every shape matched.
+That points at a **shape-invariant** error — a transpose applied or skipped on a
+square weight, or a norm parameter matched to the wrong tensor — which is the same
+family as the `load_safetensors_into` double-transpose recorded above. **A Burn
+`.safetensors` is not a PyTorch checkpoint, and this is the second bug caused by
+treating it as one.**
 
 `s1` is emitted as **two** graphs, `s1_prompt` and `s1_step`, because a KV cache
 cannot be a single static graph; the weights therefore appear twice on disk.

@@ -48,6 +48,20 @@ the graphs are written, and `tts` looks for them in `<models>/onnx` or
 reference|s1|s2` re-exports one stage, which is what you want after a fine-tune
 touched one of them.
 
+> **Known bug: `--s1`/`--s2` do not round-trip correctly yet.** Exporting from an
+> original `.pth`/`.ckpt` is faithful — the resulting graphs match the Burn path
+> to an RMS-difference/RMS ratio of 0.0035. Exporting a Burn `.safetensors` is
+> not: the ratio is 1.14, meaning the two waveforms are less alike than one is to
+> silence, so the graph is not the model that was trained. It exports without
+> error and speaks intelligibly, which is why it went unnoticed — the branch could
+> not be tested until `s2` fine-tuning existed to produce a `.safetensors`, and
+> the two landed together. Weight-norm folding is ruled out (Burn stores
+> `weight_g` as `[out,1,1]` and `weight_v` as `[out,in,k]`, exactly as torch does)
+> and so is a missing parameter (`build_state_dict` is strict and every shape
+> matched), which leaves a shape-invariant mismatch — a transpose applied or
+> skipped on a square weight, or a norm parameter bound to the wrong tensor.
+> Until it is fixed, deploy a fine-tune on Burn (`--backend tch`), not on ONNX.
+
 Four graphs, because the pipeline has four points where control returns to the
 host — sampling a token and deciding when to stop are the two that matter.
 
