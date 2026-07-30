@@ -288,6 +288,23 @@ text and audio that disagree, finds nothing to continue, and stops after a token
 or two — a bug that looks like a broken decoder and is not. Hence
 `--reference-text` being required.
 
+**A `--reference-text` that is merely *wrong* fails differently, and worse.** An
+absent one truncates loudly; a mismatched one degrades quietly: `s1` renders the
+transcript it was given before reaching the target, so the output grows extra
+leading speech and roughly doubles in length. Measured on the same clip, same
+target (`今天天气很好`) and same seed: the clip's true transcript gives **1.32 s**
+and the right words, a plausible-but-wrong transcript gives **2.36 s** with the
+wrong words first. Nothing errors, and `stt` may still recover the target from the
+tail, so a round-trip check can pass while the audio is wrong.
+
+Worth knowing when writing test commands, because this is how it bites: pairing a
+real recording with a *placeholder* transcript is the natural thing to do when
+sanitising an example, and it manufactures exactly this artifact. Three separate
+workers hit it that way and each diagnosed it as a decoder defect. **A duration
+that does not match the text length is the tell.** Illustrative docs are safe —
+`clip.wav` beside a generic transcript is self-consistent, since a reader supplies
+both — but any command naming a real file must name what that file actually says.
+
 ### Verifying a port beyond weight coverage
 Coverage says the module tree matches the checkpoint. It says nothing about
 whether the forward pass computes the right thing, and this repo has already
