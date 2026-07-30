@@ -6,15 +6,17 @@
 //! It cannot catch a wrong *formula* — post-norm where the reference is pre-norm
 //! loads at 100% and is wrong — which is what end-to-end listening is for.
 //!
-//! Usage: `cargo run -p burn-gptsovits --example load -- [--backend ndarray|cuda|tch] <hubert|quantizer> <checkpoint>`
+//! Usage: `cargo run -p burn-gptsovits --example load -- [--backend ndarray|cuda|tch] <hubert|quantizer|sovits|t2s|disc> <checkpoint>`
 
 #[path = "common/mod.rs"]
 mod common;
 
 use burn::tensor::backend::Backend;
 use burn_gptsovits::{
-    Hubert, HubertConfig, Quantizer, QuantizerConfig, SovitsConfig, SovitsPartial, T2s, T2sConfig,
+    GPTSOVITS_V2_PERIODS, Hubert, HubertConfig, Quantizer, QuantizerConfig, SovitsConfig,
+    SovitsPartial, T2s, T2sConfig,
 };
+use burn_vits::MultiPeriodDiscriminator;
 
 struct Load {
     component: String,
@@ -40,8 +42,18 @@ impl common::Job for Load {
                 let mut model = T2s::<B>::new(&T2sConfig::default(), device);
                 model.load_pytorch(&self.weights)
             }
+            // The adversary `s2` fine-tuning warm-starts from. Its state dict
+            // sits under `weight`, where RVC's sits under `model` — the one
+            // difference between the two projects' discriminator checkpoints,
+            // and the reason the key is a parameter.
+            "disc" => {
+                let mut model = MultiPeriodDiscriminator::<B>::new(&GPTSOVITS_V2_PERIODS, device);
+                model.load_pytorch(&self.weights, Some("weight"))
+            }
             other => {
-                eprintln!("unknown component `{other}` (known: hubert, quantizer, sovits, t2s)");
+                eprintln!(
+                    "unknown component `{other}` (known: hubert, quantizer, sovits, t2s, disc)"
+                );
                 std::process::exit(2);
             }
         }

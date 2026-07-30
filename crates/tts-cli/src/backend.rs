@@ -114,23 +114,47 @@ pub struct TrainInputs<'a> {
     pub hubert: &'a Path,
     pub s1: &'a Path,
     pub s2: &'a Path,
+    /// The `s2` discriminator to warm-start from, when the bundle has one.
+    pub s2d: Option<&'a Path>,
     pub prosody: Option<&'a Path>,
     pub pairs: &'a [(std::path::PathBuf, std::path::PathBuf)],
     pub language: text_kit::Language,
-    pub settings: &'a tts_train::S1Settings,
-    pub out: &'a train_kit::Checkpoint,
+    pub s1_settings: &'a tts_train::S1Settings,
+    pub s2_settings: &'a tts_train::S2Settings,
+    /// Output stem; each stage derives its own checkpoint family from it.
+    pub out: &'a Path,
+    pub stage: crate::train::Stage,
+    pub stop: &'a std::sync::atomic::AtomicBool,
 }
 
-/// Prepare the corpus and fine-tune `s1` on the chosen backend.
+impl TrainInputs<'_> {
+    /// The checkpoint family one stage writes: `models/mine` -> `models/mine.s1`.
+    ///
+    /// Built by appending to the file name rather than with
+    /// [`Path::with_extension`], which sees only the last dot and would turn
+    /// `voice.v2` into `voice.s1`, silently merging two runs' outputs.
+    fn checkpoint(&self, stage: &str) -> train_kit::Checkpoint {
+        let name = self
+            .out
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "voice".into());
+        let dir = self.out.parent().unwrap_or(Path::new(""));
+        train_kit::Checkpoint::new(&dir.join(format!("{name}.{stage}")))
+    }
+}
+
+/// Prepare the corpus once and fine-tune whichever stages were asked for.
 ///
 /// The frozen encoders run on the *inner* backend — preparation needs no
 /// gradients, and building them under autodiff would tape a forward pass per
 /// clip for nothing.
-pub fn train_s1(
+pub fn train(
     inputs: TrainInputs<'_>,
     backend: TtsBackend,
-    device: burn_kit::DeviceSpec,
+    devices: &[burn_kit::DeviceSpec],
 ) -> Result<()> {
+    anyhow::ensure!(!devices.is_empty(), "no --device given");
     let backend = match backend {
         TtsBackend::Auto => match burn_kit::auto_backend() {
             burn_kit::AutoBackend::LibTorch => TtsBackend::Tch,
@@ -139,12 +163,27 @@ pub fn train_s1(
         },
         explicit => explicit,
     };
-    tracing::info!("fine-tuning ({backend:?}, device {device})");
+    let list = devices
+        .iter()
+        .map(|d| d.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    tracing::info!("fine-tuning ({backend:?}, devices: {list})");
 
     macro_rules! train {
-        ($inner:ty, $device:expr, $name:literal) => {{
-            let device = $device;
+        ($inner:ty, $resolve:expr, $name:literal) => {{
+            let devices: Vec<_> = devices
+                .iter()
+                .map(|d| $resolve(*d))
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let devices = distinct(devices)?;
+            let device = devices[0].clone();
             let prosody = load_prosody(inputs.prosody);
+
+            // Preparation is the expensive half of a fine-tune — cnhubert, the
+            // quantiser and the prosody BERT over every clip — so it happens
+            // once even when both stages train. Waveforms are decoded only when
+            // `s2` will actually read them.
             let clips = burn_kit::guard_init($name, || -> Result<_> {
                 let (hubert, quantizer) =
                     tts_train::encoders::<$inner>(inputs.hubert, inputs.s2, &device)?;
@@ -155,6 +194,7 @@ pub fn train_s1(
                     &quantizer,
                     &mut prosody,
                     inputs.language,
+                    inputs.stage.wants_s2(),
                     &device,
                 )?;
                 // Never unwound, for the reason `args::run` gives at its own
@@ -169,15 +209,33 @@ pub fn train_s1(
                 Ok(clips)
             })??;
 
-            burn_kit::guard_init($name, || {
-                tts_train::s1::run::<burn::backend::Autodiff<$inner>>(
-                    inputs.s1,
-                    &clips,
-                    inputs.settings,
-                    inputs.out,
-                    &device,
-                )
-            })??;
+            if inputs.stage.wants_s1() {
+                let out = inputs.checkpoint("s1");
+                burn_kit::guard_init($name, || {
+                    tts_train::s1::run::<burn::backend::Autodiff<$inner>>(
+                        inputs.s1,
+                        &clips,
+                        inputs.s1_settings,
+                        &out,
+                        inputs.stop,
+                        &devices,
+                    )
+                })??;
+            }
+            if inputs.stage.wants_s2() {
+                let out = inputs.checkpoint("s2");
+                burn_kit::guard_init($name, || {
+                    tts_train::s2::run::<burn::backend::Autodiff<$inner>>(
+                        inputs.s2,
+                        inputs.s2d,
+                        &clips,
+                        inputs.s2_settings,
+                        &out,
+                        inputs.stop,
+                        &devices,
+                    )
+                })??;
+            }
         }};
     }
 
@@ -185,13 +243,13 @@ pub fn train_s1(
         #[cfg(feature = "tch")]
         TtsBackend::Tch => train!(
             burn::backend::LibTorch<f32>,
-            burn_kit::libtorch_device(device)?,
+            burn_kit::libtorch_device,
             "tch"
         ),
         #[cfg(feature = "cuda")]
-        TtsBackend::Cuda => train!(burn::backend::Cuda, burn_kit::cuda_device(device)?, "cuda"),
+        TtsBackend::Cuda => train!(burn::backend::Cuda, burn_kit::cuda_device, "cuda"),
         #[cfg(feature = "wgpu")]
-        TtsBackend::Wgpu => train!(burn::backend::Wgpu, burn_kit::wgpu_device(device)?, "wgpu"),
+        TtsBackend::Wgpu => train!(burn::backend::Wgpu, burn_kit::wgpu_device, "wgpu"),
         TtsBackend::Auto => unreachable!("resolved above"),
         #[allow(unreachable_patterns)]
         other => anyhow::bail!(
@@ -199,6 +257,22 @@ pub fn train_s1(
         ),
     }
     Ok(())
+}
+
+/// Reject a device list with repeats, *after* resolution.
+///
+/// Checking the `--device` strings is not enough: `auto,gpu:0` are different
+/// spellings that name device 0 twice, and on WebGPU `auto`, `vulkan` and `mps`
+/// all resolve to the default adapter. A repeat would silently double that
+/// device's share of the work — and its memory.
+fn distinct<D: PartialEq + std::fmt::Debug>(devices: Vec<D>) -> Result<Vec<D>> {
+    for (i, d) in devices.iter().enumerate() {
+        anyhow::ensure!(
+            !devices[..i].contains(d),
+            "--device lists {d:?} more than once (different spellings can name one device)"
+        );
+    }
+    Ok(devices)
 }
 
 /// Load the prosody encoder if one was found; its absence costs expressiveness

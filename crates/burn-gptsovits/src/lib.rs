@@ -24,6 +24,6 @@ pub use decoder::{Decoder, DecoderConfig};
 pub use hubert::{Hubert, HubertConfig};
 pub use quantizer::{Codebook, Quantizer, QuantizerConfig, Vq};
 pub use reference::{ReferenceConfig, ReferenceEncoder};
-pub use sovits::{SovitsConfig, SovitsPartial};
+pub use sovits::{GPTSOVITS_V2_PERIODS, SovitsConfig, SovitsPartial, TrainForward};
 pub use t2s::{T2s, T2sConfig, T2sState};
 pub use text_encoder::{TextEncoder, TextEncoderConfig};

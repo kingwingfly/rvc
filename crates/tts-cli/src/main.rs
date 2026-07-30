@@ -26,7 +26,9 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Fine-tune GPT-SoVITS on a corpus of audio with transcripts.
-    Train(tts_cli::TrainArgs),
+    /// Boxed because it carries every knob of two training loops, and an enum is
+    /// as large as its biggest variant.
+    Train(Box<tts_cli::TrainArgs>),
     /// Print a shell completion script (bash, zsh, fish, powershell, elvish).
     Completions(CompletionsArgs),
 }
@@ -34,10 +36,13 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    cli_kit::init_logging(None);
+    tts_cli::init_logging(match &cli.command {
+        Some(Command::Train(a)) => Some(a),
+        _ => None,
+    });
     match cli.command {
         None => tts_cli::run(cli.synth).await,
-        Some(Command::Train(a)) => tts_cli::train::run(a).await,
+        Some(Command::Train(a)) => tts_cli::train::run(*a).await,
         Some(Command::Completions(a)) => cli_kit::completions(a, Cli::command()),
     }
 }

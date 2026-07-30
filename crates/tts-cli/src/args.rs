@@ -65,10 +65,16 @@ pub struct TtsArgs {
     /// [default: auto-downloaded from Hugging Face].
     #[arg(short = 'm', long = "models")]
     pub model_dir: Option<PathBuf>,
-    /// Fine-tuned `s1` weights, overriding the base model's. This is what
-    /// `tts train` writes.
+    /// Fine-tuned `s1` weights, overriding the base model's. `s1` carries
+    /// delivery — pacing, emphasis, where a speaker breathes.
     #[arg(long, value_name = "SAFETENSORS")]
     pub s1: Option<PathBuf>,
+    /// Fine-tuned `s2` weights, overriding the base model's. `s2` carries
+    /// timbre, so this is the one that makes a clone sound like the speaker
+    /// rather than like the reference clip. Both are written by the `train`
+    /// subcommand and are independent — either, both or neither.
+    #[arg(long, value_name = "SAFETENSORS")]
+    pub s2: Option<PathBuf>,
     /// Directory holding the ONNX prosody encoder. Without it the model gets
     /// zero prosody features — intelligible, but flatter on Chinese.
     #[arg(long)]
@@ -135,6 +141,10 @@ pub async fn run(args: TtsArgs) -> Result<()> {
     if let Some(s1) = &args.s1 {
         tracing::info!("fine-tuned s1: {}", s1.display());
         paths.s1 = s1.clone();
+    }
+    if let Some(s2) = &args.s2 {
+        tracing::info!("fine-tuned s2: {}", s2.display());
+        paths.s2 = s2.clone();
     }
 
     let prosody: Option<Box<dyn tts_core::ProsodyEncoder>> = {

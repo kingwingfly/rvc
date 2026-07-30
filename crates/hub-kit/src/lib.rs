@@ -190,12 +190,16 @@ pub async fn fetch_prosody_bert(repo: Option<&str>, cache_dir: Option<&Path>) ->
 /// The official GPT-SoVITS v2 bundle.
 pub const DEFAULT_GPTSOVITS: (&str, &str) = ("lj1995", "GPT-SoVITS");
 
-/// Files the synthesis path needs from it.
-const GPTSOVITS_FILES: [&str; 4] = [
+/// Files the synthesis path needs from it, plus the discriminator `s2`
+/// fine-tuning warm-starts from. The last is dead weight for synthesis — ~90 MB
+/// that inference never opens — but fetching the bundle twice for want of one
+/// file is the worse trade, and a corpus big enough to fine-tune on dwarfs it.
+const GPTSOVITS_FILES: [&str; 5] = [
     "chinese-hubert-base/config.json",
     "chinese-hubert-base/pytorch_model.bin",
     "gsv-v2final-pretrained/s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt",
     "gsv-v2final-pretrained/s2G2333k.pth",
+    "gsv-v2final-pretrained/s2D2333k.pth",
 ];
 
 /// Where each model landed inside a fetched (or hand-assembled) bundle.
@@ -204,6 +208,12 @@ pub struct GptSovitsPaths {
     pub hubert: PathBuf,
     pub s1: PathBuf,
     pub s2: PathBuf,
+    /// The `s2` discriminator, when the bundle carries one.
+    ///
+    /// Optional where the other three are not, because only fine-tuning wants
+    /// it: synthesis never opens a discriminator, and a hand-assembled model
+    /// directory that predates `s2` training must keep working for `tts`.
+    pub s2d: Option<PathBuf>,
 }
 
 /// Fetch the v2 bundle, returning the directory it landed in.
@@ -258,6 +268,7 @@ pub fn gptsovits_paths(dir: &Path) -> Result<GptSovitsPaths> {
         hubert,
         s1: find("s1", ".ckpt").ok_or_else(|| missing("an s1*.ckpt", dir))?,
         s2: find("s2G", ".pth").ok_or_else(|| missing("an s2G*.pth", dir))?,
+        s2d: find("s2D", ".pth"),
     })
 }
 

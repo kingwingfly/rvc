@@ -56,7 +56,7 @@ impl common::Job for Load {
             println!("\n== discriminator {dpath} ==");
             let mut disc = MultiPeriodDiscriminator::<B>::new(&burn_rvc::RVC_V2_PERIODS, device);
             let dres = disc
-                .load_pytorch(dpath)
+                .load_pytorch(dpath, Some("model"))
                 .expect("failed to read D checkpoint");
             println!("applied : {}", dres.applied.len());
             println!("missing : {}", dres.missing.len());

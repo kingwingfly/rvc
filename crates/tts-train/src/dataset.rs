@@ -19,6 +19,11 @@ use tts_core::{ANALYSIS_SR, ProsodyEncoder};
 
 use crate::error::{Result, TrainError};
 
+/// Waveform samples per latent frame at the synthesis rate — the decoder's
+/// upsample product (`[10, 8, 2, 2, 2]`), which is also the spectrogram hop, so
+/// one spectrogram frame is exactly one latent frame.
+pub const SAMPLES_PER_FRAME: usize = 640;
+
 /// One prepared example.
 #[derive(Debug, Clone)]
 pub struct Clip {
@@ -31,12 +36,40 @@ pub struct Clip {
     pub bert_dim: usize,
     /// Semantic tokens the audio quantised to, at 25 Hz.
     pub tokens: Vec<u32>,
+    /// Ground-truth waveform at [`tts_core::OUTPUT_SR`], trimmed to exactly
+    /// `frames() * SAMPLES_PER_FRAME` samples.
+    ///
+    /// Empty unless preparation was asked for it: only `s2` compares generated
+    /// audio against the original, and decoding the corpus a second time is
+    /// wasted work for an `s1`-only run.
+    pub audio: Vec<f32>,
 }
 
 impl Clip {
     /// Roughly how long the clip is, from its token count.
     pub fn seconds(&self) -> f32 {
         self.tokens.len() as f32 / 25.0
+    }
+
+    /// Latent frames the clip is worth: one per 50 Hz frame, so two per token.
+    ///
+    /// `enc_p` upsamples the 25 Hz codes to 50 Hz and `enc_q` reads a 50 Hz
+    /// spectrogram, so this is the length both sides of the KL term must agree
+    /// on. Bounded by the waveform as well when there is one, since ffmpeg's
+    /// output length and the token count are rounded independently and the
+    /// shorter is the only one both can honour.
+    ///
+    /// Always even. `enc_p` reaches its length by repeating each 25 Hz code
+    /// twice, so it can only ever produce an even count; an odd `frames` would
+    /// leave the prior one frame shorter than the posterior and the KL term
+    /// would silently compare two different time bases.
+    pub fn frames(&self) -> usize {
+        let from_tokens = self.tokens.len() * 2;
+        let frames = match self.audio.is_empty() {
+            true => from_tokens,
+            false => from_tokens.min(self.audio.len() / SAMPLES_PER_FRAME),
+        };
+        frames & !1
     }
 }
 
@@ -80,12 +113,18 @@ pub fn pairs(dir: &Path) -> Result<Vec<(PathBuf, PathBuf)>> {
 ///
 /// `prosody` is optional and its absence is not fatal: zeros cost expressiveness
 /// rather than correctness, and a fine-tune without them still adapts.
+///
+/// `waveforms` additionally decodes each clip at the synthesis rate, which `s2`
+/// needs as ground truth and `s1` never looks at. Preparation is the expensive
+/// part of a fine-tune — cnhubert, the quantiser and the prosody BERT over every
+/// clip — so a `both` run does it once with this on rather than twice.
 pub fn prepare<B: Backend>(
     pairs: &[(PathBuf, PathBuf)],
     hubert: &Hubert<B>,
     quantizer: &Quantizer<B>,
     prosody: &mut Option<Box<dyn ProsodyEncoder>>,
     language: Language,
+    waveforms: bool,
     device: &B::Device,
 ) -> Result<Vec<Clip>> {
     let bert_dim = prosody.as_ref().map_or(1024, |p| p.hidden());
@@ -125,12 +164,27 @@ pub fn prepare<B: Backend>(
             _ => vec![0.0; bert_dim * phonemes.phones.len()],
         };
 
+        // Trimmed to whole latent frames so the spectrogram, the codes and the
+        // waveform all end together — `Spectral::linear` yields exactly
+        // `len / hop` frames, so a ragged tail would put `enc_q` and `enc_p` one
+        // frame apart and the KL term would compare misaligned sequences.
+        let waveform = match waveforms {
+            false => Vec::new(),
+            true => {
+                let mut wav = crate::audio::read(audio_path, tts_core::OUTPUT_SR)?;
+                let frames = (tokens.len() * 2).min(wav.len() / SAMPLES_PER_FRAME);
+                wav.truncate(frames * SAMPLES_PER_FRAME);
+                wav
+            }
+        };
+
         clips.push(Clip {
             source: audio_path.clone(),
             phones: phonemes.ids().iter().map(|&i| i as u32).collect(),
             bert,
             bert_dim,
             tokens,
+            audio: waveform,
         });
     }
 
