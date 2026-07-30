@@ -195,7 +195,7 @@ Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper
 | `rvc-cli` | lib **and** the `rvc` binary (clap): `convert`, `serve`, `models`, `train`, `preprocess` |
 | `stt-core` | speech recognition: Whisper log-mel front-end, BPE vocabulary, KV-cached greedy decode, segmentation via `audio-kit`'s slicer, and **two runtimes** (native Burn, ONNX Runtime) behind one `Engine` trait |
 | `stt-cli` | lib **and** the `stt` binary |
-| `tts-core` | speech synthesis: reference analysis, `s1` sampling with a KV cache, `s2` decode, and the ONNX prosody encoder behind a trait. An ONNX Runtime inference path for the rest of the stack (`--backend onnx`) is being added graph by graph, so expect some models to have one and some not |
+| `tts-core` | speech synthesis: reference analysis, `s1` sampling with a KV cache, `s2` decode, and the ONNX prosody encoder behind a trait. **Two runtimes**, the same shape `stt-core` uses: `Engine` is the whole boundary, so `Synthesizer` is not generic and the backend is a constructor call rather than a type parameter. `--backend onnx` runs the whole stack — cnhubert, the quantiser, `ref_enc`, `s1` and `s2` — off four exported graphs, and `auto` picks it when the model directory holds an export |
 | `tts-train` | fine-tuning GPT-SoVITS. `s1` is plain next-token cross-entropy over `T2s::forward_prompt_all` — one model, one optimizer, one loss, so unlike `rvc-train` the number means something on its own. `s2` is the other half: an adversarial VITS loop over `burn-vits`'s shared discriminators, inheriting `rvc-train`'s loss family (mel-L1 ×45, KL ×1, feature matching ×2, LSGAN) rather than inventing one, with GPT-SoVITS's five discriminator periods `[2,3,5,7,11]` against RVC's eight. Verified on 13 clips: mel falls 26.6 → 18.2 over two epochs on GPU and on CPU alike. `--stage s1|s2|both` prepares the corpus exactly once — preparation is the expensive half — and each stage writes its own checkpoint family. A corpus is `<stem>.wav` + `<stem>.txt` pairs, and `stt` is how the transcripts get written |
 | `tts-cli` | lib **and** the `tts` binary |
 | `cli-kit` | logging, shell completions and `--device` parsing, shared by all four binaries |
@@ -254,7 +254,7 @@ toward that:
   always available for tuning even where ONNX is the faster inference path.
 - **Burn imports ONNX and cannot emit it.** So a checkpoint trained here reaches
   ONNX Runtime only through `export/`. That is why the exporter gains scope
-  instead of being deleted: `rvc`'s generator today, GPT-SoVITS next.
+  instead of being deleted: `rvc`'s generator and all of GPT-SoVITS today.
 
 Where a model is **frozen** and an export already exists, ONNX is often simply
 the cheaper answer:
@@ -264,9 +264,12 @@ the cheaper answer:
   meaningfully faster. The trait (`ProsodyEncoder`) leaves the slot open.
 - `burn-gptsovits`'s cnhubert is a Burn port, done before that reasoning was
   settled. Keeping it costs nothing, it is verified at 210/0, and it is what lets
-  `tts` run without ORT once `--prosody` is left off.
-- GPT-SoVITS `s1`/`s2` are Burn because they are fine-tuned — and are gaining an
-  ONNX inference path *alongside* Burn, not instead of it.
+  `tts` run without ORT once `--prosody` is left off. It now *also* has an ONNX
+  graph, which is the shape to aim for everywhere: both, chosen at run time.
+- GPT-SoVITS `s1`/`s2` are Burn because they are fine-tuned, and they now run on
+  ONNX Runtime as well — `alongside` Burn, never instead of it. `tts` is therefore
+  the first engine to reach the target in full: every model it uses runs either
+  way, and tuning stays on Burn.
 
 **This reverses an earlier position on purpose, so do not "restore" it.** The old
 plan was to port `rvc-core`'s ContentVec and RMVPE to Burn *in order to* drop
@@ -407,9 +410,21 @@ needs no export — this is only for ONNX Runtime / cross-framework deploy.
 
 It is the **only** direction that needs Python, and only because Burn reads ONNX
 without writing it. Extending it to a new model means adding another clean-room
-mirror of that network's Burn layout beside `rvc_infer.py` (GPT-SoVITS is the
-next one, in progress) — never importing the upstream project, and never adding a
-step a user has to run.
+mirror of that network's Burn layout beside `rvc_infer.py` — `gptsovits_infer.py`
+is the second — never importing the upstream project, and never adding a step a
+user has to run. `export_gptsovits.py` reads *either* weight layout: an original
+`.pth`/`.ckpt` through the same key remaps the Rust loaders apply, or a Burn
+`.safetensors` from `tts train` with its `Linear` weights transposed back. That
+second path is the point of the whole exercise — it is how a voice fine-tuned
+here reaches ONNX Runtime.
+
+`s1` is emitted as **two** graphs, `s1_prompt` and `s1_step`, because a KV cache
+cannot be a single static graph; the weights therefore appear twice on disk.
+Sampling stays on the host, so a graph is a pure function of its inputs. The
+numbers that make the port checkable are in `export/README.md`: both runtimes
+sampled identical tokens from the same seed, agreeing to a **max absolute
+difference of 7.9e-03** on RMS 5.2e-02 (correlation 0.99998), and `s1_prompt`
+over a whole prompt agrees with `s1_prompt` + `s1_step` to 6.7e-06.
 
 ```sh
 uv run --project export python export/export_onnx.py models/voice.safetensors models/voice.onnx
