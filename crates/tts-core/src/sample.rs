@@ -50,6 +50,20 @@ impl Rng {
         let x = self.0.wrapping_mul(0x2545_F491_4F6C_DD1D);
         (x >> 40) as f32 / (1u32 << 24) as f32
     }
+
+    /// A standard normal draw, for `s2`'s prior.
+    ///
+    /// Box–Muller, keeping one of the two values it produces: the pair costs the
+    /// same two uniforms either way, and holding the spare would make the
+    /// generator's state depend on how many draws came before — the one property
+    /// that has to hold here is that the same seed gives the same noise.
+    pub fn next_normal(&mut self) -> f32 {
+        // `next_f32` can return exactly 0, and `ln(0)` is -inf. The floor is
+        // below the generator's resolution, so it changes nothing that happens.
+        let u = self.next_f32().max(f32::MIN_POSITIVE);
+        let v = self.next_f32();
+        (-2.0 * u.ln()).sqrt() * (2.0 * std::f32::consts::PI * v).cos()
+    }
 }
 
 /// Pick the next token.
