@@ -154,13 +154,22 @@ back through the PyTorch path is what `load_burn_safetensors_into` exists to
 prevent. Rectangular weights fail loudly on `ShapeMismatch`; a square one would
 load "fine" and be silently scrambled. `burn-kit`'s round-trip test pins it.
 
-**ONNX Runtime on the CUDA execution provider must not be dropped** in a process
-that also drives a CUDA Burn backend: unwinding it aborts with glibc's "corrupted
-double-linked list" *after* all work is done, turning a successful run into exit
-134. `tts` therefore `mem::forget`s its models once stdout is flushed. Omitting
-`--prosody`, or `CUDA_VISIBLE_DEVICES=`, exits 0 — and `rvc convert` drives the
-same two runtimes without tripping it, so this is narrower than "ORT and Burn
-conflict".
+**An ONNX Runtime session on the CUDA execution provider must never be dropped.**
+Unwinding one aborts with glibc's "corrupted double-linked list", which turns an
+otherwise successful run into exit 134 — and for a Unix filter the exit code is
+the part that gets checked. `CUDA_VISIBLE_DEVICES=` exits 0, and `rvc convert`
+drives ORT and Burn together without tripping it, so it is narrower than "ORT and
+Burn conflict".
+
+Two things this file previously claimed about it are **wrong**, and both were
+found by testing rather than by reading: a CUDA *Burn* backend is **not** required
+to reproduce it, and it is **not** confined to teardown after a successful run.
+The first fix here leaked the models at the end of the happy path only, so every
+early return — `--backend onnx` with no export, for one — still unwound a live
+session and still aborted, printing the right error and then dying 134 instead of
+1. The lesson is that the leak belongs on the **type that owns the session**
+(`ManuallyDrop`), not at one call site: anything else silently obliges every
+future caller, including every error path, to remember.
 
 Requires **ffmpeg 8.1** dev libraries (and the `ffmpeg` binary for the realtime
 `serve` example). ContentVec + RMVPE ONNX assets auto-download from Hugging Face
@@ -180,18 +189,18 @@ Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper
 | `burn-vits` | the VITS blocks RVC and GPT-SoVITS share (both descend from the same source, which is why their `state_dict` names line up): attention stack, `Wn`, flow, posterior encoder, `ResBlock1`, weight-norm convs, discriminators, the family's losses, the differentiable STFT |
 | `burn-rvc` | what is RVC's alone: `SourceModule` (NSF), the 768-dim `TextEncoder`, `GeneratorNsf`, the synthesizer wiring; re-exports `burn-vits` so it still reads as one model |
 | `burn-whisper` | the Whisper network (standalone Burn port); mirrors HF's `state_dict` layout so `openai/whisper-large-v3-turbo` loads unchanged |
-| `burn-gptsovits` | the GPT-SoVITS network. `hubert` at 210/0, `quantizer` at 3/0, and `s2` complete at 773/0 (the 3 unused are the codebook's EMA training statistics). **`s2` is verified numerically, not just structurally**: `examples/reconstruct` round-trips real audio through cnhubert, the quantiser and the synthesizer, and the output tracks the source's energy envelope at r=0.91 against a chance baseline of 0.30. `t2s` (`s1`) is at 295/0. Every network of GPT-SoVITS is now ported; `tts-core`/`tts-cli` wire them into a working `tts`, and `tts-train` fine-tunes `s1`. `s2` fine-tuning (the VITS GAN half) is in progress — it is what moves *timbre*, where `s1` only moves delivery. `examples/keys` lists any checkpoint's tensors, which is the first thing to run against a new one |
+| `burn-gptsovits` | the GPT-SoVITS network. `hubert` at 210/0, `quantizer` at 3/0, and `s2` complete at 773/0 (the 3 unused are the codebook's EMA training statistics). **`s2` is verified numerically, not just structurally**: `examples/reconstruct` round-trips real audio through cnhubert, the quantiser and the synthesizer, and the output tracks the source's energy envelope at r=0.91 against a chance baseline of 0.30. `t2s` (`s1`) is at 295/0. Every network of GPT-SoVITS is now ported; `tts-core`/`tts-cli` wire them into a working `tts`, and `tts-train` fine-tunes **both** stages — `s1` for delivery, `s2` for timbre. `SovitsPartial::forward_train` composes `enc_q` → `flow.forward` → random segment → `dec` and returns the five tensors the VITS losses need; the matching `s2D2333k.pth` discriminator loads at 111/0/0. `examples/keys` lists any checkpoint's tensors, which is the first thing to run against a new one |
 | `rvc-train` | native Rust/Burn adversarial training loop (see `crates/rvc-train/ARCHITECTURE.md`) |
 | `hub-kit` | auto-download every engine's assets from Hugging Face |
 | `rvc-cli` | lib **and** the `rvc` binary (clap): `convert`, `serve`, `models`, `train`, `preprocess` |
 | `stt-core` | speech recognition: Whisper log-mel front-end, BPE vocabulary, KV-cached greedy decode, segmentation via `audio-kit`'s slicer, and **two runtimes** (native Burn, ONNX Runtime) behind one `Engine` trait |
 | `stt-cli` | lib **and** the `stt` binary |
 | `tts-core` | speech synthesis: reference analysis, `s1` sampling with a KV cache, `s2` decode, and the ONNX prosody encoder behind a trait. An ONNX Runtime inference path for the rest of the stack (`--backend onnx`) is being added graph by graph, so expect some models to have one and some not |
-| `tts-train` | fine-tuning GPT-SoVITS. `s1` is plain next-token cross-entropy over `T2s::forward_prompt_all` — one model, one optimizer, one loss, so unlike `rvc-train` the number means something on its own. `s2` is the other half and in progress: an adversarial VITS loop over `burn-vits`'s shared discriminators, so it inherits `rvc-train`'s loss family (mel-L1, KL, feature matching, LSGAN) rather than inventing one. A corpus is `<stem>.wav` + `<stem>.txt` pairs, and `stt` is how the transcripts get written |
+| `tts-train` | fine-tuning GPT-SoVITS. `s1` is plain next-token cross-entropy over `T2s::forward_prompt_all` — one model, one optimizer, one loss, so unlike `rvc-train` the number means something on its own. `s2` is the other half: an adversarial VITS loop over `burn-vits`'s shared discriminators, inheriting `rvc-train`'s loss family (mel-L1 ×45, KL ×1, feature matching ×2, LSGAN) rather than inventing one, with GPT-SoVITS's five discriminator periods `[2,3,5,7,11]` against RVC's eight. Verified on 13 clips: mel falls 26.6 → 18.2 over two epochs on GPU and on CPU alike. `--stage s1|s2|both` prepares the corpus exactly once — preparation is the expensive half — and each stage writes its own checkpoint family. A corpus is `<stem>.wav` + `<stem>.txt` pairs, and `stt` is how the transcripts get written |
 | `tts-cli` | lib **and** the `tts` binary |
 | `cli-kit` | logging, shell completions and `--device` parsing, shared by all four binaries |
 | `train-kit` | training scaffolding with no model knowledge: `Checkpoint`, `ema_update`, `accumulate`, `materialize`, `Dashboard`. Generic over the module trained, so a GAN and a cross-entropy loop share it |
-| `text-kit` | grapheme-to-phoneme: script-based language splitting, Mandarin g2p (jieba + pinyin + opencpop + tone sandhi), and GPT-SoVITS's 732-symbol table. English g2p and a Mandarin phrase dictionary are in progress. Pure Rust, no ML, no backend — so it is fully testable without weights |
+| `text-kit` | grapheme-to-phoneme: script-based language splitting, Mandarin g2p (jieba + pinyin + opencpop + tone sandhi), and GPT-SoVITS's 732-symbol table. English g2p is an embedded CMUdict over upstream's deterministic cascade; Mandarin polyphones come from `pypinyin`'s own 47k phrase dictionary. Pure Rust, no ML, no backend — so it is fully testable without weights |
 | `voice-cli` | the `voice` binary: `rvc-cli`, `stt-cli` and `tts-cli` nested as `voice rvc …`, `voice stt` and `voice tts` |
 
 ### Three runtimes, one path (the key abstraction)
@@ -316,19 +325,36 @@ entry and the model produces confident nonsense rather than an error. Same reaso
 
 The same table is what makes **English** cheap to add: GPT-SoVITS v2's symbol
 list already carries the ARPAbet phones, so `--language en` needs no new indices
-— only a g2p that emits them. That work is in progress; until it lands, `en`
-still errors rather than guessing, which is the right failure. Splitting is by
+— only a g2p that emits them, which `english.rs` now does: an embedded CMUdict
+(125,823 entries) behind upstream's deterministic cascade. It has no neural
+out-of-vocabulary model, because Rust has no equivalent of `g2p_en`'s LSTM, so a
+word that survives dictionary, possessive and compound handling is **spelled
+letter by letter rather than guessed**. English also yields `word2ph: None`, so
+the prosody encoder is fed zeros — intelligible, flatter than Chinese, and
+upstream's own behaviour. Splitting is by
 script, so a mixed sentence routes each run to its own front-end and the phoneme
 streams concatenate into one sequence — the reason language selection is a
 per-run property and not a global mode.
 
-Known ceiling on Mandarin: upstream reads pronunciations with `pypinyin` and its
-~130k-entry phrase dictionary; the `pinyin` crate is per-character, so
-word-dependent polyphones (银行 as *hang*, not *xing*) fall back to the commonest
-reading. `chinese.rs::POLYPHONES` patches the frequent cases, and a phrase
-dictionary consulted on the jieba segmentation — the principled version of the
-same fix — is in progress. It will narrow the gap rather than close it, since it
-will be smaller than `pypinyin`'s; g2pw is the endgame.
+Mandarin is no longer per-character. The `pinyin` crate reads one character at a
+time, so word-dependent polyphones (银行 as *hang*, not *xing*) used to fall back
+to the commonest reading, patched by a twelve-entry table. `data/phrases.txt` now
+embeds **`pypinyin`'s own 47,111-entry phrase dictionary** — the same table
+upstream consults — so the coverage matches rather than approximating it, and
+`POLYPHONES` is gone. Lookup is **longest match within each jieba token**, which
+is deliberately better than upstream: upstream looks up the whole token only, so
+it loses 银行 the moment jieba hands it 银行卡, because jieba's word list and
+`pypinyin`'s table disagree about where words end.
+
+The remaining ceiling is **syntactic**, not lexical: a reading that depends on
+grammar rather than on the word is still wrong. 还 is its own jieba token in both
+他还没来 (*hai*) and 把钱还他 (*huan*), so both come out *hai*. g2pw is the
+endgame, and a phrase dictionary cannot reach it.
+
+While porting that dictionary a live bug surfaced: the `pinyin` crate writes 绿 as
+`lü4` while `opencpop-strict.txt` keys its finals `lv`/`nve`, so every word
+containing 绿/女/略/律 missed the lookup and was emitted as `UNK` — a silently
+dropped syllable, not an error. The fallback now rewrites ü to v.
 
 ### Lazy parameters (`train_kit::materialize`)
 Burn allocates parameters lazily, and two things go wrong while a module is still

@@ -60,7 +60,7 @@ engine READMEs point at it.
 |---|---|---|
 | **`rvc`** — voice conversion (RVC v2) | **works**, inference + native training | [crates/rvc-cli/README.md](crates/rvc-cli/README.md) |
 | **`stt`** — speech recognition (Whisper large-v3-turbo) | **works**, Burn **or** ONNX Runtime | [crates/stt-cli/README.md](crates/stt-cli/README.md) |
-| **`tts`** — speech synthesis (GPT-SoVITS v2) | **works**, inference + `s1` fine-tuning (`s2` in progress) | [crates/tts-cli/README.md](crates/tts-cli/README.md) |
+| **`tts`** — speech synthesis (GPT-SoVITS v2) | **works**, inference + `s1` and `s2` fine-tuning | [crates/tts-cli/README.md](crates/tts-cli/README.md) |
 | **`translate`** | not started; pipe to any external tool meanwhile | — |
 
 **`stt`** reads raw f32le mono PCM at 16 kHz and writes text; `--format jsonl`
@@ -143,7 +143,7 @@ Three tiers, and the names say which is which.
 | `hub-kit` | model downloads from Hugging Face |
 | `cli-kit` | logging, shell completions, `--device` parsing |
 | `train-kit` | checkpoints, weight EMA, gradient accumulation, the live dashboard — generic over the module being trained |
-| `text-kit` | grapheme-to-phoneme for TTS: language splitting by script, Mandarin g2p, GPT-SoVITS's phoneme table (English g2p in progress). No model, no tensors |
+| `text-kit` | grapheme-to-phoneme for TTS: language splitting by script, Mandarin g2p with a phrase dictionary, English g2p, GPT-SoVITS's phoneme table. No model, no tensors |
 
 **Networks**, named after the model, holding no app dependencies:
 
