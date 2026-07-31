@@ -24,7 +24,7 @@ mod rng;
 mod schedule;
 
 pub use best::Best;
-pub use checkpoint::{BestMeta, Checkpoint};
+pub use checkpoint::{BestMeta, Checkpoint, ensure_absent};
 pub use dashboard::Dashboard;
 pub use devices::distinct;
 pub use ema::{ema_update, materialize};
