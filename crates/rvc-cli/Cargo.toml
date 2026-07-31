@@ -36,6 +36,7 @@ hub-kit.workspace = true
 # `burn` feature brings in the native Burn generator backend (BurnGenerator).
 rvc-core = { workspace = true, features = ["burn"] }
 rvc-train.workspace = true
+train-kit.workspace = true
 tokio = { workspace = true }
 futures.workspace = true
 clap.workspace = true

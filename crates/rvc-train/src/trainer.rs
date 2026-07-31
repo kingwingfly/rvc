@@ -338,7 +338,7 @@ pub fn run<AB: AutodiffBackend>(
         }
         dash.update(step, &[g_scalar, last_d, mel_scalar], cur_lr);
         // Always log the losses (throttled). With the TUI, `init_logging` routes
-        // tracing to `{work_dir}/train.log` (not stderr), so this stays off the
+        // tracing to `./train.log` (not stderr), so this stays off the
         // dashboard while still recording every run's curves.
         if step % 20 == 0 || step + 1 == total_steps {
             let done = step + 1;

@@ -32,6 +32,17 @@ pub async fn run(args: TrainArgs) -> Result<()> {
         });
     }
 
+    // Before anything is fetched, decoded or loaded: a run that would replace an
+    // earlier voice must cost a second to refuse, not an hour of GPU. `--resume`
+    // is the case where overwriting is the whole point.
+    let family = train_kit::Checkpoint::new(&args.out);
+    let ema = args.ema_frac > 0.0;
+    let mut planned = family.members(ema, true);
+    if !args.no_save_best {
+        planned.extend(family.best().members(ema, true));
+    }
+    train_kit::ensure_absent(planned, args.yes || args.resume.is_some())?;
+
     let cache = args.cache_dir.as_deref();
 
     let content = match &args.content {
@@ -56,7 +67,6 @@ pub async fn run(args: TrainArgs) -> Result<()> {
     let req = TrainRequest {
         data: args.data,
         out: args.out.clone(),
-        work_dir: args.work_dir,
         content,
         rmvpe,
         resume: args.resume,

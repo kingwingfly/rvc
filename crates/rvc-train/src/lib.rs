@@ -106,8 +106,6 @@ pub struct TrainRequest {
     pub data: Vec<PathBuf>,
     /// Destination path for the trained weights (`.safetensors` is written).
     pub out: PathBuf,
-    /// Scratch directory.
-    pub work_dir: PathBuf,
     /// ContentVec encoder ONNX (already resolved/downloaded).
     pub content: PathBuf,
     /// RMVPE F0 ONNX (already resolved/downloaded).
@@ -145,8 +143,6 @@ pub fn train(req: TrainRequest) -> Result<PathBuf> {
     );
     // Reject an unusable backend before the corpus is decoded, not after.
     resolve_backend(&req)?;
-    std::fs::create_dir_all(&req.work_dir)
-        .with_context(|| format!("creating work dir {}", req.work_dir.display()))?;
 
     // A self-contained runtime drains the async decode streams; GPU training is
     // synchronous.
@@ -272,7 +268,6 @@ mod tests {
         TrainRequest {
             data: vec!["a.wav".into()],
             out: "out".into(),
-            work_dir: "wd".into(),
             content: "c.onnx".into(),
             rmvpe: "r.onnx".into(),
             resume: None,

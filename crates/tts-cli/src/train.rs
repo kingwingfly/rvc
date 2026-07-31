@@ -66,7 +66,7 @@ pub struct TrainArgs {
     /// `-o models/mine` writes `models/mine.s1.safetensors` and
     /// `models/mine.s2.safetensors` — they are separate models, and deploying
     /// one must not imply the other.
-    #[arg(short = 'o', long, default_value = "models/tts/voice")]
+    #[arg(short = 'o', long, default_value = "models/voice")]
     pub out: PathBuf,
     /// Which stage to train.
     #[arg(long, value_enum, default_value_t = Stage::Both)]
@@ -123,6 +123,9 @@ pub struct TrainArgs {
     /// Do not keep a best-so-far `s2` checkpoint beside the final weights.
     #[arg(long)]
     pub no_save_best: bool,
+    /// Overwrite weights already at `-o` instead of refusing to start.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
     /// Compute backend: `auto`, `cuda`, `tch` (`libtorch`) or `wgpu`.
     #[arg(long, value_enum, default_value_t = TtsBackend::Auto)]
     pub backend: TtsBackend,
@@ -143,6 +146,25 @@ pub struct TrainArgs {
 }
 
 pub async fn run(args: TrainArgs) -> Result<()> {
+    // Before the base models are fetched and the corpus is encoded — preparation
+    // is the expensive half of a fine-tune, and discovering the collision after
+    // it has already spent what the check exists to save. Only the stages that
+    // will actually run are checked, and only the members they write: `s1` has
+    // no discriminator, and `--no-save-best` drops the `checkpoint/` family.
+    let ema = args.ema_frac > 0.0;
+    let mut planned = Vec::new();
+    if args.stage.wants_s1() {
+        planned.extend(crate::backend::checkpoint(&args.out, "s1").members(ema, false));
+    }
+    if args.stage.wants_s2() {
+        let s2 = crate::backend::checkpoint(&args.out, "s2");
+        planned.extend(s2.members(ema, true));
+        if !args.no_save_best {
+            planned.extend(s2.best().members(ema, true));
+        }
+    }
+    train_kit::ensure_absent(planned, args.yes)?;
+
     let dir = match &args.model_dir {
         Some(dir) => dir.clone(),
         None => hub_kit::fetch_gptsovits(args.cache_dir.as_deref())

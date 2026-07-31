@@ -159,20 +159,23 @@ pub struct TrainInputs<'a> {
 }
 
 impl TrainInputs<'_> {
-    /// The checkpoint family one stage writes: `models/mine` -> `models/mine.s1`.
-    ///
-    /// Built by appending to the file name rather than with
-    /// [`Path::with_extension`], which sees only the last dot and would turn
-    /// `voice.v2` into `voice.s1`, silently merging two runs' outputs.
     fn checkpoint(&self, stage: &str) -> train_kit::Checkpoint {
-        let name = self
-            .out
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "voice".into());
-        let dir = self.out.parent().unwrap_or(Path::new(""));
-        train_kit::Checkpoint::new(&dir.join(format!("{name}.{stage}")))
+        checkpoint(self.out, stage)
     }
+}
+
+/// The checkpoint family one stage writes: `models/mine` -> `models/mine.s1`.
+///
+/// Built by appending to the file name rather than with
+/// [`Path::with_extension`], which sees only the last dot and would turn
+/// `voice.v2` into `voice.s1`, silently merging two runs' outputs.
+pub fn checkpoint(out: &Path, stage: &str) -> train_kit::Checkpoint {
+    let name = out
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "voice".into());
+    let dir = out.parent().unwrap_or(Path::new(""));
+    train_kit::Checkpoint::new(&dir.join(format!("{name}.{stage}")))
 }
 
 /// Prepare the corpus once and fine-tune whichever stages were asked for.
