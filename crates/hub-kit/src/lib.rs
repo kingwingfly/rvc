@@ -93,6 +93,81 @@ pub async fn fetch(model: &ModelRef, cache_dir: Option<&Path>) -> Result<PathBuf
     Ok(path)
 }
 
+/// Where a training run keeps the warm-start bases it starts from: `pretrained/`
+/// beside the run's output, derived from the `-o` stem's directory.
+///
+/// Not the cache, because a base is not a frozen asset every command reads — it
+/// is training input, wanted only by whoever is training, and it belongs with
+/// the run's other files rather than in a directory the user never looks at.
+pub fn pretrained_dir(out: &Path) -> PathBuf {
+    out.parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join("pretrained")
+}
+
+/// RVC's pretrained generator base (`f0G48k.pth`, 76 MB).
+pub fn default_pretrained_g() -> ModelRef {
+    ModelRef::new("lj1995", "VoiceConversionWebUI", "pretrained_v2/f0G48k.pth")
+}
+
+/// RVC's pretrained discriminator base (`f0D48k.pth`, 143 MB).
+pub fn default_pretrained_d() -> ModelRef {
+    ModelRef::new("lj1995", "VoiceConversionWebUI", "pretrained_v2/f0D48k.pth")
+}
+
+/// GPT-SoVITS's `s2` discriminator base (`s2D2333k.pth`, 94 MB).
+///
+/// Its `s1`/`s2G` siblings are inference weights and stay in the cache
+/// ([`fetch_gptsovits`]); this one is opened by nothing but a fine-tune.
+pub fn default_gptsovits_s2d() -> ModelRef {
+    ModelRef::new(
+        "lj1995",
+        "GPT-SoVITS",
+        "gsv-v2final-pretrained/s2D2333k.pth",
+    )
+}
+
+/// Download a warm-start base into `dir` under its upstream file name, reusing
+/// the copy already there.
+///
+/// Flat, unlike [`fetch`]'s cache tree: a run's `pretrained/` is meant to be
+/// read by eye and hand-populated by anyone who already has the weights. The
+/// upstream names are distinct across engines, so one directory serves them all.
+pub async fn fetch_pretrained(model: &ModelRef, dir: &Path) -> Result<PathBuf> {
+    let name = model.file.rsplit('/').next().unwrap_or(&model.file);
+    let dest = dir.join(name);
+    if dest.exists() {
+        return Ok(dest);
+    }
+
+    tracing::info!(
+        "downloading {}/{}/{} to {}",
+        model.owner,
+        model.name,
+        model.file,
+        dir.display()
+    );
+    let client = HFClient::new()?;
+    let repo = client.model(model.owner.clone(), model.name.clone());
+    // `local_dir` reproduces the repo's own directory structure, so the file
+    // lands a level down; move it up and drop the wrapper if it is now empty.
+    // Only the completed download is ever named `dest`, which is what makes the
+    // reuse check above safe after an interrupted one.
+    let path = repo
+        .download_file()
+        .filename(model.file.clone())
+        .local_dir(dir.to_path_buf())
+        .send()
+        .await?;
+    if path != dest {
+        std::fs::rename(&path, &dest)?;
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
+    }
+    Ok(dest)
+}
+
 /// The two shared assets the RVC inference pipeline needs.
 #[derive(Debug, Clone)]
 pub struct SharedAssets {
@@ -190,16 +265,16 @@ pub async fn fetch_prosody_bert(repo: Option<&str>, cache_dir: Option<&Path>) ->
 /// The official GPT-SoVITS v2 bundle.
 pub const DEFAULT_GPTSOVITS: (&str, &str) = ("lj1995", "GPT-SoVITS");
 
-/// Files the synthesis path needs from it, plus the discriminator `s2`
-/// fine-tuning warm-starts from. The last is dead weight for synthesis — ~90 MB
-/// that inference never opens — but fetching the bundle twice for want of one
-/// file is the worse trade, and a corpus big enough to fine-tune on dwarfs it.
-const GPTSOVITS_FILES: [&str; 5] = [
+/// Files the synthesis path needs from it. The `s2` discriminator that
+/// fine-tuning warm-starts from is deliberately *not* here: inference never
+/// opens one, so it is a warm-start base like RVC's and goes to the run's own
+/// `pretrained/` via [`fetch_pretrained`] — a synthesis-only user should not
+/// carry 94 MB of adversary in their cache.
+const GPTSOVITS_FILES: [&str; 4] = [
     "chinese-hubert-base/config.json",
     "chinese-hubert-base/pytorch_model.bin",
     "gsv-v2final-pretrained/s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt",
     "gsv-v2final-pretrained/s2G2333k.pth",
-    "gsv-v2final-pretrained/s2D2333k.pth",
 ];
 
 /// Where each model landed inside a fetched (or hand-assembled) bundle.
@@ -208,11 +283,12 @@ pub struct GptSovitsPaths {
     pub hubert: PathBuf,
     pub s1: PathBuf,
     pub s2: PathBuf,
-    /// The `s2` discriminator, when the bundle carries one.
+    /// The `s2` discriminator, when the directory happens to carry one.
     ///
     /// Optional where the other three are not, because only fine-tuning wants
-    /// it: synthesis never opens a discriminator, and a hand-assembled model
-    /// directory that predates `s2` training must keep working for `tts`.
+    /// it and the fetched bundle no longer includes it. A hand-assembled model
+    /// directory that has one is still honoured, so nothing already on disk is
+    /// downloaded a second time.
     pub s2d: Option<PathBuf>,
 }
 
