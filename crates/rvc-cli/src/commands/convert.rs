@@ -6,10 +6,10 @@ use futures::{StreamExt, stream};
 use rvc_core::{ANALYSIS_SR, StreamParams};
 
 use crate::args::ConvertArgs;
-use crate::commands::common::{build_converter, resolve_runtime};
+use crate::commands::common::{build_converter, resolve_backend};
 
 pub async fn run(args: ConvertArgs) -> Result<()> {
-    let backend_label = resolve_runtime(args.backend, &args.models.model).label();
+    let backend = resolve_backend(args.backend, &args.models.model);
 
     // One loaded model (GPU/ORT init is expensive), reused across files.
     let mut converter = build_converter(
@@ -28,7 +28,7 @@ pub async fn run(args: ConvertArgs) -> Result<()> {
         .with_context(|| format!("creating output dir {}", args.output_dir.display()))?;
 
     for input in &args.input {
-        tracing::info!("converting {} ({backend_label})", input.display());
+        tracing::info!("converting {} ({backend})", input.display());
         let wav16k = decode_16k(input).await?;
         converter.reset();
         let out = tokio::task::block_in_place(|| converter.convert_all(&wav16k))

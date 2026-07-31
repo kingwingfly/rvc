@@ -6,7 +6,7 @@ pub mod backend;
 pub mod train;
 
 pub use args::{TtsArgs, run};
-pub use backend::TtsBackend;
+pub use cli_kit::Backend;
 pub use train::{Stage, TrainArgs};
 
 /// Start logging, sending a dashboard run's output to a file.

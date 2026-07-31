@@ -2,60 +2,8 @@
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
-pub use cli_kit::CompletionsArgs;
-
-/// Which generator backend runs inference.
-///
-/// `burn` stays an alias of `cuda` so invocations written before the Burn
-/// generator gained a second compute backend keep working.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
-pub enum InferBackend {
-    /// Pick by weights extension (`.onnx` → onnx-runtime) then by what's
-    /// available: LibTorch on a GPU, else CubeCL/CUDA, else WebGPU, else CPU.
-    #[default]
-    Auto,
-    /// ONNX Runtime generator (`.onnx`).
-    Onnx,
-    /// Native Burn generator, CubeCL/CUDA compute (`.pth`/`.safetensors`).
-    #[value(name = "cuda", alias = "burn", alias = "burn-cuda")]
-    Cuda,
-    /// Native Burn generator, LibTorch compute — CUDA, MPS, Vulkan or CPU.
-    #[value(name = "tch", alias = "libtorch", alias = "burn-tch")]
-    Tch,
-    /// Native Burn generator, WebGPU compute — any Vulkan/Metal/DX12 GPU.
-    #[value(name = "wgpu", alias = "webgpu", alias = "burn-wgpu")]
-    Wgpu,
-}
-
-/// Which Burn compute backend runs training (there is no ONNX training path).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
-pub enum ComputeBackend {
-    /// Fastest available: LibTorch on a GPU, else CubeCL/CUDA, else WebGPU,
-    /// else LibTorch on CPU.
-    #[default]
-    Auto,
-    /// CubeCL/CUDA kernels. NVIDIA only.
-    #[value(name = "cuda", alias = "burn-cuda")]
-    Cuda,
-    /// LibTorch (tch) — CUDA, MPS, Vulkan or CPU.
-    #[value(name = "tch", alias = "libtorch", alias = "burn-tch")]
-    Tch,
-    /// WebGPU (wgpu) — any Vulkan/Metal/DX12 GPU, no vendor toolkit.
-    #[value(name = "wgpu", alias = "webgpu", alias = "burn-wgpu")]
-    Wgpu,
-}
-
-impl From<ComputeBackend> for rvc_train::TrainBackend {
-    fn from(b: ComputeBackend) -> Self {
-        match b {
-            ComputeBackend::Auto => Self::Auto,
-            ComputeBackend::Cuda => Self::Cuda,
-            ComputeBackend::Tch => Self::LibTorch,
-            ComputeBackend::Wgpu => Self::Wgpu,
-        }
-    }
-}
+use clap::{Args, Parser, Subcommand};
+pub use cli_kit::{Backend, CompletionsArgs};
 
 /// rvc — RVC voice conversion toolkit (ONNX Runtime + native Burn).
 #[derive(Debug, Parser)]
@@ -129,10 +77,10 @@ pub struct ConvertArgs {
     /// Pitch shift in semitones.
     #[arg(short = 't', long, default_value_t = 0)]
     pub transpose: i32,
-    /// Inference backend: `auto`, `onnx`, `cuda` (aliases `burn`, `burn-cuda`),
-    /// `tch` (`libtorch`, `burn-tch`) or `wgpu` (`webgpu`, `burn-wgpu`).
-    #[arg(long, value_enum, default_value_t = InferBackend::Auto)]
-    pub backend: InferBackend,
+    /// Inference backend; `auto` reads the `-m` extension (`.onnx` → ONNX
+    /// Runtime) before looking at the hardware.
+    #[arg(long, value_enum, default_value_t = Backend::Auto)]
+    pub backend: Backend,
     /// Compute device: `auto` (fastest visible), `cpu`, `gpu`, `gpu:N`, `mps` or
     /// `vulkan` (`cuda`/`cuda:N` also accepted). The `cuda` backend has GPUs only.
     #[arg(long, default_value = "auto", value_name = "DEVICE", value_parser = cli_kit::parse_device)]
@@ -151,11 +99,11 @@ pub struct ServeArgs {
     /// Samples per input read chunk from stdin (16 kHz mono f32le).
     #[arg(long, default_value_t = 1600)]
     pub chunk: usize,
-    /// Inference backend: `auto`, `onnx`, `cuda` (aliases `burn`, `burn-cuda`),
-    /// `tch` (`libtorch`, `burn-tch`) or `wgpu` (`webgpu`, `burn-wgpu`). Prefer
-    /// `tch` or `onnx` here — `cuda` does not keep up with realtime.
-    #[arg(long, value_enum, default_value_t = InferBackend::Auto)]
-    pub backend: InferBackend,
+    /// Inference backend; `auto` reads the `-m` extension (`.onnx` → ONNX
+    /// Runtime) before looking at the hardware. Prefer `tch` or `onnx` here —
+    /// `cuda` does not keep up with realtime.
+    #[arg(long, value_enum, default_value_t = Backend::Auto)]
+    pub backend: Backend,
     /// Compute device: `auto` (fastest visible), `cpu`, `gpu`, `gpu:N`, `mps` or
     /// `vulkan` (`cuda`/`cuda:N` also accepted). The `cuda` backend has GPUs only.
     #[arg(long, default_value = "auto", value_name = "DEVICE", value_parser = cli_kit::parse_device)]
@@ -316,11 +264,10 @@ pub struct TrainArgs {
     /// final ones.
     #[arg(long)]
     pub no_save_best: bool,
-    /// Compute backend: `auto`, `cuda` (alias `burn-cuda`), `tch` (`libtorch`,
-    /// `burn-tch`) or `wgpu` (`webgpu`, `burn-wgpu`). All three train, and the
-    /// saved weights are the same whichever you pick.
-    #[arg(long, value_enum, default_value_t = ComputeBackend::Auto)]
-    pub backend: ComputeBackend,
+    /// Compute backend. All three Burn backends train, and the saved weights are
+    /// the same whichever you pick; `onnx` cannot train at all.
+    #[arg(long, value_enum, default_value_t = Backend::Auto)]
+    pub backend: Backend,
     /// Compute device(s): `auto`, `cpu`, `gpu`, `gpu:N`, `mps`, `vulkan`
     /// (`cuda`/`cuda:N` are accepted spellings of `gpu`). Comma-separate for
     /// data-parallel training across devices — the first is the master.

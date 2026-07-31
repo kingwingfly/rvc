@@ -8,4 +8,4 @@ pub mod args;
 pub mod backend;
 
 pub use args::{Format, SttArgs, run};
-pub use backend::SttBackend;
+pub use cli_kit::Backend;

@@ -21,7 +21,8 @@ use clap::{Args, ValueEnum};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tts_core::{OUTPUT_SR, SampleOptions, SynthOptions};
 
-use crate::backend::{ModelPaths, TtsBackend, load};
+use crate::backend::{ModelPaths, load};
+pub use cli_kit::Backend;
 
 /// Which language front-end to phonemize with.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
@@ -89,11 +90,10 @@ pub struct TtsArgs {
     /// resampled, which is how this feeds `rvc serve` at 16 kHz.
     #[arg(long, default_value_t = OUTPUT_SR)]
     pub sr: u32,
-    /// Runtime: `auto`, `onnx`, `cuda`, `tch` (`libtorch`) or `wgpu`. `auto`
-    /// takes an ONNX export from `--models` if there is one, else the fastest
-    /// Burn backend.
-    #[arg(long, value_enum, default_value_t = TtsBackend::Auto)]
-    pub backend: TtsBackend,
+    /// Synthesis backend; `auto` takes an ONNX export from `--models` if there
+    /// is one, else the fastest Burn backend.
+    #[arg(long, value_enum, default_value_t = Backend::Auto)]
+    pub backend: Backend,
     /// Compute device: `auto`, `cpu`, `gpu`, `gpu:N`, `mps` or `vulkan`.
     /// Ignored by `--backend onnx`, which uses CUDA where it is available.
     #[arg(long, default_value = "auto", value_name = "DEVICE", value_parser = cli_kit::parse_device)]

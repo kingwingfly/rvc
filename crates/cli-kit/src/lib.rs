@@ -4,11 +4,15 @@
 //! them has to live somewhere that pulls in no engine — otherwise installing the
 //! recognition tool drags in voice conversion for the sake of a log formatter.
 
+mod backend;
+
 use std::path::Path;
 
 use anyhow::Result;
 use clap::Args;
 use clap_complete::Shell;
+
+pub use backend::Backend;
 
 /// `mm:ss` since start. `tracing_subscriber`'s own uptime timer prints
 /// nanoseconds, which is 12 columns of noise in front of every line.
