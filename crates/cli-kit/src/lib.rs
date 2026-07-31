@@ -4,11 +4,16 @@
 //! them has to live somewhere that pulls in no engine — otherwise installing the
 //! recognition tool drags in voice conversion for the sake of a log formatter.
 
-use std::path::Path;
+mod backend;
+
+use std::io::IsTerminal;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::Args;
 use clap_complete::Shell;
+
+pub use backend::Backend;
 
 /// `mm:ss` since start. `tracing_subscriber`'s own uptime timer prints
 /// nanoseconds, which is 12 columns of noise in front of every line.
@@ -24,10 +29,26 @@ impl tracing_subscriber::fmt::time::FormatTime for Elapsed {
 /// Initialise tracing.
 ///
 /// Logs go to **stderr**, because every subcommand here is a filter whose stdout
-/// carries data. `log_file` redirects them to a file instead — which `rvc train`
-/// needs, since its dashboard owns the terminal. Returns whether the file was
-/// used, so the caller can say where the logs went.
-pub fn init_logging(log_file: Option<&Path>) -> bool {
+/// carries data. A training run is the exception: its dashboard owns the
+/// terminal and stderr would scribble over it, so a caller about to raise one
+/// passes the file the logs should go to instead, and the user is told where
+/// they went. Where that file lives is the caller's decision — each engine has
+/// its own layout — and passing one when stdout is *not* a terminal is not an
+/// error: no dashboard comes up, so nothing needs redirecting.
+pub fn init_logging(log_file: Option<PathBuf>) {
+    if let Some(path) = log_file.filter(|_| std::io::stdout().is_terminal()) {
+        // Only announce the file once it is known to be the one in use:
+        // `init_tracing` falls back to stderr if it cannot be opened.
+        if init_tracing(Some(&path)) {
+            eprintln!("training dashboard active — logs: {}", path.display());
+        }
+    } else {
+        init_tracing(None);
+    }
+}
+
+/// Install the subscriber, returning whether `log_file` was the one it got.
+fn init_tracing(log_file: Option<&Path>) -> bool {
     use tracing_subscriber::EnvFilter;
 
     // App logs at `info`, but drop `ort`'s chatty INFO (per-tensor allocation /
@@ -90,4 +111,34 @@ pub fn completions(args: CompletionsArgs, mut cmd: clap::Command) -> Result<()> 
 /// failure after the model has already been loaded.
 pub fn parse_device(s: &str) -> std::result::Result<burn_kit::DeviceSpec, String> {
     s.parse()
+}
+
+/// The early-stop flag every training subcommand hands its trainer.
+///
+/// Ctrl-C flips it and the loop saves what it has rather than dying with the
+/// run's work unwritten — which is why this is a flag polled between steps and
+/// not a process exit. With a dashboard up Ctrl-C is captured as a key instead,
+/// so `q` is how a TUI run stops.
+pub fn stop_on_ctrl_c() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    tokio::spawn({
+        let stop = stop.clone();
+        async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                stop.store(true, Ordering::Relaxed);
+            }
+        }
+    });
+    stop
+}
+
+/// Whether a training run should raise the TUI dashboard.
+///
+/// The dashboard owns the terminal, so this must agree with [`init_logging`]'s
+/// decision to route logs to a file: a run that shows the dashboard *and* logs
+/// to stderr scribbles over its own display.
+pub fn use_tui(no_tui: bool) -> bool {
+    !no_tui && std::io::IsTerminal::is_terminal(&std::io::stdout())
 }

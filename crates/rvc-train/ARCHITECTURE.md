@@ -49,12 +49,15 @@ produces the `phone/phone_lengths/pitch/pitchf/ds/rnd → audio` graph that
    step. Plotted (numeric) metrics are the `g`/`d`/`mel` losses **and the
    learning rate**; CPU and GPU usage are shown as text lines (reusing Burn's own
    `CpuUse`/`CudaMetric` system probes, behind the `metrics` feature — NVML for
-   the GPU, so `<used>/<total> Gb`, utilisation, and power). The renderer shares a
+   the GPU, so `<used>/<total> Gb`, utilisation, and power). The same call emits
+   the throttled `step/total … eta` line, whether or not the TUI is up: with a
+   dashboard the caller has routed tracing to a file, so it records the run's
+   curves instead of scribbling over the display. The renderer shares a
    Burn `Interrupter` — pressing `q`
    flips it and the loop stops and saves. Off-TTY (or `--no-tui`), it logs to
    stderr and **Ctrl-C** (a SIGINT flag threaded through `TrainRequest.stop`)
    stops and saves. When the TUI is on, the CLI routes `tracing` logs to
-   `{work-dir}/train.log` so they don't corrupt the display.
+   `./train.log` so they don't corrupt the display.
 
    Notes:
    - Warm-start from RVC's `assets/pretrained_v2/f0G48k.pth` / `f0D48k.pth` is
@@ -91,7 +94,10 @@ fields with matching `rvc train` flags; two are on by default.
   is independent of the epoch count (unlike a per-epoch gamma, whose effect
   silently depends on `-e`). A constant LR bounces around the minimum instead of
   settling; the decay is what lets the late-training oscillation quiet down. Set
-  `--lr-final 1.0` to disable.
+  `--lr-final 1.0` to disable. Both this and the EMA window above are
+  `train_kit::Schedule`, which every trainer in the toolkit shares: the two
+  numbers are fractions of a *run*, so a schedule that drifted between loops
+  would make `--epochs` quietly mean something different in each.
 
 - **Gradient accumulation** (`--grad-accum`, default `1`). Sums gradients over N
   micro-batches before one optimizer step, giving an *effective* batch of
@@ -135,7 +141,10 @@ last dot, and on `voice.best.raw.safetensors` it would strip `.best` along with
 
 There is no *periodic*-checkpoint machinery; there is one extra snapshot:
 
-- **Best checkpoint** (**on**; `--no-save-best` disables). `Checkpoint::best()` is
+- **Best checkpoint** (**on**; `--no-save-best` disables), all of it
+  `train_kit::Best` — the GPT-SoVITS `s2` loop wants the same three rules, down
+  to the tail case, and two copies of a rule this fiddly would drift.
+  `Checkpoint::best()` is
   the same family under `<out-dir>/checkpoint/` with a `.best` stem, written
   whenever the `mel` loss hits a new minimum — so a run that drifts late still
   leaves its best model behind, and that model deploys and resumes exactly like

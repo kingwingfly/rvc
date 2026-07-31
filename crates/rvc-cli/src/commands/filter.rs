@@ -1,11 +1,11 @@
-//! `rvc serve` — realtime Unix filter (raw f32le PCM stdin -> stdout).
+//! The bare invocation — a Unix filter: raw f32le PCM stdin -> stdout.
 //!
 //! Input must be **mono f32le @ 16 kHz** (the RVC analysis rate); output is mono
 //! f32le at the generator's sample rate. Wire it up with ffmpeg on both ends:
 //!
 //! ```sh
 //! ffmpeg -i in.mp3 -f f32le -ar 16000 -ac 1 - \
-//!   | rvc serve -m voice.onnx --model-sr 48000 \
+//!   | rvc -m voice.onnx --model-sr 48000 \
 //!   | ffplay -f f32le -ar 48000 -ac 1 -
 //! ```
 //!
@@ -15,7 +15,7 @@
 //! different chain, denoise downstream with the `ffmpeg` binary instead, e.g.:
 //!
 //! ```sh
-//! ... | rvc serve -m voice.onnx --model-sr 48000 \
+//! ... | rvc -m voice.onnx --model-sr 48000 \
 //!   | ffmpeg -f f32le -ar 48000 -ac 1 -i - -af afftdn=nf=-25,highpass=f=60 \
 //!       -f f32le -ar 48000 -ac 1 - \
 //!   | ffplay -f f32le -ar 48000 -ac 1 -
@@ -26,10 +26,15 @@ use futures::StreamExt;
 use rvc_core::{StreamParams, convert_stream};
 use tokio::io::{AsyncWriteExt, BufWriter};
 
-use crate::args::ServeArgs;
+use crate::args::FilterArgs;
 use crate::commands::common::build_converter;
 
-pub async fn run(args: ServeArgs) -> Result<()> {
+pub async fn run(args: FilterArgs) -> Result<()> {
+    // Clap cannot mark `-m` required — these options sit beside the subcommands,
+    // which would then demand it too — so it is checked here, before a download
+    // or a model load can happen.
+    let model = args.models.model()?;
+
     let converter = build_converter(
         &args.models,
         args.backend,
@@ -41,7 +46,8 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     .await?;
     let out_sr = converter.output_sr();
     tracing::info!(
-        "serving: stdin f32le mono @16000 Hz -> stdout f32le mono @{} Hz",
+        "{}: stdin f32le mono @16000 Hz -> stdout f32le mono @{} Hz",
+        model.display(),
         out_sr
     );
 

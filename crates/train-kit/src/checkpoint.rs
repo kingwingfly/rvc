@@ -116,6 +116,22 @@ impl Checkpoint {
             .with_context(|| format!("writing {}", p.display()))
     }
 
+    /// Every weight file a run writing this family would create, in the order
+    /// [`Checkpoint::save`] writes them. `ema` and `disc` say which optional
+    /// members that run actually produces — a stage with no adversary never
+    /// writes a sidecar, and an EMA-less run never writes a raw twin, so
+    /// neither should count as a collision.
+    pub fn members(&self, ema: bool, disc: bool) -> Vec<PathBuf> {
+        let mut members = vec![self.generator()];
+        if ema {
+            members.push(self.raw());
+        }
+        if disc {
+            members.push(self.disc());
+        }
+        members
+    }
+
     /// Which generator to actually load when resuming from this family: the raw
     /// twin when it was written, else the deployable weights.
     pub fn resume_from(&self) -> PathBuf {
@@ -169,6 +185,28 @@ impl Checkpoint {
     }
 }
 
+/// Refuse to start a run whose output would replace weights already on disk.
+///
+/// A training run is hours of GPU and its output is not reproducible, so
+/// silently overwriting one is the most expensive mistake this toolkit can make
+/// — and the two engines share one output directory, so it is an easy one. The
+/// caller passes every file the run *would* write and calls this before the
+/// corpus is prepared or a model is loaded: a refusal that arrives after the
+/// encoders have run has already spent what it was meant to save.
+pub fn ensure_absent(planned: impl IntoIterator<Item = PathBuf>, overwrite: bool) -> Result<()> {
+    if overwrite {
+        return Ok(());
+    }
+    match planned.into_iter().find(|p| p.exists()) {
+        Some(p) => Err(anyhow!(
+            "output already exists: {} — pass `-y` to overwrite it \
+             (a run replaces the whole checkpoint family, not just this file)",
+            p.display()
+        )),
+        None => Ok(()),
+    }
+}
+
 /// Why a checkpoint was kept: the mel it scored and the step it came from (an
 /// exit-window best and a mid-run one are otherwise indistinguishable in a log).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -199,7 +237,7 @@ fn number<'a>(text: &'a str, key: &str) -> Option<&'a str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BestMeta, Checkpoint, parse_meta};
+    use super::{BestMeta, Checkpoint, ensure_absent, parse_meta};
     use std::path::{Path, PathBuf};
 
     /// A scratch directory unique to this test binary *and* case.
@@ -274,6 +312,39 @@ mod tests {
         assert_eq!(ck.resume_from(), ck.generator());
         std::fs::write(ck.raw(), b"x").unwrap();
         assert_eq!(ck.resume_from(), ck.raw());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn only_the_members_a_run_writes_can_collide() {
+        let ck = Checkpoint::new(Path::new("out/voice"));
+        assert_eq!(
+            ck.members(true, true),
+            [ck.generator(), ck.raw(), ck.disc()]
+        );
+        // A cross-entropy stage has no adversary and an EMA-less run no twin, so
+        // a leftover file of either kind must not veto a run that never writes it.
+        assert_eq!(ck.members(false, false), [ck.generator()]);
+        assert_eq!(ck.members(true, false), [ck.generator(), ck.raw()]);
+    }
+
+    #[test]
+    fn an_existing_output_stops_the_run_unless_overwrite() {
+        let dir = scratch("absent");
+        let ck = Checkpoint::new(&dir.join("voice"));
+
+        ensure_absent(ck.members(true, true), false).expect("nothing written yet");
+        // The disc sidecar alone is enough — the whole family is replaced.
+        std::fs::write(ck.disc(), b"x").unwrap();
+        let err = ensure_absent(ck.members(true, true), false)
+            .expect_err("a trained voice must not be clobbered")
+            .to_string();
+        assert!(err.contains(&ck.disc().display().to_string()), "{err}");
+        assert!(err.contains("-y"), "{err}");
+        // The stage that never writes one is unaffected, and `-y` proceeds.
+        ensure_absent(ck.members(true, false), false).expect("s1 writes no sidecar");
+        ensure_absent(ck.members(true, true), true).expect("-y overwrites");
 
         std::fs::remove_dir_all(&dir).ok();
     }

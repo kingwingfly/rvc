@@ -27,7 +27,7 @@ pub struct StreamParams {
 }
 
 impl StreamParams {
-    /// Low-latency preset for `serve` (~0.5 s blocks).
+    /// Low-latency preset for the streaming filter (~0.5 s blocks).
     pub fn realtime() -> Self {
         Self {
             block: ANALYSIS_SR as usize / 2,

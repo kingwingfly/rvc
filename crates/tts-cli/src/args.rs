@@ -7,21 +7,46 @@
 //! ```
 //!
 //! One line in, one utterance out, so a script is a file of lines. `--sr`
-//! resamples the output, which is what feeds `rvc serve`:
+//! resamples the output, which is what feeds the voice-conversion filter:
 //!
 //! ```sh
 //! tts --reference clip.wav --sr 16000 < script.txt \
-//!   | rvc serve -m voice.safetensors --model-sr 48000 > out.f32le
+//!   | rvc -m voice.safetensors --model-sr 48000 > out.f32le
 //! ```
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use clap::{Args, ValueEnum};
+use clap::{Args, Subcommand, ValueEnum};
+use cli_kit::CompletionsArgs;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tts_core::{OUTPUT_SR, SampleOptions, SynthOptions};
 
-use crate::backend::{ModelPaths, TtsBackend, load};
+use crate::backend::{ModelPaths, load};
+pub use cli_kit::Backend;
+use crate::train::TrainArgs;
+
+/// The whole of the `tts` command tree, defined once and worn two ways: the
+/// `tts` binary flattens it at its top level, `voice` nests it under a `tts`
+/// subcommand. Every engine here has the same shape — the bare invocation is
+/// the stdin→stdout filter, and everything else is a subcommand.
+#[derive(Debug, Args)]
+pub struct TtsCli {
+    #[command(flatten)]
+    pub synth: TtsArgs,
+    #[command(subcommand)]
+    pub command: Option<TtsCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TtsCommand {
+    /// Fine-tune GPT-SoVITS on a corpus of audio with transcripts.
+    // Boxed because it carries every knob of two training loops, and an enum is
+    // as large as its biggest variant.
+    Train(Box<TrainArgs>),
+    /// Print a shell completion script (bash, zsh, fish, powershell, elvish).
+    Completions(CompletionsArgs),
+}
 
 /// Which language front-end to phonemize with.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
@@ -51,8 +76,9 @@ impl From<Lang> for text_kit::Language {
 pub struct TtsArgs {
     /// Reference recording of the voice to clone (any format ffmpeg reads).
     /// A few seconds of clean speech is what the model expects.
-    // Checked in `run` rather than by clap: these are flattened into a command
-    // that also has a `train` subcommand, and clap would demand them there too.
+    // Checked in `synthesize` rather than by clap: these are flattened into a
+    // command that also has a `train` subcommand, and clap would demand them
+    // there too.
     #[arg(short, long)]
     pub reference: Option<PathBuf>,
     /// What is said in the reference recording. Required, and not a nicety:
@@ -79,21 +105,23 @@ pub struct TtsArgs {
     /// zero prosody features — intelligible, but flatter on Chinese.
     #[arg(long)]
     pub prosody: Option<PathBuf>,
-    /// Cache directory for downloaded assets [default: the Hugging Face cache].
-    #[arg(long)]
-    pub cache_dir: Option<PathBuf>,
+    /// Directory the downloaded models are cached in. Shared by every engine
+    /// unless `$TTS_CACHE_DIR` (or `$VOICE_CACHE_DIR`) says otherwise.
+    #[arg(long, default_value_os_t = hub_kit::cache_dir_for("TTS_CACHE_DIR"))]
+    pub cache_dir: PathBuf,
     /// Language of the input text.
     #[arg(short, long, value_enum, default_value_t = Lang::Zh)]
     pub language: Lang,
     /// Output sample rate. The model produces 32 kHz; anything else is
-    /// resampled, which is how this feeds `rvc serve` at 16 kHz.
+    /// resampled, which is how this feeds the voice-conversion filter at
+    /// 16 kHz.
     #[arg(long, default_value_t = OUTPUT_SR)]
     pub sr: u32,
     /// Runtime: `auto`, `onnx`, `cuda`, `tch` (`libtorch`) or `wgpu`. `auto`
     /// takes an ONNX export from `--models` if there is one, else the fastest
     /// Burn backend.
-    #[arg(long, value_enum, default_value_t = TtsBackend::Auto)]
-    pub backend: TtsBackend,
+    #[arg(long, value_enum, default_value_t = Backend::Auto)]
+    pub backend: Backend,
     /// Compute device: `auto`, `cpu`, `gpu`, `gpu:N`, `mps` or `vulkan`.
     /// Ignored by `--backend onnx`, which uses CUDA where it is available.
     #[arg(long, default_value = "auto", value_name = "DEVICE", value_parser = cli_kit::parse_device)]
@@ -117,10 +145,10 @@ pub struct TtsArgs {
     pub max_tokens: usize,
 }
 
-pub async fn run(args: TtsArgs) -> Result<()> {
+pub async fn synthesize(args: TtsArgs) -> Result<()> {
     // Before anything is fetched or loaded. Clap cannot enforce these — they are
     // flattened into a command that also has a `train` subcommand, which does not
-    // want them — so `run` is where "required" is decided, and a missing flag
+    // want them — so this is where "required" is decided, and a missing flag
     // should cost a message rather than a model load.
     let reference = args
         .reference
@@ -135,7 +163,7 @@ pub async fn run(args: TtsArgs) -> Result<()> {
         Some(dir) => dir.clone(),
         None => {
             tracing::info!("resolving GPT-SoVITS weights from Hugging Face...");
-            hub_kit::fetch_gptsovits(args.cache_dir.as_deref())
+            hub_kit::fetch_gptsovits(&args.cache_dir)
                 .await
                 .context("failed to fetch the GPT-SoVITS models")?
         }
@@ -153,7 +181,7 @@ pub async fn run(args: TtsArgs) -> Result<()> {
     let prosody: Option<Box<dyn tts_core::ProsodyEncoder>> = {
         let dir = match &args.prosody {
             Some(dir) => Some(dir.clone()),
-            None => match hub_kit::fetch_prosody_bert(None, args.cache_dir.as_deref()).await {
+            None => match hub_kit::fetch_prosody_bert(None, &args.cache_dir).await {
                 Ok(dir) => Some(dir),
                 // Losing prosody costs expressiveness, not intelligibility, so
                 // this is a warning rather than a failure.
@@ -237,21 +265,6 @@ pub async fn run(args: TtsArgs) -> Result<()> {
 
     out.flush().await.context("final flush")?;
     tracing::info!("{spoken} lines");
-
-    // Do not unwind the models. Dropping an ONNX Runtime session on the CUDA
-    // execution provider aborts the process with glibc's "corrupted
-    // double-linked list" *after* every sample has been written — harmless to
-    // the audio, fatal to the exit code, which for a filter in a pipeline is the
-    // part that gets checked.
-    //
-    // The sessions themselves now leak by construction (`tts_core`'s
-    // `OnnxProsody` and `OnnxEngine` hold theirs in `ManuallyDrop`), because
-    // doing it *here* only ever covered the successful path: every early return
-    // above still unwound them, so `--backend onnx` against a directory with no
-    // export reported the right error and then exited 134. This line therefore
-    // covers only the Burn models now, and stays because that is the shape the
-    // exit code was verified in.
-    std::mem::forget(model);
     Ok(())
 }
 
