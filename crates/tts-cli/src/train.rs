@@ -34,7 +34,7 @@ use clap::{Args, ValueEnum};
 use tts_train::{S1Settings, S2Settings};
 
 use crate::args::Lang;
-use crate::backend::TtsBackend;
+use cli_kit::Backend;
 
 /// Which half of the model to adapt.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
@@ -124,9 +124,10 @@ pub struct TrainArgs {
     /// Do not keep a best-so-far `s2` checkpoint beside the final weights.
     #[arg(long)]
     pub no_save_best: bool,
-    /// Compute backend: `auto`, `cuda`, `tch` (`libtorch`) or `wgpu`.
-    #[arg(long, value_enum, default_value_t = TtsBackend::Auto)]
-    pub backend: TtsBackend,
+    /// Compute backend. All three Burn backends train, and the saved weights are
+    /// the same whichever you pick; `onnx` cannot train at all.
+    #[arg(long, value_enum, default_value_t = Backend::Auto)]
+    pub backend: Backend,
     /// Compute device(s): `auto`, `cpu`, `gpu`, `gpu:N`, `mps` or `vulkan`.
     /// Comma-separate for data-parallel training — the first is the master.
     #[arg(

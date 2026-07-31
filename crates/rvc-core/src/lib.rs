@@ -8,7 +8,8 @@
 //!
 //! Audio crosses every boundary as mono `f32`, and the conversion path is
 //! [`futures::Stream`]-in → [`futures::Stream`]-out ([`convert::convert_stream`]),
-//! so `rvc serve` is a plain Unix filter and a realtime service is a thin wrapper.
+//! so the conversion CLI is a plain Unix filter and a realtime service is a thin
+//! wrapper.
 
 mod backend;
 mod config;
