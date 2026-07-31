@@ -13,7 +13,7 @@ use anyhow::Result;
 use clap::CommandFactory;
 
 pub use args::{TtsArgs, TtsCli, TtsCommand};
-pub use backend::TtsBackend;
+pub use cli_kit::Backend;
 pub use train::{Stage, TrainArgs};
 
 /// Run one synthesis invocation.

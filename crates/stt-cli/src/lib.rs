@@ -12,7 +12,7 @@ use anyhow::Result;
 use clap::CommandFactory;
 
 pub use args::{Format, SttArgs, SttCli, SttCommand};
-pub use backend::SttBackend;
+pub use cli_kit::Backend;
 
 /// Run one recognition invocation.
 ///

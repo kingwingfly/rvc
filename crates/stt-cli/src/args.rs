@@ -24,7 +24,8 @@ use std::path::PathBuf;
 use stt_core::{DecodeOptions, TranscribeOptions};
 use tokio::io::{AsyncWriteExt, BufWriter};
 
-use crate::backend::{SttBackend, load_transcriber};
+use crate::backend::load_transcriber;
+pub use cli_kit::Backend;
 
 /// The whole of the `stt` command tree, defined once and worn two ways: the
 /// `stt` binary flattens it at its top level, `voice` nests it under an `stt`
@@ -76,9 +77,10 @@ pub struct SttArgs {
     /// Translate to English rather than transcribing verbatim.
     #[arg(long)]
     pub translate: bool,
-    /// Compute backend: `auto`, `cuda`, `tch` (`libtorch`) or `wgpu`.
-    #[arg(long, value_enum, default_value_t = SttBackend::Auto)]
-    pub backend: SttBackend,
+    /// Recognition backend; `auto` takes an ONNX export from `--model` if there
+    /// is one, else the fastest Burn backend.
+    #[arg(long, value_enum, default_value_t = Backend::Auto)]
+    pub backend: Backend,
     /// Compute device: `auto`, `cpu`, `gpu`, `gpu:N`, `mps` or `vulkan`.
     #[arg(long, default_value = "auto", value_name = "DEVICE", value_parser = cli_kit::parse_device)]
     pub device: burn_kit::DeviceSpec,
