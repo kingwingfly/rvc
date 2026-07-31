@@ -112,3 +112,33 @@ pub fn completions(args: CompletionsArgs, mut cmd: clap::Command) -> Result<()> 
 pub fn parse_device(s: &str) -> std::result::Result<burn_kit::DeviceSpec, String> {
     s.parse()
 }
+
+/// The early-stop flag every training subcommand hands its trainer.
+///
+/// Ctrl-C flips it and the loop saves what it has rather than dying with the
+/// run's work unwritten — which is why this is a flag polled between steps and
+/// not a process exit. With a dashboard up Ctrl-C is captured as a key instead,
+/// so `q` is how a TUI run stops.
+pub fn stop_on_ctrl_c() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    tokio::spawn({
+        let stop = stop.clone();
+        async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                stop.store(true, Ordering::Relaxed);
+            }
+        }
+    });
+    stop
+}
+
+/// Whether a training run should raise the TUI dashboard.
+///
+/// The dashboard owns the terminal, so this must agree with [`init_logging`]'s
+/// decision to route logs to a file: a run that shows the dashboard *and* logs
+/// to stderr scribbles over its own display.
+pub fn use_tui(no_tui: bool) -> bool {
+    !no_tui && std::io::IsTerminal::is_terminal(&std::io::stdout())
+}

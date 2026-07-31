@@ -16,10 +16,17 @@
 //!
 //! The renderer shares a [`Interrupter`] with the dashboard — pressing `q`
 //! (quit) in the TUI flips it, which [`Dashboard::interrupted`] reports so the
-//! training loop can stop early and save. When the TUI is disabled (no TTY, or
-//! `--no-tui`), everything here is a no-op and training logs to stderr as usual.
+//! training loop can stop early and save.
+//!
+//! The throttled progress line lives here too, and is emitted whether or not the
+//! TUI is up: with a dashboard the caller has routed tracing to a file, so the
+//! line records the run's curves without touching the display; without one it is
+//! the progress report. Both are the same sentence, so neither loop writes it.
 
 use std::sync::Arc;
+use std::time::Instant;
+
+use crate::misc::human;
 
 use burn::data::dataloader::Progress;
 use burn::train::Interrupter;
@@ -52,6 +59,10 @@ pub struct Dashboard {
     gpu: Option<(MetricId, CudaMetric)>,
     steps_per_epoch: usize,
     total_epochs: usize,
+    /// For the progress line: how far there is to go, and how long the part
+    /// already done took.
+    total_steps: usize,
+    started: Instant,
 }
 
 impl Dashboard {
@@ -122,6 +133,8 @@ impl Dashboard {
             gpu,
             steps_per_epoch,
             total_epochs,
+            total_steps: steps_per_epoch * total_epochs,
+            started: Instant::now(),
         }
     }
 
@@ -134,6 +147,7 @@ impl Dashboard {
     ///
     /// `losses` must match the names given to [`Dashboard::new`], in order.
     pub fn update(&mut self, step: usize, losses: &[f32], lr: f64) {
+        self.log(step, losses, lr);
         let Some(r) = self.renderer.as_mut() else {
             return;
         };
@@ -196,6 +210,35 @@ impl Dashboard {
                 iteration: Some(step),
             },
             Vec::new(),
+        );
+    }
+
+    /// The throttled progress line, every twentieth step and the last.
+    ///
+    /// Emitted whether or not the TUI is up: with a dashboard the caller has
+    /// routed tracing to a file, so this records the run's curves off-screen
+    /// instead of scribbling over them.
+    fn log(&self, step: usize, losses: &[f32], lr: f64) {
+        let total = self.total_steps;
+        let done = step + 1;
+        if step % 20 != 0 && done != total {
+            return;
+        }
+        // The plot labels double as the log's: `g_loss` is the right name for a
+        // legend, `g` for a line that has to fit three of them and an ETA.
+        let values = self
+            .plots
+            .iter()
+            .zip(losses)
+            .map(|(m, v)| format!("{} {v:7.3}", m.name.strip_suffix("_loss").unwrap_or(m.name)))
+            .collect::<Vec<_>>()
+            .join("  ");
+        let per_step = self.started.elapsed().as_secs_f64() / done as f64;
+        let eta = std::time::Duration::from_secs_f64(per_step * total.saturating_sub(done) as f64);
+        tracing::info!(
+            "{done:>5}/{total} {:>3}%  {values}  lr {lr:.1e}  eta {}",
+            done * 100 / total.max(1),
+            human(eta),
         );
     }
 

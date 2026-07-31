@@ -7,6 +7,7 @@ use anyhow::{Context, Result, anyhow};
 use audio_kit::{DecodeOptions, decode_path};
 use futures::StreamExt;
 use rvc_core::{DEFAULT_CHUNK, FeatureExtractor, f0_to_coarse};
+use train_kit::Rng;
 
 /// Samples per latent frame (48 kHz, hop 480).
 pub const HOP: usize = 480;
@@ -176,7 +177,7 @@ pub fn sample_batch(
 
     for _ in 0..batch {
         let idx = match cdf {
-            Some(c) => rng.weighted(c),
+            Some(c) => weighted(rng, c),
             None => rng.below(clips.len()),
         };
         let clip = &clips[idx];
@@ -204,40 +205,14 @@ async fn decode_mono(path: &Path, sample_rate: u32) -> Result<Vec<f32>> {
     Ok(out)
 }
 
-/// Tiny xorshift RNG (no external `rand` dep).
-pub struct Rng(u64);
-
-impl Rng {
-    /// Seed the RNG.
-    pub fn new(seed: u64) -> Self {
-        Self(seed | 1)
-    }
-
-    fn next(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.0 = x;
-        x
-    }
-
-    /// Uniform integer in `0..n`.
-    pub fn below(&mut self, n: usize) -> usize {
-        (self.next() % n as u64) as usize
-    }
-
-    /// Uniform `f64` in `[0, 1)`.
-    fn unit(&mut self) -> f64 {
-        (self.next() >> 11) as f64 / (1u64 << 53) as f64
-    }
-
-    /// Sample an index from a cumulative weight distribution (`cdf` ascending,
-    /// last element the total). Draws a point in `[0, total)` and returns the
-    /// first bucket whose cumulative weight exceeds it.
-    pub fn weighted(&mut self, cdf: &[f32]) -> usize {
-        let total = *cdf.last().expect("non-empty cdf") as f64;
-        let point = (self.unit() * total) as f32;
-        cdf.partition_point(|&c| c <= point).min(cdf.len() - 1)
-    }
+/// Sample an index from a cumulative weight distribution (`cdf` ascending, last
+/// element the total). Draws a point in `[0, total)` and returns the first bucket
+/// whose cumulative weight exceeds it.
+///
+/// Here rather than on [`Rng`] because SNR-biased clip sampling is this
+/// trainer's alone — `s2` draws its utterances uniformly.
+fn weighted(rng: &mut Rng, cdf: &[f32]) -> usize {
+    let total = *cdf.last().expect("non-empty cdf") as f64;
+    let point = (rng.unit() * total) as f32;
+    cdf.partition_point(|&c| c <= point).min(cdf.len() - 1)
 }

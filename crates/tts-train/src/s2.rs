@@ -31,7 +31,7 @@ use burn_vits::{
     mel_l1,
 };
 use train_kit::{
-    BestMeta, Checkpoint, Dashboard, accumulate, ema_update, human, materialize, scalar,
+    Best, Checkpoint, Dashboard, Rng, Schedule, accumulate, ema_update, human, materialize, scalar,
 };
 
 use crate::dataset::{Clip, SAMPLES_PER_FRAME};
@@ -207,14 +207,16 @@ pub fn run<AB: AutodiffBackend>(
     let steps_per_epoch = usable.len().div_ceil(batch * devices.len()).max(1);
     let total_steps = steps_per_epoch * settings.epochs as usize;
 
-    // Per-step EMA decay from a smoothing window of `ema_frac` of the run, so it
-    // stays sensible whatever the epoch count.
-    let ema_window = settings.ema_frac * total_steps as f64;
-    let ema_decay = match ema_window >= 1.0 {
-        true => (1.0 - 1.0 / ema_window).min(0.9999),
-        false => 0.0,
-    };
-    let mut ema: Option<SovitsPartial<AB::InnerBackend>> = (ema_decay > 0.0).then(|| net_g.valid());
+    // LR decay and EMA window, both fractions of the run so they stay sensible
+    // whatever the epoch count.
+    let sched = Schedule::new(
+        settings.lr,
+        settings.lr_final,
+        settings.ema_frac,
+        total_steps,
+    );
+    let mut ema: Option<SovitsPartial<AB::InnerBackend>> =
+        (sched.ema_decay > 0.0).then(|| net_g.valid());
 
     tracing::info!(
         "fine-tuning s2 on {} clips ({:.1} min), {total_steps} steps ({} epochs x {steps_per_epoch})",
@@ -225,8 +227,8 @@ pub fn run<AB: AutodiffBackend>(
     tracing::info!(
         "sched: lr {:.1e} -> {:.1e}, ema over {:.0} steps, segment {} frames ({:.2} s)",
         settings.lr,
-        settings.lr * settings.lr_final,
-        ema_window.max(0.0),
+        sched.final_lr(),
+        sched.ema_window,
         settings.segment_frames,
         settings.segment_frames as f32 / 50.0,
     );
@@ -248,15 +250,7 @@ pub fn run<AB: AutodiffBackend>(
         materialize(&disc);
     }
 
-    let best = settings.save_best.then(|| out.best());
-    let best_window = (total_steps / 20).clamp(1, 50);
-    let prev = best
-        .as_ref()
-        .filter(|ck| ck.generator().exists())
-        .and_then(Checkpoint::load_meta);
-    let mut best_mel = prev.map_or(f32::INFINITY, |m| m.mel);
-    let mut best_step: Option<usize> = None;
-    let (mut win_sum, mut win_n) = (0.0f32, 0usize);
+    let mut best = Best::new(out, settings.save_best, total_steps);
 
     let mut rng = Rng::new(0x505_1725_u64.wrapping_mul(settings.epochs as u64 + 1));
     let started = std::time::Instant::now();
@@ -270,8 +264,7 @@ pub fn run<AB: AutodiffBackend>(
             break;
         }
         last_step = step;
-        let progress = step as f64 / total_steps.max(1) as f64;
-        let cur_lr = settings.lr * settings.lr_final.powf(progress);
+        let cur_lr = sched.lr(step);
         let update_d = step % d_interval == 0;
 
         let micros = batch * devices.len();
@@ -339,7 +332,7 @@ pub fn run<AB: AutodiffBackend>(
         net_g = opt_g.step(cur_lr, net_g, acc_g);
 
         if let Some(e) = ema.take() {
-            ema = Some(ema_update(e, &net_g, ema_decay));
+            ema = Some(ema_update(e, &net_g, sched.ema_decay));
         }
 
         // The step's only sync, now that every device and both optimizers have
@@ -350,30 +343,10 @@ pub fn run<AB: AutodiffBackend>(
         if !d_losses.is_empty() {
             last_d = d_losses.into_iter().map(scalar).sum::<f32>() * inv;
         }
+        // The dashboard also emits the throttled progress line, whether or not
+        // the TUI is up.
         dash.update(step, &[g_scalar, last_d, mel_scalar], cur_lr);
-        if step % 20 == 0 || step + 1 == total_steps {
-            let done = step + 1;
-            let per_step = started.elapsed().as_secs_f64() / done as f64;
-            let eta = std::time::Duration::from_secs_f64(per_step * (total_steps - done) as f64);
-            tracing::info!(
-                "{done:>5}/{total_steps} {:>3}%  g {g_scalar:7.3}  d {last_d:6.3}  \
-                 mel {mel_scalar:7.3}  lr {cur_lr:.1e}  eta {}",
-                done * 100 / total_steps.max(1),
-                human(eta),
-            );
-        }
-
-        if let Some(ck) = &best {
-            win_sum += mel_scalar;
-            win_n += 1;
-            if win_n == best_window {
-                let mean = win_sum / win_n as f32;
-                (win_sum, win_n) = (0.0, 0);
-                if keep_best(ck, &mut best_mel, mean, step, ema.as_ref(), &net_g, &disc) {
-                    best_step = Some(step);
-                }
-            }
-        }
+        best.observe(step, mel_scalar, ema.as_ref(), &net_g, Some(&disc));
     }
 
     dash.finish();
@@ -381,27 +354,7 @@ pub fn run<AB: AutodiffBackend>(
         tracing::info!("stopped early; saving current weights");
     }
 
-    // Judge the partial window an early stop leaves behind, but only when there
-    // is enough of it to mean anything — a one-step mean carries many times the
-    // variance of a full window. Under that bar it still stands when nothing is
-    // on disk: a stopped-early run must leave something rather than nothing.
-    if let Some(ck) = &best {
-        let trustworthy = win_n * 2 >= best_window || best_mel.is_infinite();
-        if win_n > 0 && trustworthy {
-            let mean = win_sum / win_n as f32;
-            if keep_best(
-                ck,
-                &mut best_mel,
-                mean,
-                last_step,
-                ema.as_ref(),
-                &net_g,
-                &disc,
-            ) {
-                best_step = Some(last_step);
-            }
-        }
-    }
+    best.finish(last_step, ema.as_ref(), &net_g, Some(&disc));
 
     out.save(ema.as_ref(), &net_g.valid(), Some(&disc.valid()))
         .map_err(|e| TrainError::Weights(e.to_string()))?;
@@ -416,47 +369,8 @@ pub fn run<AB: AutodiffBackend>(
     );
     let path = out.generator();
     tracing::info!("weights -> {}", path.display());
-    if let (Some(ck), Some(step)) = (&best, best_step) {
-        tracing::info!(
-            "best mel {best_mel:.3} (step {step}) -> {}",
-            ck.generator().display()
-        );
-    }
+    best.report();
     Ok(path)
-}
-
-/// Save `ck` when `mean` beats `best`, reporting whether it did. `best` advances
-/// only once the whole family is on disk, so a failed write cannot block a later
-/// minimum; the score sidecar is written last for the same reason — a later run
-/// must not inherit a best whose weights never landed.
-fn keep_best<AB: AutodiffBackend>(
-    ck: &Checkpoint,
-    best: &mut f32,
-    mean: f32,
-    step: usize,
-    ema: Option<&SovitsPartial<AB::InnerBackend>>,
-    net_g: &SovitsPartial<AB>,
-    disc: &MultiPeriodDiscriminator<AB>,
-) -> bool {
-    if mean.is_nan() || mean >= *best {
-        return false;
-    }
-    match ck.save(ema, &net_g.valid(), Some(&disc.valid())) {
-        Ok(()) => {
-            tracing::info!("best mel {mean:.3} (step {step}) saved");
-            *best = mean;
-            if let Err(e) = ck.save_meta(BestMeta { mel: mean, step }) {
-                // The weights are the checkpoint; losing the score only costs
-                // the *next* run its memory of what to beat.
-                tracing::warn!("could not record the best score: {e:#}");
-            }
-            true
-        }
-        Err(e) => {
-            tracing::warn!("could not save best checkpoint: {e:#}");
-            false
-        }
-    }
 }
 
 /// Everything one micro-batch needs.
@@ -577,24 +491,5 @@ fn micro_step<AB: AutodiffBackend>(input: MicroIn<'_, AB>) -> MicroOut<AB> {
         d,
         g_grads: GradientsParams::from_grads(g_loss.backward(), net_g),
         d_grads,
-    }
-}
-
-/// Tiny xorshift RNG, so picking clips and segments needs no `rand` dependency.
-pub struct Rng(u64);
-
-impl Rng {
-    pub fn new(seed: u64) -> Self {
-        Self(seed | 1)
-    }
-
-    /// Uniform integer in `0..n`.
-    pub fn below(&mut self, n: usize) -> usize {
-        let mut x = self.0;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.0 = x;
-        (x % n as u64) as usize
     }
 }

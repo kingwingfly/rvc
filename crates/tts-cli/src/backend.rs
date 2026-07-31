@@ -172,7 +172,7 @@ pub fn train(
                 .iter()
                 .map(|d| $resolve(*d))
                 .collect::<std::result::Result<Vec<_>, _>>()?;
-            let devices = distinct(devices)?;
+            let devices = train_kit::distinct(devices)?;
             let device = devices[0].clone();
             let prosody = load_prosody(inputs.prosody);
 
@@ -250,22 +250,6 @@ pub fn train(
         other => return Err(other.unavailable()),
     }
     Ok(())
-}
-
-/// Reject a device list with repeats, *after* resolution.
-///
-/// Checking the `--device` strings is not enough: `auto,gpu:0` are different
-/// spellings that name device 0 twice, and on WebGPU `auto`, `vulkan` and `mps`
-/// all resolve to the default adapter. A repeat would silently double that
-/// device's share of the work — and its memory.
-fn distinct<D: PartialEq + std::fmt::Debug>(devices: Vec<D>) -> Result<Vec<D>> {
-    for (i, d) in devices.iter().enumerate() {
-        anyhow::ensure!(
-            !devices[..i].contains(d),
-            "--device lists {d:?} more than once (different spellings can name one device)"
-        );
-    }
-    Ok(devices)
 }
 
 /// Load the prosody encoder if one was found; its absence costs expressiveness

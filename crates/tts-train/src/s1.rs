@@ -14,7 +14,7 @@ use burn::optim::{AdamWConfig, GradientsParams, Optimizer};
 use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::{Int, Tensor, TensorData};
 use burn_gptsovits::{T2s, T2sConfig};
-use train_kit::{Checkpoint, Dashboard, ema_update, human, scalar};
+use train_kit::{Checkpoint, Dashboard, Schedule, ema_update, human, scalar};
 
 use crate::dataset::Clip;
 use crate::error::Result;
@@ -111,10 +111,17 @@ pub fn run<AB: AutodiffBackend>(
         &["loss"],
     );
 
-    // The EMA is what gets deployed, as in `rvc-train`: it is markedly steadier
-    // than the live weights on a corpus this small.
-    let ema_keep = ema_keep(settings.ema_frac, total_steps);
-    let mut ema = ema_keep.map(|_| model.valid());
+    // The EMA is what gets deployed, as in the adversarial loops: it is markedly
+    // steadier than the live weights on a corpus this small. The LR decay comes
+    // from the same schedule they use — a small corpus overfits fast at a flat
+    // rate.
+    let sched = Schedule::new(
+        settings.lr,
+        settings.lr_final,
+        settings.ema_frac,
+        total_steps,
+    );
+    let mut ema = (sched.ema_decay > 0.0).then(|| model.valid());
 
     // Burn allocates parameters lazily, and a replica cloned before they
     // materialise gets fresh `ParamId`s — its gradients would then never match
@@ -136,10 +143,7 @@ pub fn run<AB: AutodiffBackend>(
                 break 'training;
             }
 
-            // Exponential decay across the whole run, the same shape `rvc-train`
-            // uses — a small corpus overfits fast at a flat rate.
-            let progress = step as f64 / total_steps.max(1) as f64;
-            let lr = settings.lr * settings.lr_final.powf(progress);
+            let lr = sched.lr(step);
 
             // Replicas for the non-master devices, rebuilt each step because only
             // the master is optimized. Empty when there is one device, so that
@@ -173,19 +177,13 @@ pub fn run<AB: AutodiffBackend>(
             }
             model = optim.step(lr, model, grads);
 
-            if let (Some(keep), Some(current)) = (ema_keep, ema.take()) {
-                ema = Some(ema_update(current, &model, keep));
+            if let Some(current) = ema.take() {
+                ema = Some(ema_update(current, &model, sched.ema_decay));
             }
 
-            let mean = total * inv;
-            dash.update(step, &[mean], lr);
-            if step % 20 == 0 || step + 1 == total_steps {
-                tracing::info!(
-                    "{step:>6}/{total_steps} {:>3.0}%  loss {mean:8.4}  lr {lr:.1e}  eta {}",
-                    100.0 * step as f64 / total_steps.max(1) as f64,
-                    human(eta(started.elapsed(), step, total_steps)),
-                );
-            }
+            // The dashboard also emits the throttled progress line, whether or
+            // not the TUI is up.
+            dash.update(step, &[total * inv], lr);
             step += 1;
         }
         tracing::debug!("epoch {} of {}", epoch + 1, settings.epochs);
@@ -272,21 +270,4 @@ fn cross_entropy<B: burn::tensor::backend::Backend>(
     let log_probs = burn::tensor::activation::log_softmax(logits, 1);
     let picked = log_probs.gather(1, targets.reshape([n, 1]));
     -picked.mean()
-}
-
-/// How much of the EMA to keep each step, or `None` when it is disabled.
-fn ema_keep(frac: f64, total_steps: usize) -> Option<f64> {
-    if frac <= 0.0 || total_steps == 0 {
-        return None;
-    }
-    let window = (frac * total_steps as f64).max(1.0);
-    Some(1.0 - 1.0 / window)
-}
-
-fn eta(elapsed: std::time::Duration, step: usize, total: usize) -> std::time::Duration {
-    if step == 0 {
-        return std::time::Duration::ZERO;
-    }
-    let per_step = elapsed.as_secs_f64() / step as f64;
-    std::time::Duration::from_secs_f64(per_step * (total.saturating_sub(step)) as f64)
 }

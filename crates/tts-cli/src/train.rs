@@ -26,8 +26,6 @@
 //! ```
 
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use clap::{Args, ValueEnum};
@@ -218,20 +216,8 @@ pub async fn run(args: TrainArgs) -> Result<()> {
     let pairs = tts_train::pairs(&args.corpus)?;
     tracing::info!("{} clips in {}", pairs.len(), args.corpus.display());
 
-    // Early stop: Ctrl-C flips this and the trainer saves what it has rather
-    // than dying with the run's work unwritten. (With the TUI active Ctrl-C is
-    // captured as a key, so `q` is how a dashboard run stops.)
-    let stop = Arc::new(AtomicBool::new(false));
-    tokio::spawn({
-        let stop = stop.clone();
-        async move {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                stop.store(true, Ordering::Relaxed);
-            }
-        }
-    });
-
-    let use_tui = !args.no_tui && std::io::IsTerminal::is_terminal(&std::io::stdout());
+    let stop = cli_kit::stop_on_ctrl_c();
+    let use_tui = cli_kit::use_tui(args.no_tui);
     let s1 = S1Settings {
         epochs: args.epochs,
         batch_size: args.batch_size,
