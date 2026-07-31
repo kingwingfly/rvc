@@ -1,27 +1,34 @@
 # tts — GPT-SoVITS speech synthesis
 
-Text on stdin, raw f32le mono PCM on stdout, logs on stderr. **`tts` clones a
-voice from a few seconds of reference audio** and speaks your text in it —
-GPT-SoVITS v2 ported to Burn, with a native Rust fine-tuning loop when a few
-seconds of prompt is not enough. No Python anywhere in the path.
+Speak text in a voice cloned from a few seconds of reference audio. `tts` is
+pure-Rust GPT-SoVITS v2: a transformer predicts *delivery* as semantic tokens and
+a VITS decoder renders them in the reference's *timbre*. Inference runs on ONNX
+Runtime or native Burn; fine-tuning runs on any Burn backend.
 
-Setup (ffmpeg, ONNX Runtime, LibTorch) is shared by every binary and lives in
-[`docs/setup.md`](../../docs/setup.md). `cargo build --release -p tts-cli` gives
-`target/release/tts`; the `voice` binary hosts the same code as `voice tts` and
-`voice tts train`. See the [repository README](../../README.md) for the toolkit
-and [`rvc`](../rvc-cli/README.md) for the conversion engine `tts` usually feeds.
+Runtimes, drivers and ffmpeg: [`docs/setup.md`](../../docs/setup.md). What the
+networks compute:
+[`docs/gptsovits-architecture.pdf`](../../docs/gptsovits-architecture.pdf).
+Build it with `cargo build --release -p tts-cli`. Every command below is also
+`voice tts …` — same code, same flags.
 
-## Quick start
+## Commands
+
+| | |
+|---|---|
+| `tts -r <clip> -t <transcript>` | **the bare invocation is the filter** — one line of text per utterance on stdin, f32le mono PCM on stdout |
+| `tts train <corpus>` | fine-tune `s1`, `s2` or both on a voice |
+| `tts completions <shell>` | completion script for bash, zsh, fish, powershell or elvish |
+
+Logs go to stderr, so stdout is only ever samples. Blank input lines are skipped.
 
 ```sh
 echo "今天天气很好" \
-  | tts --reference clip.wav --reference-text "<what clip.wav actually says>" \
+  | tts -r clip.wav -t "<what clip.wav actually says>" \
   | ffplay -f f32le -ar 32000 -ac 1 -
 ```
 
-**One line of stdin is one utterance**; blank lines are skipped and the output is
-the utterances concatenated. The model produces 32 kHz — `--sr` resamples, which
-is how synthesis feeds conversion with no intermediate file:
+The model produces 32 kHz; `--sr` resamples, which is how synthesis feeds
+conversion with no intermediate file:
 
 ```sh
 tts -r clip.wav -t "<transcript>" --sr 16000 < script.txt \
@@ -47,23 +54,22 @@ exactly like a broken decoder and is not one.
 extra leading speech and roughly doubles in length, with nothing to error about.
 A duration that does not match the text length is the tell.
 
-## Synthesis flags
+## Flags
 
-| flag | default | what it does |
+| flag | default | |
 |---|---|---|
 | `-r`, `--reference` / `-t`, `--reference-text` | *required* | the clip and what it says, as above |
-| `-m`, `--models` | auto-downloaded | directory holding cnhubert, `s1*.ckpt`, `s2G*.pth` |
-| `--s1`, `--s2` | base weights | fine-tuned weights, independently overridable |
+| `-m`, `--models` | auto-downloaded | directory holding cnhubert, `s1*.ckpt` and `s2G*.pth` |
+| `--s1`, `--s2` | base weights | fine-tuned weights, each overridable on its own |
 | `--prosody` | auto-downloaded | directory holding the ONNX prosody encoder |
-| `--cache-dir` | see [Where files live](#where-files-live) | where downloads land |
+| `--cache-dir` | see [Where files land](#where-files-land) | where downloads land |
 | `-l`, `--language` | `zh` | `zh`, `en` or `ja` |
 | `--sr` | `32000` | output sample rate |
 | `--top-k` | `15` | sample from the `k` highest-scoring tokens; lower is steadier |
 | `--temperature` | `1.0` | below 1 sharpens the distribution, above 1 flattens it |
 | `--repetition-penalty` | `1.35` | pushes down tokens already generated |
 | `--seed` | `0` | a synthesis is reproducible from its seed |
-| `--max-tokens` | `1500` | cap per line; at 25 Hz that is a minute of speech |
-| `--backend`, `--device` | `auto` | see below |
+| `--max-tokens` | `1500` | cap per line; at 25 tokens per second that is a minute |
 
 **The repetition penalty is load-bearing, not a refinement.** Without it a run of
 the same token becomes self-reinforcing and the utterance never ends, until
@@ -72,12 +78,9 @@ the prompt rather than the sampler.
 
 The prosody encoder is Chinese-only (a Chinese RoBERTa) and its absence is a
 **warning, not a failure**: synthesis continues with zero prosody features,
-costing expressiveness rather than intelligibility. `--language en` is flatter
-for the same reason — its front-end has no per-character phoneme count to give.
-`--language ja` errors rather than guessing, because the wrong front-end produces
-fluent-sounding *wrong* audio, which is far harder to notice than a refusal.
+costing expressiveness rather than intelligibility.
 
-## Backends and devices
+## Backends
 
 One binary carries every backend it was built with, and `tts train` takes the
 same flag with the same meanings.
@@ -99,7 +102,7 @@ reason**, never a silent fallback — only `auto` substitutes.
 per second of speech, so a ten-second line is 250 sequential, launch-bound
 decoder steps. That is why a GPU matters here.
 
-## Fine-tuning (`tts train`)
+## Fine-tune a voice
 
 Two stages adapting different things, which explains most of the flags. **`s1`
 carries delivery** — pacing, emphasis, where a speaker breathes. **`s2` carries
@@ -108,8 +111,8 @@ seconds of reference audio it was prompted with. They write independent files, s
 either deploys without the other.
 
 A corpus is `<stem>.wav` beside `<stem>.txt` in one directory (`.mp3`, `.flac`,
-`.m4a`, `.ogg`, `.opus` read too; audio with no transcript is skipped with a
-warning). **`stt` is how the transcripts get written** — read them before
+`.m4a`, `.ogg` and `.opus` are read too; audio with no transcript is skipped with
+a warning). **`stt` is how the transcripts get written** — read them before
 training: a wrong transcript is the corpus-wide version of a wrong reference one.
 
 ```sh
@@ -128,16 +131,17 @@ cnhubert, quantiser and prosody BERT is the expensive half — then trains what 
 asked for, so expect an idle-looking pause at the start proportional to the
 corpus rather than to the epochs.
 
-| flag | default | what it does |
+| flag | default | |
 |---|---|---|
 | `-o`, `--out` | `models/voice` | stem; each stage appends `.s1` / `.s2` |
 | `-y` | off | overwrite an existing output instead of refusing |
 | `--stage` | `both` | `s1`, `s2` or `both` |
+| `-l`, `--language` | `zh` | language of the transcripts |
 | `-e`, `--epochs` | `10` | passes over the corpus |
 | `-b`, `--batch-size` | `1` | clips per step — accumulated, not padded, so raising it costs time rather than VRAM |
 | `--lr` / `--s2-lr` | `1e-5` / `1e-4` | per-stage learning rates: cross-entropy on a large transformer wants a smaller one than a warm-started GAN |
 | `--lr-final` | `0.1` | end-of-run LR as a fraction of the start; decays exponentially |
-| `--ema-frac` | `0.1` | EMA window as a fraction of the run; `0` saves raw weights |
+| `--ema-frac` | `0.1` | EMA window as a fraction of the run; `0` saves the raw weights |
 | `--max-tokens` | `1500` | **skip** clips longer than this, never truncate — a cut-off clip teaches an early stop |
 | `--segment-frames` | `32` | latent frames `s2` renders per step; trades VRAM against little else |
 | `--d-lr-ratio`, `--d-interval` | `1.0`, `1` | hold off an `s2` discriminator that is winning |
@@ -149,43 +153,36 @@ Each stage writes `<stem>.<s1|s2>.safetensors` — the weight **EMA**, markedly
 steadier on a small corpus and the one to deploy — beside a `.raw.safetensors`
 twin holding the live final-step weights. **`s1`'s loss means something on its
 own**: plain next-token cross-entropy, one model, one optimizer, one number, and
-it should fall and keep falling. `s2`'s is adversarial like `rvc train`'s, where
-`g` and `d` only have to stay balanced and `mel` is the number to watch.
+it should fall and keep falling. `s2`'s is adversarial, where `g` and `d` only
+have to stay balanced and `mel` is the number to watch.
 
-On a terminal a live dashboard plots them and **`q` stops early and saves**; the
-run's log goes to `train.log` beside the weights so it cannot scribble over the
-display. Off a TTY (or with `--no-tui`) logging is on stderr, and Ctrl-C stops
-and saves.
+On a terminal a live dashboard plots them and **`q` stops early and saves**. Off
+a TTY (or with `--no-tui`) logging is on stderr, and Ctrl-C stops and saves.
 
-## Where files live
+## Where files land
 
-Inference assets — cnhubert, `s1*.ckpt`, `s2G*.pth`, the prosody BERT — download
-once to a cache resolved in this order: `--cache-dir`, `$TTS_CACHE_DIR`,
-`$VOICE_CACHE_DIR`, `$XDG_CACHE_HOME/voice`, `~/.cache/voice`; `tts --help`
-prints the path it resolved. `--models` and `--prosody` name a local directory
-instead and download nothing. The `s2` discriminator base (`s2D*.pth`) is read
-only by training, so it lands beside the run in `<-o's directory>/pretrained/`
-rather than in the shared cache. **Nothing is ever written to a pipeline's output
-directory.**
+Assets split by who reads them. **Inference assets** (cnhubert, `s1*.ckpt`,
+`s2G*.pth`, the prosody BERT) are shared across every run, so they live in a
+cache — `--cache-dir`, else `TTS_CACHE_DIR`, else `VOICE_CACHE_DIR`, else
+`$XDG_CACHE_HOME/voice`, else `~/.cache/voice`, and `-h` prints whichever that
+resolves to. `--models` and `--prosody` name a directory instead and download
+nothing. **The `s2` discriminator base** (`s2D*.pth`) is read only by training and
+belongs to one run rather than to the machine, so it lands in
+`<out-dir>/pretrained/`. Everything else is written under the directory you
+invoked from, the training log `./train.log` included.
 
-`tts completions bash|zsh|fish|powershell|elvish` prints a completion script
-generated from the actual flags.
+## Limits
 
-## Reviewing the port
+**Chinese is the language that works fully.** `--language en` is intelligible but
+flatter: its front-end has no per-character phoneme count to give the prosody
+encoder, which is upstream's own behaviour. `--language ja` errors rather than
+guessing, because the wrong front-end produces fluent-sounding *wrong* audio,
+which is far harder to notice than a refusal. Mandarin readings that depend on
+grammar rather than on the word are still wrong; g2pw is the fix and is not
+written.
 
-There are no unit tests for the networks, and **weight coverage alone is not
-enough** — this repo has shipped a port that loaded at 100% and produced garbage.
-`burn-gptsovits`'s examples check coverage (`load`, `keys`) and arithmetic
-(`reconstruct`, which round-trips real audio and correlates the energy envelope
-at r = 0.91 against a 0.30 chance baseline); end to end is synthesise, then
-transcribe with `stt` and compare.
-
-```sh
-cargo run -p burn-gptsovits --example load -- sovits <s2G2333k.pth>    # 773/0
-cargo run -p burn-gptsovits --example keys -- --group <any checkpoint> # what a new one expects
-cargo run -p burn-gptsovits --example reconstruct -- \
-  <chinese-hubert-base/pytorch_model.bin> <s2G*.pth> <in.f32le@16k> <out.f32le@32k>
-```
-
-[`docs/gptsovits-architecture.pdf`](../../docs/gptsovits-architecture.pdf) is the
-long-form paper on what each block computes.
+Synthesis is per utterance, not streaming — `s1` finishes a line before `s2`
+renders it. The networks have no unit tests, and **weight coverage alone is not
+enough**: `burn-gptsovits`'s `load`, `keys` and `reconstruct` examples check
+coverage and arithmetic, and synthesising then transcribing with `stt` is the
+end-to-end check.
