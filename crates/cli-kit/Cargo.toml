@@ -13,3 +13,5 @@ clap.workspace = true
 clap_complete.workspace = true
 anyhow.workspace = true
 tracing-subscriber.workspace = true
+# For the Ctrl-C early-stop flag; every binary here already runs on tokio.
+tokio = { workspace = true }

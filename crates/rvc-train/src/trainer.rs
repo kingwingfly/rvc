@@ -15,10 +15,10 @@ use burn::tensor::{Int, Tensor, TensorData};
 use burn_rvc::{MultiPeriodDiscriminator, Synthesizer, SynthesizerConfig};
 
 use crate::TrainRequest;
-use crate::dataset::{CONTENT_DIM, Clip, HOP, Rng, clip_weights, sample_batch};
+use crate::dataset::{CONTENT_DIM, Clip, HOP, clip_weights, sample_batch};
 use burn_vits::{Spectral, SpectralConfig, disc_loss, feature_matching, gen_adv, kl, mel_l1};
 use train_kit::{
-    BestMeta, Checkpoint, Dashboard, accumulate, ema_update, human, materialize, scalar,
+    Best, Checkpoint, Dashboard, Rng, Schedule, accumulate, ema_update, human, materialize, scalar,
 };
 
 const SEGMENT_FRAMES: usize = 36; // 17280 samples / 480 hop
@@ -126,8 +126,6 @@ pub fn run<AB: AutodiffBackend>(
         .with_epsilon(1e-9)
         .with_weight_decay(0.01)
         .init::<AB, MultiPeriodDiscriminator<AB>>();
-    let base_lr = req.settings.lr;
-    let lr_final = req.settings.lr_final;
     let accum = req.settings.grad_accum.max(1);
     let d_lr_ratio = req.settings.d_lr_ratio;
     let d_interval = req.settings.d_interval.max(1);
@@ -137,14 +135,14 @@ pub fn run<AB: AutodiffBackend>(
     let steps_per_epoch = (total_frames / (batch * WINDOW_FRAMES)).max(1);
     let total_steps = req.settings.epochs as usize * steps_per_epoch;
 
-    // Derive the per-step EMA decay from a smoothing window = ema_frac of the run,
-    // so it stays sensible for any epoch count. `ema_frac == 0` disables EMA.
-    let ema_window = req.settings.ema_frac * total_steps as f64;
-    let ema_decay = if ema_window >= 1.0 {
-        (1.0 - 1.0 / ema_window).min(0.9999)
-    } else {
-        0.0
-    };
+    // LR decay and EMA window, both as fractions of the whole run so they stay
+    // sensible for any epoch count. `ema_frac == 0` disables the EMA.
+    let sched = Schedule::new(
+        req.settings.lr,
+        req.settings.lr_final,
+        req.settings.ema_frac,
+        total_steps,
+    );
     // Clip-sampling bias (None = uniform); computed once from each clip's SNR.
     let cdf = clip_weights(&clips, req.settings.snr_weight);
     tracing::info!(
@@ -156,9 +154,10 @@ pub fn run<AB: AutodiffBackend>(
         }
     );
     tracing::info!(
-        "sched: lr {base_lr:.1e} -> {:.1e}, ema over {:.0} steps{}{}",
-        base_lr * lr_final,
-        ema_window.max(0.0),
+        "sched: lr {:.1e} -> {:.1e}, ema over {:.0} steps{}{}",
+        req.settings.lr,
+        sched.final_lr(),
+        sched.ema_window,
         match d_lr_ratio {
             r if (r - 1.0).abs() < f64::EPSILON => String::new(),
             r => format!(", d-lr x{r}"),
@@ -176,37 +175,12 @@ pub fn run<AB: AutodiffBackend>(
     // Generator weight EMA (kept on the inner backend): averaged over the
     // adversarial oscillation, so cleaner than any single step, and what every
     // checkpoint deploys. `None` when disabled (`--ema-frac 0`).
-    let mut ema: Option<Synthesizer<AB::InnerBackend>> = (ema_decay > 0.0).then(|| net_g.valid());
+    let mut ema: Option<Synthesizer<AB::InnerBackend>> =
+        (sched.ema_decay > 0.0).then(|| net_g.valid());
 
     let out = Checkpoint::new(&req.out);
-
-    // Best-so-far checkpointing (on unless `--no-save-best`). The per-step mel is
-    // noisy enough that its minimum is mostly luck, so we compare the *mean* over a
-    // window. The cap matters more than the fraction: `total_steps` is the
-    // *scheduled* count, and a run that is stopped by hand — the way this trainer
-    // is meant to be used — would otherwise exit before its first window ever
-    // closed, leaving the in-loop save dead code.
-    let best = req.settings.save_best.then(|| out.best());
-    let best_window = (total_steps / 20).clamp(1, 50);
-    // Inherit the score the last run left, so a fresh process can only *improve* on
-    // it; starting from infinity makes every run's first window a clobber. A
-    // sidecar whose weights are gone is ignored — it would veto every save.
-    let prev = best
-        .as_ref()
-        .filter(|ck| ck.generator().exists())
-        .and_then(Checkpoint::load_meta);
-    let mut best_mel = prev.map_or(f32::INFINITY, |m| m.mel);
-    // `Some` only once this run has written one, which is what the closing report
-    // distinguishes: an inherited best is not evidence that this run produced one.
-    let mut best_step: Option<usize> = None;
-    let (mut win_sum, mut win_n) = (0.0f32, 0usize);
-    if let Some(m) = prev {
-        tracing::info!(
-            "best so far: mel {:.3} (step {}) from a prior run",
-            m.mel,
-            m.step
-        );
-    }
+    // Best-so-far checkpointing, on unless `--no-save-best`.
+    let mut best = Best::new(&out, req.settings.save_best, total_steps);
 
     let mut dash = Dashboard::new(
         req.settings.use_tui,
@@ -237,10 +211,7 @@ pub fn run<AB: AutodiffBackend>(
             break;
         }
         last_step = step;
-        // Exponential LR schedule over the whole run: base_lr at step 0 decaying
-        // to base_lr * lr_final at the final step (epoch-count independent).
-        let progress = step as f64 / total_steps.max(1) as f64;
-        let cur_lr = base_lr * lr_final.powf(progress);
+        let cur_lr = sched.lr(step);
         let update_d = step % d_interval == 0;
 
         // Accumulate over `accum` micro-batches per device before one optimizer
@@ -325,7 +296,7 @@ pub fn run<AB: AutodiffBackend>(
 
         // Track the EMA of the just-updated generator weights.
         if let Some(e) = ema.take() {
-            ema = Some(ema_update(e, &net_g, ema_decay));
+            ema = Some(ema_update(e, &net_g, sched.ema_decay));
         }
 
         // The step's only sync, now that every device and both optimizers have
@@ -336,33 +307,10 @@ pub fn run<AB: AutodiffBackend>(
         if !d_losses.is_empty() {
             last_d = d_losses.into_iter().map(scalar).sum::<f32>() * inv;
         }
+        // The dashboard also emits the throttled progress line, whether or not
+        // the TUI is up.
         dash.update(step, &[g_scalar, last_d, mel_scalar], cur_lr);
-        // Always log the losses (throttled). With the TUI, `init_logging` routes
-        // tracing to `{work_dir}/train.log` (not stderr), so this stays off the
-        // dashboard while still recording every run's curves.
-        if step % 20 == 0 || step + 1 == total_steps {
-            let done = step + 1;
-            let per_step = started.elapsed().as_secs_f64() / done as f64;
-            let eta = std::time::Duration::from_secs_f64(per_step * (total_steps - done) as f64);
-            tracing::info!(
-                "{done:>5}/{total_steps} {:>3}%  g {g_scalar:7.3}  d {last_d:6.3}  \
-                 mel {mel_scalar:7.3}  lr {cur_lr:.1e}  eta {}",
-                done * 100 / total_steps.max(1),
-                human(eta),
-            );
-        }
-
-        if let Some(ck) = &best {
-            win_sum += mel_scalar;
-            win_n += 1;
-            if win_n == best_window {
-                let mean = win_sum / win_n as f32;
-                (win_sum, win_n) = (0.0, 0);
-                if keep_best(ck, &mut best_mel, mean, step, ema.as_ref(), &net_g, &disc) {
-                    best_step = Some(step);
-                }
-            }
-        }
+        best.observe(step, mel_scalar, ema.as_ref(), &net_g, Some(&disc));
     }
 
     // Close the TUI (restores the terminal) before we log/save.
@@ -371,28 +319,7 @@ pub fn run<AB: AutodiffBackend>(
         tracing::info!("stopped early; saving current weights");
     }
 
-    // Judge the partial window an early stop (or a ragged tail) leaves behind, but
-    // only when there is enough of it to mean anything: a one-step mean carries
-    // many times the variance of a full window, so a lucky tail would otherwise
-    // unseat a genuinely better best. Under that bar it still stands when nothing
-    // is on disk — a stopped-early run must leave *something* rather than nothing.
-    if let Some(ck) = &best {
-        let trustworthy = win_n * 2 >= best_window || best_mel.is_infinite();
-        if win_n > 0 && trustworthy {
-            let mean = win_sum / win_n as f32;
-            if keep_best(
-                ck,
-                &mut best_mel,
-                mean,
-                last_step,
-                ema.as_ref(),
-                &net_g,
-                &disc,
-            ) {
-                best_step = Some(last_step);
-            }
-        }
-    }
+    best.finish(last_step, ema.as_ref(), &net_g, Some(&disc));
 
     out.save(ema.as_ref(), &net_g.valid(), Some(&disc.valid()))
         .context("saving trained weights")?;
@@ -407,58 +334,8 @@ pub fn run<AB: AutodiffBackend>(
         }
     );
     tracing::info!("       weights -> {}", out.generator().display());
-    if let Some(ck) = &best {
-        match best_step {
-            Some(step) => tracing::info!(
-                "       best mel {best_mel:.3} (step {step}) -> {}",
-                ck.generator().display()
-            ),
-            // A run that contributes no best is invisible otherwise: say plainly
-            // that this one added nothing, and whether anything is there at all.
-            None if best_mel.is_finite() => tracing::info!(
-                "       no new best this run; kept mel {best_mel:.3} in {}",
-                ck.generator().display()
-            ),
-            None => tracing::warn!(
-                "no best checkpoint was written (the run was too short to complete a window)"
-            ),
-        }
-    }
+    best.report();
     Ok(out.generator())
-}
-
-/// Save `ck` when `mean` beats `best`, reporting whether it did. `best` advances
-/// only once the whole family is on disk, so a failed write can't block a later
-/// minimum from being saved; the score sidecar is written last for the same
-/// reason — a later run must not inherit a best whose weights never landed.
-fn keep_best<AB: AutodiffBackend>(
-    ck: &Checkpoint,
-    best: &mut f32,
-    mean: f32,
-    step: usize,
-    ema: Option<&Synthesizer<AB::InnerBackend>>,
-    net_g: &Synthesizer<AB>,
-    disc: &MultiPeriodDiscriminator<AB>,
-) -> bool {
-    if mean.is_nan() || mean >= *best {
-        return false;
-    }
-    match ck.save(ema, &net_g.valid(), Some(&disc.valid())) {
-        Ok(()) => {
-            tracing::info!("       best mel {mean:.3} (step {step}) saved");
-            *best = mean;
-            if let Err(e) = ck.save_meta(BestMeta { mel: mean, step }) {
-                // The weights are the checkpoint; losing the score only costs the
-                // *next* run its memory of what to beat.
-                tracing::warn!("could not record the best score: {e:#}");
-            }
-            true
-        }
-        Err(e) => {
-            tracing::warn!("could not save best checkpoint: {e:#}");
-            false
-        }
-    }
 }
 
 /// Everything one micro-batch needs. A struct because the list is long enough

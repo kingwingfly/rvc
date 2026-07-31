@@ -187,23 +187,9 @@ fn resolve_backend(req: &TrainRequest) -> Result<TrainBackend> {
 /// Instantiate the resolved compute backend and hand off to [`trainer::run`].
 ///
 /// An *explicit* backend is never silently substituted: asking for one this
-/// build lacks, or a device it cannot see, is an error with a reason.
-/// Reject a device list with repeats, *after* resolution.
-///
-/// Checking the `--device` strings is not enough: `auto,gpu:0` are different specs
-/// that name device 0 twice, and on WebGPU `auto`, `vulkan` and `mps` all resolve
-/// to the default adapter. A repeat would silently double that device's share of
-/// the batch and its memory — which looks like training working.
-fn distinct<D: PartialEq + std::fmt::Debug>(devices: Vec<D>) -> Result<Vec<D>> {
-    for (i, d) in devices.iter().enumerate() {
-        anyhow::ensure!(
-            !devices[..i].contains(d),
-            "--device lists {d:?} more than once (different spellings can name one device)"
-        );
-    }
-    Ok(devices)
-}
-
+/// build lacks, or a device it cannot see, is an error with a reason. The
+/// resolved list then passes [`train_kit::distinct`], which is the only place a
+/// repeated device can still be caught — two spellings can name one GPU.
 fn dispatch(req: &TrainRequest, clips: Vec<dataset::Clip>) -> Result<PathBuf> {
     let backend = resolve_backend(req)?;
     let list = req
@@ -223,7 +209,7 @@ fn dispatch(req: &TrainRequest, clips: Vec<dataset::Clip>) -> Result<PathBuf> {
                 .iter()
                 .map(|d| burn_kit::libtorch_device(*d))
                 .collect::<burn_kit::Result<Vec<_>>>()?;
-            let devices = distinct(devices)?;
+            let devices = train_kit::distinct(devices)?;
             burn_kit::guard_init("tch", || {
                 trainer::run::<Autodiff<LibTorch<f32>>>(req, clips, &devices)
             })?
@@ -236,7 +222,7 @@ fn dispatch(req: &TrainRequest, clips: Vec<dataset::Clip>) -> Result<PathBuf> {
                 .iter()
                 .map(|d| burn_kit::cuda_device(*d))
                 .collect::<burn_kit::Result<Vec<_>>>()?;
-            let devices = distinct(devices)?;
+            let devices = train_kit::distinct(devices)?;
             burn_kit::guard_init("cuda", || {
                 trainer::run::<Autodiff<Cuda>>(req, clips, &devices)
             })?
@@ -249,7 +235,7 @@ fn dispatch(req: &TrainRequest, clips: Vec<dataset::Clip>) -> Result<PathBuf> {
                 .iter()
                 .map(|d| burn_kit::wgpu_device(*d))
                 .collect::<burn_kit::Result<Vec<_>>>()?;
-            let devices = distinct(devices)?;
+            let devices = train_kit::distinct(devices)?;
             burn_kit::guard_init("wgpu", || {
                 trainer::run::<Autodiff<Wgpu>>(req, clips, &devices)
             })?
@@ -297,17 +283,6 @@ mod tests {
             devices: devices.to_vec(),
             stop: Arc::new(AtomicBool::new(false)),
         }
-    }
-
-    #[test]
-    fn a_repeated_device_is_rejected_after_resolution() {
-        // Checking the `--device` strings would miss it: `auto` and `gpu:0` are
-        // different specs naming one device, and on WebGPU `auto`, `vulkan` and
-        // `mps` all collapse to the default adapter. A repeat would silently
-        // double that device's share of the batch — and its memory.
-        assert!(distinct(vec![0, 1, 2]).is_ok());
-        let err = distinct(vec![0, 1, 0]).unwrap_err().to_string();
-        assert!(err.contains("more than once"), "{err}");
     }
 
     #[test]

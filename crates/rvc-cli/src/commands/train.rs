@@ -6,10 +6,6 @@
 //! it directly (`rvc convert --backend burn`), or run the standalone `export/`
 //! uv script to convert it to ONNX — the only Python the toolkit uses.
 
-use std::io::IsTerminal;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use anyhow::{Context, Result};
 use rvc_train::{TrainRequest, TrainSettings};
 
@@ -18,19 +14,8 @@ use crate::args::TrainArgs;
 pub async fn run(args: TrainArgs) -> Result<()> {
     // The dashboard runs only on a real terminal; otherwise plain logs. This
     // must match main.rs's decision to route logs off stderr.
-    let use_tui = !args.no_tui && std::io::stdout().is_terminal();
-
-    // Early stop: Ctrl-C flips this flag; the trainer saves the model and exits.
-    // (With the TUI active, Ctrl-C is captured as a key — stop with `q` there.)
-    let stop = Arc::new(AtomicBool::new(false));
-    {
-        let stop = stop.clone();
-        tokio::spawn(async move {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                stop.store(true, Ordering::Relaxed);
-            }
-        });
-    }
+    let use_tui = cli_kit::use_tui(args.no_tui);
+    let stop = cli_kit::stop_on_ctrl_c();
 
     let cache = args.cache_dir.as_deref();
 
