@@ -11,25 +11,15 @@ pub use train::{Stage, TrainArgs};
 
 /// Start logging, sending a dashboard run's output to a file.
 ///
-/// The TUI owns the terminal for the length of a fine-tune, so tracing on stderr
-/// would scribble over it. Mirrors `rvc-cli`'s helper, and lives here rather
-/// than in either binary so `tts` and `voice` cannot disagree about it.
+/// Lives here rather than in either binary so `tts` and `voice` cannot disagree
+/// about it. All this engine decides is the path; `cli_kit::init_logging` knows
+/// when a TUI is about to take the terminal and what to tell the user.
 pub fn init_logging(train: Option<&TrainArgs>) {
-    use std::io::IsTerminal;
-
-    let log_file = train
-        .filter(|a| !a.no_tui && std::io::stdout().is_terminal())
+    cli_kit::init_logging(train.filter(|a| !a.no_tui).map(|a| {
         // Beside the weights, which is the one directory the user already named.
-        .map(|a| {
-            a.out
-                .parent()
-                .unwrap_or(std::path::Path::new(""))
-                .join("train.log")
-        });
-    if cli_kit::init_logging(log_file.as_deref()) {
-        eprintln!(
-            "training dashboard active — logs: {}",
-            log_file.expect("a path was used").display()
-        );
-    }
+        a.out
+            .parent()
+            .unwrap_or(std::path::Path::new(""))
+            .join("train.log")
+    }));
 }

@@ -8,8 +8,6 @@
 pub mod args;
 pub mod commands;
 
-use std::io::IsTerminal;
-
 use anyhow::Result;
 
 use args::{RvcCommand, TrainArgs};
@@ -26,16 +24,13 @@ pub async fn run_rvc(cmd: RvcCommand) -> Result<()> {
 
 /// Initialise tracing for a voice-conversion command.
 ///
-/// Everything goes to stderr, except `train` with its dashboard up: the TUI owns
-/// the terminal, so logs are redirected to `{work_dir}/train.log` instead.
+/// Everything goes to stderr, except `train` with its dashboard up: that one
+/// gets `{work_dir}/train.log`, which is the only path this engine has to
+/// choose — `cli_kit` owns the rest of the decision.
 pub fn init_logging(train: Option<&TrainArgs>) {
-    let log_file = train
-        .filter(|a| !a.no_tui && std::io::stdout().is_terminal())
-        .map(|a| a.work_dir.join("train.log"));
-    if cli_kit::init_logging(log_file.as_deref()) {
-        eprintln!(
-            "training dashboard active — logs: {}",
-            log_file.expect("a path was used").display()
-        );
-    }
+    cli_kit::init_logging(
+        train
+            .filter(|a| !a.no_tui)
+            .map(|a| a.work_dir.join("train.log")),
+    );
 }
