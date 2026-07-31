@@ -234,21 +234,6 @@ pub async fn run(args: TtsArgs) -> Result<()> {
 
     out.flush().await.context("final flush")?;
     tracing::info!("{spoken} lines");
-
-    // Do not unwind the models. Dropping an ONNX Runtime session on the CUDA
-    // execution provider aborts the process with glibc's "corrupted
-    // double-linked list" *after* every sample has been written — harmless to
-    // the audio, fatal to the exit code, which for a filter in a pipeline is the
-    // part that gets checked.
-    //
-    // The sessions themselves now leak by construction (`tts_core`'s
-    // `OnnxProsody` and `OnnxEngine` hold theirs in `ManuallyDrop`), because
-    // doing it *here* only ever covered the successful path: every early return
-    // above still unwound them, so `--backend onnx` against a directory with no
-    // export reported the right error and then exited 134. This line therefore
-    // covers only the Burn models now, and stays because that is the shape the
-    // exit code was verified in.
-    std::mem::forget(model);
     Ok(())
 }
 
