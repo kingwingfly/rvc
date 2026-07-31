@@ -107,10 +107,10 @@ pub struct ModelOpts {
     /// RMVPE F0 ONNX [default: auto-downloaded from Hugging Face].
     #[arg(long)]
     pub rmvpe: Option<PathBuf>,
-    /// Cache directory for downloaded assets
-    /// [default: the Hugging Face cache, e.g. ~/.cache/huggingface/hub].
-    #[arg(long)]
-    pub cache_dir: Option<PathBuf>,
+    /// Directory the downloaded models are cached in. Shared by every engine
+    /// unless `$RVC_CACHE_DIR` (or `$VOICE_CACHE_DIR`) says otherwise.
+    #[arg(long, default_value_os_t = hub_kit::cache_dir_for("RVC_CACHE_DIR"))]
+    pub cache_dir: PathBuf,
     /// Speaker id fed to the generator (single-speaker models use 0).
     #[arg(long, default_value_t = 0)]
     pub speaker_id: i64,
@@ -215,10 +215,10 @@ pub enum ModelsCommand {
 
 #[derive(Debug, Args)]
 pub struct ModelsDownloadArgs {
-    /// Cache directory for downloaded assets
-    /// [default: the Hugging Face cache, e.g. ~/.cache/huggingface/hub].
-    #[arg(long)]
-    pub cache_dir: Option<PathBuf>,
+    /// Directory the downloaded models are cached in. Shared by every engine
+    /// unless `$RVC_CACHE_DIR` (or `$VOICE_CACHE_DIR`) says otherwise.
+    #[arg(long, default_value_os_t = hub_kit::cache_dir_for("RVC_CACHE_DIR"))]
+    pub cache_dir: PathBuf,
     /// Override the ContentVec repo as `owner/name:file`
     /// [default: the toolkit's ContentVec ONNX on Hugging Face].
     #[arg(long)]
@@ -361,9 +361,10 @@ pub struct TrainArgs {
     /// RMVPE F0 ONNX [default: auto-downloaded].
     #[arg(long)]
     pub rmvpe: Option<PathBuf>,
-    /// Cache dir for downloaded feature-extractor assets [default: HF cache].
-    #[arg(long)]
-    pub cache_dir: Option<PathBuf>,
+    /// Directory the downloaded models are cached in. Shared by every engine
+    /// unless `$RVC_CACHE_DIR` (or `$VOICE_CACHE_DIR`) says otherwise.
+    #[arg(long, default_value_os_t = hub_kit::cache_dir_for("RVC_CACHE_DIR"))]
+    pub cache_dir: PathBuf,
     /// Disable the TUI dashboard and log to stderr (auto-off when not a TTY).
     #[arg(long)]
     pub no_tui: bool,

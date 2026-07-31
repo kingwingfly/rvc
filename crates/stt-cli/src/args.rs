@@ -43,9 +43,10 @@ pub struct SttArgs {
     /// [default: openai/whisper-large-v3-turbo].
     #[arg(long, value_name = "OWNER/NAME")]
     pub repo: Option<String>,
-    /// Cache directory for downloaded assets [default: the Hugging Face cache].
-    #[arg(long)]
-    pub cache_dir: Option<PathBuf>,
+    /// Directory the downloaded models are cached in. Shared by every engine
+    /// unless `$STT_CACHE_DIR` (or `$VOICE_CACHE_DIR`) says otherwise.
+    #[arg(long, default_value_os_t = hub_kit::cache_dir_for("STT_CACHE_DIR"))]
+    pub cache_dir: PathBuf,
     /// Output format.
     #[arg(long, value_enum, default_value_t = Format::Text)]
     pub format: Format,
@@ -95,7 +96,7 @@ pub async fn run(args: SttArgs) -> Result<()> {
         Some(dir) => dir.clone(),
         None => {
             tracing::info!("resolving Whisper weights from Hugging Face...");
-            hub_kit::fetch_whisper(args.repo.as_deref(), args.cache_dir.as_deref())
+            hub_kit::fetch_whisper(args.repo.as_deref(), &args.cache_dir)
                 .await
                 .context("failed to fetch the Whisper model")?
                 .dir
