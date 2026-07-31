@@ -1,8 +1,9 @@
 //! Backend selection for synthesis.
 //!
-//! Same shape as `stt-cli`'s: an enum, an `auto` that looks at the model
-//! directory first and defers to [`burn_kit::auto_backend`] otherwise, and a
-//! loader that hands back a [`Synthesizer`] so nothing here names a Burn type.
+//! The enum, its aliases and the `auto` rule are [`cli_kit::Backend`], shared
+//! with every other binary; what is local is whether *these* models are an ONNX
+//! export, and a loader that hands back a [`Synthesizer`] so nothing here names
+//! a Burn type.
 //!
 //! The two halves of this file resolve the same `--backend` differently, and
 //! deliberately. [`load`] erases the runtime behind `tts_core::Engine`, because
@@ -15,27 +16,8 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use clap::ValueEnum;
+use cli_kit::Backend;
 use tts_core::{Engine, ProsodyEncoder, Synthesizer};
-
-/// Which runtime performs synthesis.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
-pub enum TtsBackend {
-    /// Pick by what the model directory holds — an ONNX export runs on ONNX
-    /// Runtime, the original checkpoints run on the fastest available Burn
-    /// backend (LibTorch on a GPU, else CubeCL/CUDA, else WebGPU, else LibTorch
-    /// on CPU).
-    #[default]
-    Auto,
-    /// ONNX Runtime, from `export/export_gptsovits.py`.
-    Onnx,
-    #[value(name = "cuda", alias = "burn-cuda")]
-    Cuda,
-    #[value(name = "tch", alias = "libtorch", alias = "burn-tch")]
-    Tch,
-    #[value(name = "wgpu", alias = "webgpu", alias = "burn-wgpu")]
-    Wgpu,
-}
 
 /// Everything a synthesizer is loaded from.
 pub struct ModelPaths<'a> {
@@ -53,23 +35,11 @@ pub struct ModelPaths<'a> {
 pub fn load(
     paths: ModelPaths<'_>,
     prosody: Option<Box<dyn ProsodyEncoder>>,
-    backend: TtsBackend,
+    backend: Backend,
     device: burn_kit::DeviceSpec,
 ) -> Result<Synthesizer> {
-    let backend = match backend {
-        // Weights first, hardware second — the same order `stt` and `rvc` use,
-        // and for the same reason: an ONNX export cannot run on Burn and a
-        // checkpoint cannot run on ONNX Runtime, so the files decide before
-        // preference does.
-        TtsBackend::Auto if has_onnx_export(paths.dir) => TtsBackend::Onnx,
-        TtsBackend::Auto => match burn_kit::auto_backend() {
-            burn_kit::AutoBackend::LibTorch => TtsBackend::Tch,
-            burn_kit::AutoBackend::Cuda => TtsBackend::Cuda,
-            burn_kit::AutoBackend::Wgpu => TtsBackend::Wgpu,
-        },
-        explicit => explicit,
-    };
-    tracing::info!("loading GPT-SoVITS ({backend:?}, device {device})");
+    let backend = backend.resolve(has_onnx_export(paths.dir));
+    tracing::info!("loading GPT-SoVITS ({backend}, device {device})");
 
     // Each arm builds one engine, boxes it and stops there; the synthesizer
     // around it is the same object either way.
@@ -90,37 +60,35 @@ pub fn load(
 
     let engine: Box<dyn Engine> = match backend {
         #[cfg(feature = "tch")]
-        TtsBackend::Tch => burn_engine!(
+        Backend::Tch => burn_engine!(
             burn::backend::LibTorch<f32>,
             burn_kit::libtorch_device(device)?,
             "tch",
             "LibTorch"
         ),
         #[cfg(feature = "cuda")]
-        TtsBackend::Cuda => burn_engine!(
+        Backend::Cuda => burn_engine!(
             burn::backend::Cuda,
             burn_kit::cuda_device(device)?,
             "cuda",
             "CubeCL/CUDA"
         ),
         #[cfg(feature = "wgpu")]
-        TtsBackend::Wgpu => burn_engine!(
+        Backend::Wgpu => burn_engine!(
             burn::backend::Wgpu,
             burn_kit::wgpu_device(device)?,
             "wgpu",
             "WebGPU"
         ),
         #[cfg(feature = "onnx")]
-        TtsBackend::Onnx => Box::new(
+        Backend::Onnx => Box::new(
             tts_core::OnnxEngine::load(paths.dir)
                 .context("failed to load GPT-SoVITS on ONNX Runtime")?,
         ),
-        TtsBackend::Auto => unreachable!("resolved above"),
+        Backend::Auto => unreachable!("resolved above"),
         // Only reachable on a `--no-default-features` build.
         #[allow(unreachable_patterns)]
-        other => anyhow::bail!(
-            "this binary was built without the {other:?} backend (rebuild with `--features …`)"
-        ),
+        other => return Err(other.unavailable()),
     };
     Ok(Synthesizer::new(engine, prosody))
 }
@@ -159,20 +127,23 @@ pub struct TrainInputs<'a> {
 }
 
 impl TrainInputs<'_> {
-    /// The checkpoint family one stage writes: `models/mine` -> `models/mine.s1`.
-    ///
-    /// Built by appending to the file name rather than with
-    /// [`Path::with_extension`], which sees only the last dot and would turn
-    /// `voice.v2` into `voice.s1`, silently merging two runs' outputs.
     fn checkpoint(&self, stage: &str) -> train_kit::Checkpoint {
-        let name = self
-            .out
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "voice".into());
-        let dir = self.out.parent().unwrap_or(Path::new(""));
-        train_kit::Checkpoint::new(&dir.join(format!("{name}.{stage}")))
+        checkpoint(self.out, stage)
     }
+}
+
+/// The checkpoint family one stage writes: `models/mine` -> `models/mine.s1`.
+///
+/// Built by appending to the file name rather than with
+/// [`Path::with_extension`], which sees only the last dot and would turn
+/// `voice.v2` into `voice.s1`, silently merging two runs' outputs.
+pub fn checkpoint(out: &Path, stage: &str) -> train_kit::Checkpoint {
+    let name = out
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "voice".into());
+    let dir = out.parent().unwrap_or(Path::new(""));
+    train_kit::Checkpoint::new(&dir.join(format!("{name}.{stage}")))
 }
 
 /// Prepare the corpus once and fine-tune whichever stages were asked for.
@@ -182,24 +153,18 @@ impl TrainInputs<'_> {
 /// clip for nothing.
 pub fn train(
     inputs: TrainInputs<'_>,
-    backend: TtsBackend,
+    backend: Backend,
     devices: &[burn_kit::DeviceSpec],
 ) -> Result<()> {
     anyhow::ensure!(!devices.is_empty(), "no --device given");
-    let backend = match backend {
-        TtsBackend::Auto => match burn_kit::auto_backend() {
-            burn_kit::AutoBackend::LibTorch => TtsBackend::Tch,
-            burn_kit::AutoBackend::Cuda => TtsBackend::Cuda,
-            burn_kit::AutoBackend::Wgpu => TtsBackend::Wgpu,
-        },
-        explicit => explicit,
-    };
+    // Nothing on disk to consult: there is no ONNX training path to resolve to.
+    let backend = backend.resolve(false);
     let list = devices
         .iter()
         .map(|d| d.to_string())
         .collect::<Vec<_>>()
         .join(", ");
-    tracing::info!("fine-tuning ({backend:?}, devices: {list})");
+    tracing::info!("fine-tuning ({backend}, devices: {list})");
 
     macro_rules! train {
         ($inner:ty, $resolve:expr, $name:literal) => {{
@@ -228,15 +193,6 @@ pub fn train(
                     inputs.stage.wants_s2(),
                     &device,
                 )?;
-                // Never unwound, for the reason `args::run` gives at its own
-                // `mem::forget`: dropping an ONNX Runtime CUDA session beside a
-                // CUDA Burn backend corrupts the heap, and the abort lands at
-                // exit — after the fine-tuned weights are safely on disk, which
-                // makes it look like training crashed when it did not. Verified
-                // both ways: this same run without `--prosody` exits 0.
-                // The cost is the encoder's memory held for the rest of the run;
-                // it is inference-only and idle from here on.
-                std::mem::forget(prosody);
                 Ok(clips)
             })??;
 
@@ -272,28 +228,26 @@ pub fn train(
 
     match backend {
         #[cfg(feature = "tch")]
-        TtsBackend::Tch => train!(
+        Backend::Tch => train!(
             burn::backend::LibTorch<f32>,
             burn_kit::libtorch_device,
             "tch"
         ),
         #[cfg(feature = "cuda")]
-        TtsBackend::Cuda => train!(burn::backend::Cuda, burn_kit::cuda_device, "cuda"),
+        Backend::Cuda => train!(burn::backend::Cuda, burn_kit::cuda_device, "cuda"),
         #[cfg(feature = "wgpu")]
-        TtsBackend::Wgpu => train!(burn::backend::Wgpu, burn_kit::wgpu_device, "wgpu"),
+        Backend::Wgpu => train!(burn::backend::Wgpu, burn_kit::wgpu_device, "wgpu"),
         // Not "unsupported yet": ONNX Runtime has no training path at all, and
         // the graphs `--backend onnx` runs are what a fine-tune is *exported to*
         // afterwards. Saying so is more use than the generic message below.
-        TtsBackend::Onnx => anyhow::bail!(
+        Backend::Onnx => anyhow::bail!(
             "ONNX Runtime cannot train — fine-tune on a Burn backend \
              (`--backend auto|cuda|tch|wgpu`), then export the result with \
              `export/export_gptsovits.py --s1/--s2 <weights>` to run it on ONNX Runtime"
         ),
-        TtsBackend::Auto => unreachable!("resolved above"),
+        Backend::Auto => unreachable!("resolved above"),
         #[allow(unreachable_patterns)]
-        other => anyhow::bail!(
-            "this binary was built without the {other:?} backend (rebuild with `--features …`)"
-        ),
+        other => return Err(other.unavailable()),
     }
     Ok(())
 }

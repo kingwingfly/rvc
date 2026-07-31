@@ -13,9 +13,34 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Context, Result};
 use rvc_train::{TrainRequest, TrainSettings};
 
-use crate::args::TrainArgs;
+use crate::args::{Backend, TrainArgs};
+
+/// The Burn backend a `--backend` choice names, rejecting the one that cannot
+/// train.
+///
+/// `--backend` is one enum across the whole toolkit, so `onnx` parses here too;
+/// it just has nowhere to go. Saying that beats the generic "unsupported", since
+/// ONNX Runtime has no training path at all and the graphs it runs are what a
+/// finished model is *exported to* afterwards.
+fn train_backend(backend: Backend) -> Result<rvc_train::TrainBackend> {
+    Ok(match backend {
+        Backend::Auto => rvc_train::TrainBackend::Auto,
+        Backend::Cuda => rvc_train::TrainBackend::Cuda,
+        Backend::Tch => rvc_train::TrainBackend::LibTorch,
+        Backend::Wgpu => rvc_train::TrainBackend::Wgpu,
+        Backend::Onnx => anyhow::bail!(
+            "ONNX Runtime cannot train — train on a Burn backend \
+             (`--backend auto|cuda|tch|wgpu`), then convert the result with \
+             `export/export_onnx.py` to run it on ONNX Runtime"
+        ),
+    })
+}
 
 pub async fn run(args: TrainArgs) -> Result<()> {
+    // Before anything is fetched: a backend that cannot train should not cost a
+    // model download first.
+    let backend = train_backend(args.backend)?;
+
     // The dashboard runs only on a real terminal; otherwise plain logs. This
     // must match main.rs's decision to route logs off stderr.
     let use_tui = !args.no_tui && std::io::stdout().is_terminal();
@@ -32,7 +57,18 @@ pub async fn run(args: TrainArgs) -> Result<()> {
         });
     }
 
-    let cache = args.cache_dir.as_deref();
+    // Before anything is fetched, decoded or loaded: a run that would replace an
+    // earlier voice must cost a second to refuse, not an hour of GPU. `--resume`
+    // is the case where overwriting is the whole point.
+    let family = train_kit::Checkpoint::new(&args.out);
+    let ema = args.ema_frac > 0.0;
+    let mut planned = family.members(ema, true);
+    if !args.no_save_best {
+        planned.extend(family.best().members(ema, true));
+    }
+    train_kit::ensure_absent(planned, args.yes || args.resume.is_some())?;
+
+    let cache = args.cache_dir.as_path();
 
     let content = match &args.content {
         Some(p) => p.clone(),
@@ -53,15 +89,40 @@ pub async fn run(args: TrainArgs) -> Result<()> {
         }
     };
 
+    // The bases are training input, not a frozen asset, so they land in
+    // `pretrained/` beside the run's output rather than in the shared cache.
+    // Both short-circuits matter: `--no-pretrained` wants no warm start, and
+    // `--resume` continues from weights that already exist — a base would be
+    // loaded and immediately overwritten. Neither may cost a download.
+    let auto_pretrained = !args.no_pretrained && args.resume.is_none();
+    let base_dir = hub_kit::pretrained_dir(&args.out);
+    let pretrained_g = match &args.pretrained_g {
+        Some(p) => Some(p.clone()),
+        None if auto_pretrained => Some(
+            hub_kit::fetch_pretrained(&hub_kit::default_pretrained_g(), &base_dir)
+                .await
+                .context("failed to fetch the generator base (override with --pretrained-g, or pass --no-pretrained to train from scratch)")?,
+        ),
+        None => None,
+    };
+    let pretrained_d = match &args.pretrained_d {
+        Some(p) => Some(p.clone()),
+        None if auto_pretrained => Some(
+            hub_kit::fetch_pretrained(&hub_kit::default_pretrained_d(), &base_dir)
+                .await
+                .context("failed to fetch the discriminator base (override with --pretrained-d, or pass --no-pretrained to train from scratch)")?,
+        ),
+        None => None,
+    };
+
     let req = TrainRequest {
         data: args.data,
         out: args.out.clone(),
-        work_dir: args.work_dir,
         content,
         rmvpe,
         resume: args.resume,
-        pretrained_g: args.pretrained_g,
-        pretrained_d: args.pretrained_d,
+        pretrained_g,
+        pretrained_d,
         settings: TrainSettings {
             sample_rate: args.model_sr,
             epochs: args.epochs,
@@ -77,7 +138,7 @@ pub async fn run(args: TrainArgs) -> Result<()> {
             save_best: !args.no_save_best,
             use_tui,
         },
-        backend: args.backend.into(),
+        backend,
         devices: args.device,
         stop,
     };

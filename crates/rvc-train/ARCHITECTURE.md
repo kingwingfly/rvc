@@ -54,7 +54,7 @@ produces the `phone/phone_lengths/pitch/pitchf/ds/rnd → audio` graph that
    flips it and the loop stops and saves. Off-TTY (or `--no-tui`), it logs to
    stderr and **Ctrl-C** (a SIGINT flag threaded through `TrainRequest.stop`)
    stops and saves. When the TUI is on, the CLI routes `tracing` logs to
-   `{work-dir}/train.log` so they don't corrupt the display.
+   `./train.log` so they don't corrupt the display.
 
    Notes:
    - Warm-start from RVC's `assets/pretrained_v2/f0G48k.pth` / `f0D48k.pth` is
