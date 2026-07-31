@@ -1,37 +1,36 @@
 //! `rvc` — CLI for RVC voice conversion.
 //!
-//! Subcommands:
-//! - `convert` — batch-convert mp3 files to the target timbre (WAV out).
-//! - `serve`   — realtime Unix filter: raw f32le PCM stdin -> stdout.
-//! - `models`  — prefetch the shared ONNX assets from Hugging Face.
-//! - `train`   — train an RVC generator natively in Rust (burn).
+//! The bare invocation is the Unix filter: raw f32le mono PCM at 16 kHz on
+//! stdin, converted PCM on stdout. Beside it sit the subcommands — `convert`
+//! (batch files to WAV), `train`, `preprocess`, `models` and `completions`.
 //!
-//! This is the voice-conversion tool on its own. The `voice` binary hosts these
-//! same subcommands under `voice rvc …`, alongside `stt` and `tts`; install
+//! This is the voice-conversion tool on its own. The `voice` binary hosts the
+//! same command tree under `voice rvc …`, alongside `stt` and `tts`; install
 //! whichever matches what you need.
 //!
-//! Logs go to **stderr** so `serve`'s stdout carries only PCM — except during
+//! Logs go to **stderr** so the filter's stdout carries only PCM — except during
 //! `train` with the TUI dashboard, where they go to `./train.log` so they don't
 //! corrupt the display.
 
 use anyhow::Result;
-use clap::{CommandFactory, Parser};
-use rvc_cli::args::{Cli, Command, RvcCommand};
-use rvc_cli::commands;
+use clap::Parser;
+use rvc_cli::args::{RvcCli, RvcCommand};
+
+/// rvc — RVC voice conversion: f32le mono PCM @16 kHz on stdin, converted PCM
+/// on stdout.
+#[derive(Debug, Parser)]
+#[command(name = "rvc", version, about)]
+struct Cli {
+    #[command(flatten)]
+    rvc: RvcCli,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    rvc_cli::init_logging(match &cli.command {
-        Command::Rvc(c) => match c.as_ref() {
-            RvcCommand::Train(a) => Some(a),
-            _ => None,
-        },
+    rvc_cli::init_logging(match &cli.rvc.command {
+        Some(RvcCommand::Train(a)) => Some(a.as_ref()),
         _ => None,
     });
-    match cli.command {
-        Command::Rvc(c) => rvc_cli::run_rvc(*c).await,
-        Command::Models(a) => commands::models::run(a).await,
-        Command::Completions(a) => cli_kit::completions(a, Cli::command()),
-    }
+    rvc_cli::run::<Cli>(cli.rvc).await
 }

@@ -34,7 +34,7 @@ use clap::{Args, ValueEnum};
 use tts_train::{S1Settings, S2Settings};
 
 use crate::args::Lang;
-use crate::backend::TtsBackend;
+use cli_kit::Backend;
 
 /// Which half of the model to adapt.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
@@ -77,9 +77,23 @@ pub struct TrainArgs {
     /// Directory holding the ONNX prosody encoder [default: auto-downloaded].
     #[arg(long)]
     pub prosody: Option<PathBuf>,
-    /// Cache directory for downloaded assets [default: the Hugging Face cache].
+    /// `s2` discriminator base to warm-start from [default:
+    /// `<-o's directory>/pretrained/s2D2333k.pth`, downloaded on first use].
+    /// Only `--stage s2` and `--stage both` read one.
+    #[arg(long, conflicts_with = "no_pretrained")]
+    pub pretrained_d: Option<PathBuf>,
+    /// Train `s2`'s discriminator from scratch, downloading no base. A fresh
+    /// adversary spends its early steps learning what real audio is instead of
+    /// critiquing this voice, so this is rarely what you want. The `s1` and
+    /// `s2` generators are warm-started regardless — fine-tuning is what they
+    /// are for.
     #[arg(long)]
-    pub cache_dir: Option<PathBuf>,
+    pub no_pretrained: bool,
+
+    /// Directory the downloaded models are cached in. Shared by every engine
+    /// unless `$TTS_CACHE_DIR` (or `$VOICE_CACHE_DIR`) says otherwise.
+    #[arg(long, default_value_os_t = hub_kit::cache_dir_for("TTS_CACHE_DIR"))]
+    pub cache_dir: PathBuf,
     /// Language of the transcripts.
     #[arg(short, long, value_enum, default_value_t = Lang::Zh)]
     pub language: Lang,
@@ -126,9 +140,10 @@ pub struct TrainArgs {
     /// Overwrite weights already at `-o` instead of refusing to start.
     #[arg(short = 'y', long)]
     pub yes: bool,
-    /// Compute backend: `auto`, `cuda`, `tch` (`libtorch`) or `wgpu`.
-    #[arg(long, value_enum, default_value_t = TtsBackend::Auto)]
-    pub backend: TtsBackend,
+    /// Compute backend. All three Burn backends train, and the saved weights are
+    /// the same whichever you pick; `onnx` cannot train at all.
+    #[arg(long, value_enum, default_value_t = Backend::Auto)]
+    pub backend: Backend,
     /// Compute device(s): `auto`, `cpu`, `gpu`, `gpu:N`, `mps` or `vulkan`.
     /// Comma-separate for data-parallel training — the first is the master.
     #[arg(
@@ -167,14 +182,35 @@ pub async fn run(args: TrainArgs) -> Result<()> {
 
     let dir = match &args.model_dir {
         Some(dir) => dir.clone(),
-        None => hub_kit::fetch_gptsovits(args.cache_dir.as_deref())
+        None => hub_kit::fetch_gptsovits(&args.cache_dir)
             .await
             .context("failed to fetch the GPT-SoVITS models")?,
     };
     let paths = hub_kit::gptsovits_paths(&dir)?;
+
+    // `s1` and `s2G` are inference weights and stay in the cache; the
+    // discriminator is training-only, so it lands in `pretrained/` beside the
+    // run's output. An explicit path wins, a copy already sitting in the model
+    // directory is used as-is rather than downloaded again, and
+    // `--no-pretrained` (or a run that never reaches `s2`) fetches nothing.
+    let s2d = match (&args.pretrained_d, args.stage.wants_s2() && !args.no_pretrained) {
+        (Some(p), _) => Some(p.clone()),
+        (None, false) => None,
+        (None, true) => match paths.s2d.clone() {
+            Some(p) => Some(p),
+            None => Some(
+                hub_kit::fetch_pretrained(
+                    &hub_kit::default_gptsovits_s2d(),
+                    &hub_kit::pretrained_dir(&args.out),
+                )
+                .await
+                .context("failed to fetch the s2 discriminator base (override with --pretrained-d, or pass --no-pretrained to train it from scratch)")?,
+            ),
+        },
+    };
     let prosody_dir = match &args.prosody {
         Some(dir) => Some(dir.clone()),
-        None => hub_kit::fetch_prosody_bert(None, args.cache_dir.as_deref())
+        None => hub_kit::fetch_prosody_bert(None, &args.cache_dir)
             .await
             .ok(),
     };
@@ -227,7 +263,7 @@ pub async fn run(args: TrainArgs) -> Result<()> {
                 hubert: &paths.hubert,
                 s1: &paths.s1,
                 s2: &paths.s2,
-                s2d: paths.s2d.as_deref(),
+                s2d: s2d.as_deref(),
                 prosody: prosody_dir.as_deref(),
                 pairs: &pairs,
                 language: args.language.into(),

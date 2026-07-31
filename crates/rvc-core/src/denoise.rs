@@ -13,7 +13,7 @@
 //! On an ASMR-like breath-over-hiss signal this removes ~75 % of the hiss while
 //! preserving content energy and high-frequency "crispness" to within ~1 %,
 //! with none of the warbly musical-noise `afftdn` leaves behind — and it runs
-//! ~12× faster than realtime, so `serve` stays realtime.
+//! ~12× faster than realtime, so the streaming filter stays realtime.
 //!
 //! The heavy lifting lives in [`audio_kit::AudioFilter`]; this is a thin,
 //! streaming wrapper that keeps the same `process`/`flush`/`reset` shape the
