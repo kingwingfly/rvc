@@ -62,28 +62,77 @@ pub fn default_rmvpe() -> ModelRef {
     ModelRef::new("lj1995", "VoiceConversionWebUI", "rmvpe.onnx")
 }
 
-/// Resolve the cache directory: `$RVC_CACHE_DIR`, else `$XDG_CACHE_HOME/rvc`,
-/// else `~/.cache/rvc`.
+/// The toolkit-wide cache directory: `$VOICE_CACHE_DIR`, else
+/// `$XDG_CACHE_HOME/voice`, else `~/.cache/voice`.
 pub fn default_cache_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("RVC_CACHE_DIR") {
-        return PathBuf::from(dir);
+    resolve_cache_dir(None, |k| std::env::var_os(k))
+}
+
+/// The same, consulting one engine's own variable first — `RVC_CACHE_DIR`,
+/// `STT_CACHE_DIR`, `TTS_CACHE_DIR` — so a single engine's assets can be kept
+/// somewhere else without moving everybody's. The name is passed in rather than
+/// listed here: this crate knows about downloads, not about engines.
+pub fn cache_dir_for(engine_var: &str) -> PathBuf {
+    resolve_cache_dir(Some(engine_var), |k| std::env::var_os(k))
+}
+
+/// The resolution itself, over an environment reader so the precedence can be
+/// tested without mutating the process's real environment.
+fn resolve_cache_dir(
+    engine_var: Option<&str>,
+    env: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> PathBuf {
+    let read = |key: &str| env(key).filter(|v| !v.is_empty());
+    for var in engine_var.into_iter().chain(Some("VOICE_CACHE_DIR")) {
+        if let Some(dir) = read(var) {
+            return PathBuf::from(dir);
+        }
     }
-    if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
-        return PathBuf::from(xdg).join("rvc");
+    if let Some(xdg) = read("XDG_CACHE_HOME") {
+        return PathBuf::from(xdg).join("voice");
     }
-    if let Ok(home) = std::env::var("HOME") {
-        return PathBuf::from(home).join(".cache").join("rvc");
+    if let Some(home) = read("HOME") {
+        return PathBuf::from(home).join(".cache").join("voice");
     }
-    PathBuf::from(".rvc-cache")
+    // Never CWD-relative. A cache that moves with the shell's working directory
+    // re-downloads gigabytes the first time the user runs from somewhere else,
+    // and leaves a hidden folder wherever they happened to stand — including in
+    // an output directory.
+    std::env::temp_dir().join("voice-cache")
+}
+
+/// Tell the user once where the cache went, rather than silently re-downloading
+/// everything the old `~/.cache/rvc` already holds. Nothing is copied or moved:
+/// the old directory is the user's to keep or delete.
+///
+/// Only for the untouched default. Someone who named a directory — by flag or by
+/// variable — chose it, and does not need to be told about a location they were
+/// not using.
+fn note_cache_move(cache: &Path) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let home = PathBuf::from(home).join(".cache");
+        let (old, new) = (home.join("rvc"), home.join("voice"));
+        if cache == new && old.exists() && !new.exists() {
+            tracing::info!(
+                "the asset cache is now {} (it used to be {}, which is left untouched)",
+                new.display(),
+                old.display()
+            );
+        }
+    });
 }
 
 /// Download (or reuse the cached copy of) a single Hub file, returning its local
-/// path. Uses `cache_dir` or [`default_cache_dir`] when `None`.
-pub async fn fetch(model: &ModelRef, cache_dir: Option<&Path>) -> Result<PathBuf> {
-    let cache = cache_dir
-        .map(Path::to_path_buf)
-        .unwrap_or_else(default_cache_dir);
-    let client = HFClient::builder().cache_dir(cache).build()?;
+/// path. `cache_dir` is resolved by the caller — see [`cache_dir_for`].
+pub async fn fetch(model: &ModelRef, cache_dir: &Path) -> Result<PathBuf> {
+    note_cache_move(cache_dir);
+    let client = HFClient::builder()
+        .cache_dir(cache_dir.to_path_buf())
+        .build()?;
     let repo = client.model(model.owner.clone(), model.name.clone());
     let path = repo
         .download_file()
@@ -104,7 +153,7 @@ pub struct SharedAssets {
 pub async fn fetch_shared(
     contentvec: Option<ModelRef>,
     rmvpe: Option<ModelRef>,
-    cache_dir: Option<&Path>,
+    cache_dir: &Path,
 ) -> Result<SharedAssets> {
     let contentvec = contentvec.unwrap_or_else(default_contentvec);
     let rmvpe = rmvpe.unwrap_or_else(default_rmvpe);
@@ -142,7 +191,7 @@ const WHISPER_FILES: [&str; 4] = [
 /// `repo` overrides the default as `owner/name` — that is how a different size
 /// (`openai/whisper-large-v3`) or a fine-tune is selected, since `stt-core`
 /// reads every dimension from the repo's own `config.json`.
-pub async fn fetch_whisper(repo: Option<&str>, cache_dir: Option<&Path>) -> Result<WhisperAssets> {
+pub async fn fetch_whisper(repo: Option<&str>, cache_dir: &Path) -> Result<WhisperAssets> {
     let (owner, name) = match repo {
         Some(r) => r.split_once('/').unwrap_or((r, "")),
         None => DEFAULT_WHISPER,
@@ -156,7 +205,7 @@ pub async fn fetch_whisper(repo: Option<&str>, cache_dir: Option<&Path>) -> Resu
         dir = path.parent().map(Path::to_path_buf);
     }
     Ok(WhisperAssets {
-        dir: dir.unwrap_or_else(default_cache_dir),
+        dir: dir.unwrap_or_else(|| cache_dir.to_path_buf()),
     })
 }
 
@@ -174,7 +223,7 @@ pub const DEFAULT_PROSODY_BERT: (&str, &str) =
 const PROSODY_FILES: [&str; 3] = ["model.onnx", "tokenizer.json", "config.json"];
 
 /// Fetch the prosody encoder, returning the directory the files landed in.
-pub async fn fetch_prosody_bert(repo: Option<&str>, cache_dir: Option<&Path>) -> Result<PathBuf> {
+pub async fn fetch_prosody_bert(repo: Option<&str>, cache_dir: &Path) -> Result<PathBuf> {
     let (owner, name) = match repo {
         Some(r) => r.split_once('/').unwrap_or((r, "")),
         None => DEFAULT_PROSODY_BERT,
@@ -184,7 +233,7 @@ pub async fn fetch_prosody_bert(repo: Option<&str>, cache_dir: Option<&Path>) ->
         let path = fetch(&ModelRef::new(owner, name, file), cache_dir).await?;
         dir = path.parent().map(Path::to_path_buf);
     }
-    Ok(dir.unwrap_or_else(default_cache_dir))
+    Ok(dir.unwrap_or_else(|| cache_dir.to_path_buf()))
 }
 
 /// The official GPT-SoVITS v2 bundle.
@@ -217,7 +266,7 @@ pub struct GptSovitsPaths {
 }
 
 /// Fetch the v2 bundle, returning the directory it landed in.
-pub async fn fetch_gptsovits(cache_dir: Option<&Path>) -> Result<PathBuf> {
+pub async fn fetch_gptsovits(cache_dir: &Path) -> Result<PathBuf> {
     let (owner, name) = DEFAULT_GPTSOVITS;
     let mut root = None;
     for file in GPTSOVITS_FILES {
@@ -231,7 +280,7 @@ pub async fn fetch_gptsovits(cache_dir: Option<&Path>) -> Result<PathBuf> {
         }
         root = Some(dir);
     }
-    Ok(root.unwrap_or_else(default_cache_dir))
+    Ok(root.unwrap_or_else(|| cache_dir.to_path_buf()))
 }
 
 /// Locate the three checkpoints inside `dir`.
@@ -277,4 +326,85 @@ fn missing(what: &str, dir: &Path) -> HubError {
         std::io::ErrorKind::NotFound,
         format!("{what} not found under {}", dir.display()),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fake environment, so precedence is tested without `set_var` racing the
+    /// other tests in this binary.
+    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<std::ffi::OsString> + use<> {
+        let pairs: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |key| pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v.into())
+    }
+
+    #[test]
+    fn engine_variable_beats_the_toolkit_one() {
+        let e = env(&[
+            ("STT_CACHE_DIR", "/b"),
+            ("VOICE_CACHE_DIR", "/a"),
+            ("XDG_CACHE_HOME", "/xdg"),
+            ("HOME", "/home/u"),
+        ]);
+        assert_eq!(
+            resolve_cache_dir(Some("STT_CACHE_DIR"), &e),
+            Path::new("/b")
+        );
+        // An engine that names no variable of its own, and one whose variable is
+        // unset, both fall through to the shared answer.
+        assert_eq!(resolve_cache_dir(None, &e), Path::new("/a"));
+        assert_eq!(
+            resolve_cache_dir(Some("TTS_CACHE_DIR"), &e),
+            Path::new("/a")
+        );
+    }
+
+    #[test]
+    fn falls_through_voice_then_xdg_then_home() {
+        let full = env(&[("XDG_CACHE_HOME", "/xdg"), ("HOME", "/home/u")]);
+        assert_eq!(resolve_cache_dir(None, &full), Path::new("/xdg/voice"));
+
+        let home_only = env(&[("HOME", "/home/u")]);
+        assert_eq!(
+            resolve_cache_dir(None, &home_only),
+            Path::new("/home/u/.cache/voice")
+        );
+    }
+
+    /// The point of the whole rewrite: whatever the environment says — including
+    /// saying nothing, or setting the variables to empty — the cache never lands
+    /// below the working directory, so a download can never write into an output
+    /// folder the user happened to `cd` into.
+    #[test]
+    fn never_relative_to_the_working_directory() {
+        for e in [
+            env(&[]),
+            env(&[
+                ("HOME", ""),
+                ("XDG_CACHE_HOME", ""),
+                ("VOICE_CACHE_DIR", ""),
+            ]),
+        ] {
+            for engine in [None, Some("RVC_CACHE_DIR")] {
+                let dir = resolve_cache_dir(engine, &e);
+                assert!(dir.is_absolute(), "{} is not absolute", dir.display());
+                assert!(!dir.starts_with(std::env::current_dir().unwrap()));
+            }
+        }
+    }
+
+    /// `RVC_CACHE_DIR` predates the toolkit-wide variable, so scripts that set it
+    /// must keep working.
+    #[test]
+    fn rvc_cache_dir_still_works() {
+        let e = env(&[("RVC_CACHE_DIR", "/legacy"), ("HOME", "/home/u")]);
+        assert_eq!(
+            resolve_cache_dir(Some("RVC_CACHE_DIR"), &e),
+            Path::new("/legacy")
+        );
+    }
 }

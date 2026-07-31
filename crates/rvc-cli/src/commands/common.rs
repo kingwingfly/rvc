@@ -116,7 +116,7 @@ pub async fn build_converter(
 /// Used by the Burn inference path, which needs the feature extractors but not
 /// the ORT generator session.
 pub async fn resolve_feature_models(opts: &ModelOpts) -> Result<(PathBuf, PathBuf)> {
-    let cache = opts.cache_dir.as_deref();
+    let cache = opts.cache_dir.as_path();
     let content = match &opts.content {
         Some(p) => p.clone(),
         None => hub_kit::fetch(&hub_kit::default_contentvec(), cache)
@@ -135,7 +135,7 @@ pub async fn resolve_feature_models(opts: &ModelOpts) -> Result<(PathBuf, PathBu
 /// Resolve the ContentVec and RMVPE ONNX paths, downloading from Hugging Face
 /// when not provided explicitly, then assemble the full pipeline config.
 pub async fn build_rvc_config(opts: &ModelOpts) -> Result<RvcConfig> {
-    let cache = opts.cache_dir.as_deref();
+    let cache = opts.cache_dir.as_path();
 
     let content = match &opts.content {
         Some(p) => p.clone(),

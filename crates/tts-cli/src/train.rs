@@ -77,9 +77,10 @@ pub struct TrainArgs {
     /// Directory holding the ONNX prosody encoder [default: auto-downloaded].
     #[arg(long)]
     pub prosody: Option<PathBuf>,
-    /// Cache directory for downloaded assets [default: the Hugging Face cache].
-    #[arg(long)]
-    pub cache_dir: Option<PathBuf>,
+    /// Directory the downloaded models are cached in. Shared by every engine
+    /// unless `$TTS_CACHE_DIR` (or `$VOICE_CACHE_DIR`) says otherwise.
+    #[arg(long, default_value_os_t = hub_kit::cache_dir_for("TTS_CACHE_DIR"))]
+    pub cache_dir: PathBuf,
     /// Language of the transcripts.
     #[arg(short, long, value_enum, default_value_t = Lang::Zh)]
     pub language: Lang,
@@ -146,14 +147,14 @@ pub struct TrainArgs {
 pub async fn run(args: TrainArgs) -> Result<()> {
     let dir = match &args.model_dir {
         Some(dir) => dir.clone(),
-        None => hub_kit::fetch_gptsovits(args.cache_dir.as_deref())
+        None => hub_kit::fetch_gptsovits(&args.cache_dir)
             .await
             .context("failed to fetch the GPT-SoVITS models")?,
     };
     let paths = hub_kit::gptsovits_paths(&dir)?;
     let prosody_dir = match &args.prosody {
         Some(dir) => Some(dir.clone()),
-        None => hub_kit::fetch_prosody_bert(None, args.cache_dir.as_deref())
+        None => hub_kit::fetch_prosody_bert(None, &args.cache_dir)
             .await
             .ok(),
     };

@@ -57,7 +57,7 @@ pub async fn run(args: TrainArgs) -> Result<()> {
         });
     }
 
-    let cache = args.cache_dir.as_deref();
+    let cache = args.cache_dir.as_path();
 
     let content = match &args.content {
         Some(p) => p.clone(),
