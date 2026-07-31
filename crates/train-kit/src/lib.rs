@@ -12,7 +12,7 @@ mod ema;
 mod grad;
 mod misc;
 
-pub use checkpoint::{BestMeta, Checkpoint};
+pub use checkpoint::{BestMeta, Checkpoint, ensure_absent};
 pub use dashboard::Dashboard;
 pub use ema::{ema_update, materialize};
 pub use grad::accumulate;

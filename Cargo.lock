@@ -6276,6 +6276,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "train-kit",
 ]
 
 [[package]]

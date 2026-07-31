@@ -292,9 +292,10 @@ pub struct TrainArgs {
         value_parser = cli_kit::parse_device
     )]
     pub device: Vec<burn_kit::DeviceSpec>,
-    /// Directory for the training log and saved weights.
-    #[arg(long, default_value = "models/train")]
-    pub work_dir: PathBuf,
+    /// Overwrite weights already at `-o` instead of refusing to start.
+    /// `--resume` implies it: continuing a run means writing over its files.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
     /// Resume from a generator `.safetensors` (+ its `.disc.safetensors`
     /// sidecar). Pass either the EMA output or its `.raw.safetensors` twin —
     /// the raw (non-EMA) live weights are preferred automatically when present,
