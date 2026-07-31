@@ -6,7 +6,8 @@
 
 mod backend;
 
-use std::path::Path;
+use std::io::IsTerminal;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::Args;
@@ -28,10 +29,26 @@ impl tracing_subscriber::fmt::time::FormatTime for Elapsed {
 /// Initialise tracing.
 ///
 /// Logs go to **stderr**, because every subcommand here is a filter whose stdout
-/// carries data. `log_file` redirects them to a file instead — which `rvc train`
-/// needs, since its dashboard owns the terminal. Returns whether the file was
-/// used, so the caller can say where the logs went.
-pub fn init_logging(log_file: Option<&Path>) -> bool {
+/// carries data. A training run is the exception: its dashboard owns the
+/// terminal and stderr would scribble over it, so a caller about to raise one
+/// passes the file the logs should go to instead, and the user is told where
+/// they went. Where that file lives is the caller's decision — each engine has
+/// its own layout — and passing one when stdout is *not* a terminal is not an
+/// error: no dashboard comes up, so nothing needs redirecting.
+pub fn init_logging(log_file: Option<PathBuf>) {
+    if let Some(path) = log_file.filter(|_| std::io::stdout().is_terminal()) {
+        // Only announce the file once it is known to be the one in use:
+        // `init_tracing` falls back to stderr if it cannot be opened.
+        if init_tracing(Some(&path)) {
+            eprintln!("training dashboard active — logs: {}", path.display());
+        }
+    } else {
+        init_tracing(None);
+    }
+}
+
+/// Install the subscriber, returning whether `log_file` was the one it got.
+fn init_tracing(log_file: Option<&Path>) -> bool {
     use tracing_subscriber::EnvFilter;
 
     // App logs at `info`, but drop `ort`'s chatty INFO (per-tensor allocation /

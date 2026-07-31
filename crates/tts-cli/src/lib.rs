@@ -34,22 +34,16 @@ pub async fn run<C: CommandFactory>(cli: TtsCli) -> Result<()> {
 
 /// Start logging, sending a dashboard run's output to a file.
 ///
-/// The TUI owns the terminal for the length of a fine-tune, so tracing on stderr
-/// would scribble over it. Mirrors `rvc-cli`'s helper, and lives here rather
-/// than in either binary so `tts` and `voice` cannot disagree about it.
+/// Lives here rather than in either binary so `tts` and `voice` cannot disagree
+/// about it. All this engine decides is the path; `cli_kit::init_logging` knows
+/// when a TUI is about to take the terminal and what to tell the user.
 pub fn init_logging(train: Option<&TrainArgs>) {
-    use std::io::IsTerminal;
-
-    let log_file = train
-        .filter(|a| !a.no_tui && std::io::stdout().is_terminal())
-        // The working directory, not `-o`'s: a run writes its weights where it
-        // was told to and its scratch where it was started, so an output
-        // directory holds models and nothing else.
-        .map(|_| std::path::PathBuf::from("train.log"));
-    if cli_kit::init_logging(log_file.as_deref()) {
-        eprintln!(
-            "training dashboard active — logs: {}",
-            log_file.expect("a path was used").display()
-        );
-    }
+    // The working directory, not `-o`'s: a run writes its weights where it was
+    // told to and its scratch where it was started, so an output directory holds
+    // models and nothing else.
+    cli_kit::init_logging(
+        train
+            .filter(|a| !a.no_tui)
+            .map(|_| std::path::PathBuf::from("train.log")),
+    );
 }
