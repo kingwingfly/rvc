@@ -13,9 +13,34 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Context, Result};
 use rvc_train::{TrainRequest, TrainSettings};
 
-use crate::args::TrainArgs;
+use crate::args::{Backend, TrainArgs};
+
+/// The Burn backend a `--backend` choice names, rejecting the one that cannot
+/// train.
+///
+/// `--backend` is one enum across the whole toolkit, so `onnx` parses here too;
+/// it just has nowhere to go. Saying that beats the generic "unsupported", since
+/// ONNX Runtime has no training path at all and the graphs it runs are what a
+/// finished model is *exported to* afterwards.
+fn train_backend(backend: Backend) -> Result<rvc_train::TrainBackend> {
+    Ok(match backend {
+        Backend::Auto => rvc_train::TrainBackend::Auto,
+        Backend::Cuda => rvc_train::TrainBackend::Cuda,
+        Backend::Tch => rvc_train::TrainBackend::LibTorch,
+        Backend::Wgpu => rvc_train::TrainBackend::Wgpu,
+        Backend::Onnx => anyhow::bail!(
+            "ONNX Runtime cannot train — train on a Burn backend \
+             (`--backend auto|cuda|tch|wgpu`), then convert the result with \
+             `export/export_onnx.py` to run it on ONNX Runtime"
+        ),
+    })
+}
 
 pub async fn run(args: TrainArgs) -> Result<()> {
+    // Before anything is fetched: a backend that cannot train should not cost a
+    // model download first.
+    let backend = train_backend(args.backend)?;
+
     // The dashboard runs only on a real terminal; otherwise plain logs. This
     // must match main.rs's decision to route logs off stderr.
     let use_tui = !args.no_tui && std::io::stdout().is_terminal();
@@ -32,7 +57,7 @@ pub async fn run(args: TrainArgs) -> Result<()> {
         });
     }
 
-    let cache = args.cache_dir.as_deref();
+    let cache = args.cache_dir.as_path();
 
     let content = match &args.content {
         Some(p) => p.clone(),
@@ -103,7 +128,7 @@ pub async fn run(args: TrainArgs) -> Result<()> {
             save_best: !args.no_save_best,
             use_tui,
         },
-        backend: args.backend.into(),
+        backend,
         devices: args.device,
         stop,
     };

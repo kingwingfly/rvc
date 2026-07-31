@@ -1,91 +1,33 @@
 //! Command-line argument definitions (clap derive).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
-pub use cli_kit::CompletionsArgs;
+use anyhow::{Context, Result};
+use clap::{Args, Subcommand};
+pub use cli_kit::{Backend, CompletionsArgs};
 
-/// Which generator backend runs inference.
-///
-/// `burn` stays an alias of `cuda` so invocations written before the Burn
-/// generator gained a second compute backend keep working.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
-pub enum InferBackend {
-    /// Pick by weights extension (`.onnx` → onnx-runtime) then by what's
-    /// available: LibTorch on a GPU, else CubeCL/CUDA, else WebGPU, else CPU.
-    #[default]
-    Auto,
-    /// ONNX Runtime generator (`.onnx`).
-    Onnx,
-    /// Native Burn generator, CubeCL/CUDA compute (`.pth`/`.safetensors`).
-    #[value(name = "cuda", alias = "burn", alias = "burn-cuda")]
-    Cuda,
-    /// Native Burn generator, LibTorch compute — CUDA, MPS, Vulkan or CPU.
-    #[value(name = "tch", alias = "libtorch", alias = "burn-tch")]
-    Tch,
-    /// Native Burn generator, WebGPU compute — any Vulkan/Metal/DX12 GPU.
-    #[value(name = "wgpu", alias = "webgpu", alias = "burn-wgpu")]
-    Wgpu,
-}
-
-/// Which Burn compute backend runs training (there is no ONNX training path).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
-pub enum ComputeBackend {
-    /// Fastest available: LibTorch on a GPU, else CubeCL/CUDA, else WebGPU,
-    /// else LibTorch on CPU.
-    #[default]
-    Auto,
-    /// CubeCL/CUDA kernels. NVIDIA only.
-    #[value(name = "cuda", alias = "burn-cuda")]
-    Cuda,
-    /// LibTorch (tch) — CUDA, MPS, Vulkan or CPU.
-    #[value(name = "tch", alias = "libtorch", alias = "burn-tch")]
-    Tch,
-    /// WebGPU (wgpu) — any Vulkan/Metal/DX12 GPU, no vendor toolkit.
-    #[value(name = "wgpu", alias = "webgpu", alias = "burn-wgpu")]
-    Wgpu,
-}
-
-impl From<ComputeBackend> for rvc_train::TrainBackend {
-    fn from(b: ComputeBackend) -> Self {
-        match b {
-            ComputeBackend::Auto => Self::Auto,
-            ComputeBackend::Cuda => Self::Cuda,
-            ComputeBackend::Tch => Self::LibTorch,
-            ComputeBackend::Wgpu => Self::Wgpu,
-        }
-    }
-}
-
-/// rvc — RVC voice conversion toolkit (ONNX Runtime + native Burn).
-#[derive(Debug, Parser)]
-#[command(name = "rvc", version, about)]
-pub struct Cli {
+/// The whole of the `rvc` command tree, defined once and worn two ways: the
+/// `rvc` binary flattens it at its top level, `voice` nests it under an `rvc`
+/// subcommand. Every engine here has the same shape — the bare invocation is
+/// the stdin→stdout filter, and everything else is a subcommand.
+#[derive(Debug, Args)]
+pub struct RvcCli {
+    #[command(flatten)]
+    pub filter: FilterArgs,
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<RvcCommand>,
 }
 
-/// The voice-conversion subcommands, defined once and worn two ways: `rvc`
-/// flattens them at its top level (`rvc convert`), `voice` nests them under an
-/// `rvc` subcommand (`voice rvc convert`).
 #[derive(Debug, Subcommand)]
 pub enum RvcCommand {
     /// Batch-convert audio files into the target timbre (WAV output).
     Convert(ConvertArgs),
-    /// Realtime Unix filter: raw f32le mono PCM on stdin -> stdout.
-    Serve(ServeArgs),
     /// Train an RVC generator on a corpus (native Rust / burn).
-    Train(TrainArgs),
-    /// Slice a corpus into clean per-sentence training clips (dead-air removed).
-    Preprocess(PreprocessArgs),
-}
-
-#[derive(Debug, Subcommand)]
-pub enum Command {
     // Boxed because `TrainArgs` alone is ~320 bytes against 72 for the next
     // largest variant, and clippy is right that every parse shouldn't pay it.
-    #[command(flatten)]
-    Rvc(Box<RvcCommand>),
+    Train(Box<TrainArgs>),
+    /// Slice a corpus into clean per-sentence training clips (dead-air removed).
+    Preprocess(PreprocessArgs),
     /// Download/prefetch shared ONNX assets from Hugging Face.
     Models(ModelsArgs),
     /// Print a shell completion script (bash, zsh, fish, powershell, elvish).
@@ -95,9 +37,9 @@ pub enum Command {
 /// Shared options for locating the three ONNX models.
 #[derive(Debug, Args, Clone)]
 pub struct ModelOpts {
-    /// Trained RVC generator ONNX (`voice.onnx`).
+    /// Trained RVC generator weights (`.safetensors`, or `.onnx` for an export).
     #[arg(short, long)]
-    pub model: PathBuf,
+    pub model: Option<PathBuf>,
     /// Generator output sample rate (40000 or 48000).
     #[arg(long, default_value_t = 48000)]
     pub model_sr: u32,
@@ -107,13 +49,28 @@ pub struct ModelOpts {
     /// RMVPE F0 ONNX [default: auto-downloaded from Hugging Face].
     #[arg(long)]
     pub rmvpe: Option<PathBuf>,
-    /// Cache directory for downloaded assets
-    /// [default: the Hugging Face cache, e.g. ~/.cache/huggingface/hub].
-    #[arg(long)]
-    pub cache_dir: Option<PathBuf>,
+    /// Directory the downloaded models are cached in. Shared by every engine
+    /// unless `$RVC_CACHE_DIR` (or `$VOICE_CACHE_DIR`) says otherwise.
+    #[arg(long, default_value_os_t = hub_kit::cache_dir_for("RVC_CACHE_DIR"))]
+    pub cache_dir: PathBuf,
     /// Speaker id fed to the generator (single-speaker models use 0).
     #[arg(long, default_value_t = 0)]
     pub speaker_id: i64,
+}
+
+impl ModelOpts {
+    /// The generator weights every conversion path needs.
+    ///
+    /// Optional to clap only because these options are also flattened beside
+    /// the subcommands, for the bare filter invocation — requiring `-m` there
+    /// would require it of `train` and `preprocess` too. So "required" is
+    /// decided here, and callers check it before anything is fetched or loaded.
+    pub fn model(&self) -> Result<&Path> {
+        self.model.as_deref().context(
+            "-m/--model is required: the trained generator weights \
+             (train one with the `train` subcommand)",
+        )
+    }
 }
 
 #[derive(Debug, Args)]
@@ -131,8 +88,8 @@ pub struct ConvertArgs {
     pub transpose: i32,
     /// Inference backend: `auto`, `onnx`, `cuda` (aliases `burn`, `burn-cuda`),
     /// `tch` (`libtorch`, `burn-tch`) or `wgpu` (`webgpu`, `burn-wgpu`).
-    #[arg(long, value_enum, default_value_t = InferBackend::Auto)]
-    pub backend: InferBackend,
+    #[arg(long, value_enum, default_value_t = Backend::Auto)]
+    pub backend: Backend,
     /// Compute device: `auto` (fastest visible), `cpu`, `gpu`, `gpu:N`, `mps` or
     /// `vulkan` (`cuda`/`cuda:N` also accepted). The `cuda` backend has GPUs only.
     #[arg(long, default_value = "auto", value_name = "DEVICE", value_parser = cli_kit::parse_device)]
@@ -141,8 +98,9 @@ pub struct ConvertArgs {
     pub denoise: DenoiseOpts,
 }
 
+/// The bare invocation: raw f32le mono PCM in, raw f32le mono PCM out.
 #[derive(Debug, Args)]
-pub struct ServeArgs {
+pub struct FilterArgs {
     #[command(flatten)]
     pub models: ModelOpts,
     /// Pitch shift in semitones.
@@ -154,8 +112,8 @@ pub struct ServeArgs {
     /// Inference backend: `auto`, `onnx`, `cuda` (aliases `burn`, `burn-cuda`),
     /// `tch` (`libtorch`, `burn-tch`) or `wgpu` (`webgpu`, `burn-wgpu`). Prefer
     /// `tch` or `onnx` here — `cuda` does not keep up with realtime.
-    #[arg(long, value_enum, default_value_t = InferBackend::Auto)]
-    pub backend: InferBackend,
+    #[arg(long, value_enum, default_value_t = Backend::Auto)]
+    pub backend: Backend,
     /// Compute device: `auto` (fastest visible), `cpu`, `gpu`, `gpu:N`, `mps` or
     /// `vulkan` (`cuda`/`cuda:N` also accepted). The `cuda` backend has GPUs only.
     #[arg(long, default_value = "auto", value_name = "DEVICE", value_parser = cli_kit::parse_device)]
@@ -164,8 +122,9 @@ pub struct ServeArgs {
     pub denoise: DenoiseOpts,
 }
 
-/// De-hiss options shared by `convert` and `serve`. Off unless `--denoise` is
-/// given; the tuning flags only take effect when it is. Defaults mirror
+/// De-hiss options shared by the streaming filter and `convert`. Off unless
+/// `--denoise` is given; the tuning flags only take effect when it is. Defaults
+/// mirror
 /// [`rvc_core::DenoiseParams::default`]; `--denoise-strength` is the main knob.
 #[derive(Debug, Args, Clone)]
 pub struct DenoiseOpts {
@@ -215,10 +174,10 @@ pub enum ModelsCommand {
 
 #[derive(Debug, Args)]
 pub struct ModelsDownloadArgs {
-    /// Cache directory for downloaded assets
-    /// [default: the Hugging Face cache, e.g. ~/.cache/huggingface/hub].
-    #[arg(long)]
-    pub cache_dir: Option<PathBuf>,
+    /// Directory the downloaded models are cached in. Shared by every engine
+    /// unless `$RVC_CACHE_DIR` (or `$VOICE_CACHE_DIR`) says otherwise.
+    #[arg(long, default_value_os_t = hub_kit::cache_dir_for("RVC_CACHE_DIR"))]
+    pub cache_dir: PathBuf,
     /// Override the ContentVec repo as `owner/name:file`
     /// [default: the toolkit's ContentVec ONNX on Hugging Face].
     #[arg(long)]
@@ -319,8 +278,8 @@ pub struct TrainArgs {
     /// Compute backend: `auto`, `cuda` (alias `burn-cuda`), `tch` (`libtorch`,
     /// `burn-tch`) or `wgpu` (`webgpu`, `burn-wgpu`). All three train, and the
     /// saved weights are the same whichever you pick.
-    #[arg(long, value_enum, default_value_t = ComputeBackend::Auto)]
-    pub backend: ComputeBackend,
+    #[arg(long, value_enum, default_value_t = Backend::Auto)]
+    pub backend: Backend,
     /// Compute device(s): `auto`, `cpu`, `gpu`, `gpu:N`, `mps`, `vulkan`
     /// (`cuda`/`cuda:N` are accepted spellings of `gpu`). Comma-separate for
     /// data-parallel training across devices — the first is the master.
@@ -368,9 +327,10 @@ pub struct TrainArgs {
     /// RMVPE F0 ONNX [default: auto-downloaded].
     #[arg(long)]
     pub rmvpe: Option<PathBuf>,
-    /// Cache dir for downloaded feature-extractor assets [default: HF cache].
-    #[arg(long)]
-    pub cache_dir: Option<PathBuf>,
+    /// Directory the downloaded models are cached in. Shared by every engine
+    /// unless `$RVC_CACHE_DIR` (or `$VOICE_CACHE_DIR`) says otherwise.
+    #[arg(long, default_value_os_t = hub_kit::cache_dir_for("RVC_CACHE_DIR"))]
+    pub cache_dir: PathBuf,
     /// Disable the TUI dashboard and log to stderr (auto-off when not a TTY).
     #[arg(long)]
     pub no_tui: bool,

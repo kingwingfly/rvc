@@ -34,50 +34,104 @@ maintainer's build-time tool: no user, no test and no training run invokes it.
 **One binary per engine, plus `voice`.** `rvc`, `stt` and `tts` each stand alone
 and pull in only what they use — installing `stt` costs none of the RVC stack, and
 its `onnx` feature is opt-out, so a Burn-only `stt` links no ORT at all.
-`voice` is the *integration*: it depends on `rvc-cli` and
-`stt-cli` **as libraries**, so an argument is defined exactly once and never
-copied between binaries. Every `*-cli` crate is therefore a lib **and** a bin.
-`rvc-cli::args::RvcCommand` is `#[command(flatten)]`ed by `rvc` and nested by
-`voice`; `stt-cli::SttArgs` is `#[command(flatten)]`ed by `stt` and nested by
-`voice`. User-facing strings in shared code must not name a binary ("train one
+`voice` is the *integration*: it depends on `rvc-cli`, `stt-cli` and `tts-cli`
+**as libraries**, so an argument is defined exactly once and never
+copied between binaries. Every `*-cli` crate is therefore a lib **and** a bin,
+and each exports one clap type that its own `main` flattens and `voice` nests —
+which is what makes `voice tts train` literally the same code path as
+`tts train` rather than a second definition that has to be kept in step. User-facing
+strings in shared code must not name a binary ("train one
 with the `train` subcommand", not "`rvc train`").
 
 **No engine depends on another engine.** Voice conversion, recognition and
 synthesis are siblings. Anything two of them need moves to a neutral crate first.
+
+### The shape every CLI has
+**Running a binary with no subcommand is the stdin→stdout filter.** Subcommands
+are for everything that is not streaming: `rvc convert|train|preprocess|models|completions`,
+`tts train|completions`, `stt completions`. `stt` and `tts` were already this
+shape; `rvc` reached it by promoting `rvc serve` to the bare invocation.
+
+That is a deliberate promotion rather than a deletion. Streaming is the *primary*
+mode of a Unix filter — it is the thing the whole `futures::Stream` pipeline
+exists for — and hiding it behind a subcommand while `stt` and `tts` exposed it
+directly meant the three engines could not be learned once. If a future engine
+has a streaming mode, it goes on the bare invocation too.
+
+The corollary is that **`voice` nests, it never renames.** `voice tts train`, not
+`voice tts-train`: `voice` hosts each engine's clap type unchanged, so a
+subcommand added to `tts` appears under `voice tts` with no edit to `voice-cli`
+at all. A hyphenated name is the tell that someone flattened a level by hand.
+
+### Where downloaded weights land
+Split by **who reads the file**, because the two kinds have opposite lifetimes:
+
+- **Inference assets** (ContentVec, RMVPE, Whisper, the prosody encoder,
+  cnhubert, `s1*.ckpt`, `s2G*.pth`) are shared across every run on the machine,
+  so they go to a cache: `--cache-dir` → `{RVC,STT,TTS}_CACHE_DIR` →
+  `VOICE_CACHE_DIR` → `$XDG_CACHE_HOME/voice` → `~/.cache/voice`. The resolved
+  path is a **computed clap default**, so `-h` prints where this machine will
+  actually put them rather than a placeholder.
+- **Training warm-start bases** (`f0G48k.pth`, `f0D48k.pth`, `s2D*.pth`) belong
+  to one experiment, so they go to `pretrained/` inside that run's **output
+  directory** — beside the checkpoints they produced, which is what makes a run
+  reproducible after the fact. `--no-pretrained` and `--resume` fetch nothing.
+
+**Nothing is ever downloaded into an output directory it was not asked to write
+to.** That is the rule the split exists to make checkable; before it there was no
+rule, only a per-engine convention, and the conventions had already diverged —
+the cache was `$RVC_CACHE_DIR` / `~/.cache/rvc` no matter which binary asked, and
+`s2D2333k.pth`, which only a training run ever opens, sat in it beside the
+inference weights. `--work-dir` was a third notion of "where things go" on top of
+the cache and the output directory; it is gone, and the working directory is the
+current directory, like any other Unix tool.
+
+Training also **refuses to overwrite an existing output `.safetensors` unless
+`-y` is passed.** A voice is hours of GPU time and the corpus that produced it
+may be gone; a re-run with the same `-o` is far more often a mistake than an
+intent.
 
 ### Naming conventions
 Three tiers, and the name says which tier a crate is in:
 
 - **`*-kit`** — shared plumbing with no model and no engine knowledge, safe for
   anything to depend on: `burn-kit` (devices, checkpoints), `audio-kit` (ffmpeg
-  I/O, the slicer), `hub-kit` (downloads), `cli-kit` (logging, completions).
+  I/O, the slicer), `hub-kit` (downloads and the cache), `cli-kit` (logging,
+  completions, `--backend`/`--device`).
 - **`burn-*`** — one network each, named after the **model** (`burn-rvc` reads
   like `burn_dinov3`), holding no app dependencies and naming no compute backend.
 - **`<engine>-core` / `<engine>-cli`** — one engine each, all the same shape:
-  `rvc-core`+`rvc-train`+`rvc-cli`, `stt-core`+`stt-cli`, later `tts-core`+`tts-cli`.
+  `rvc-core`+`rvc-train`+`rvc-cli`, `stt-core`+`stt-cli`,
+  `tts-core`+`tts-train`+`tts-cli`.
 
 **`voice-` is reserved for the top.** It marks the integration, so a crate that
 an engine depends on must never be named `voice-*` — that is why the shared
 crates are `*-kit`. `voice-cli` is the only `voice-*` crate.
 
 ### Where documentation goes
-Four places, and putting a paragraph in the wrong one is exactly how `README.md`
+Five places, and putting a paragraph in the wrong one is exactly how `README.md`
 once grew ninety lines of engine manual:
 
 - **`README.md`** is an *index*: what `voice` is, the pipeline, which binary to
   install, one build block, links out. No engine documentation, ever — if a
   passage names a flag, it belongs in an engine README.
-- **`crates/<engine>-cli/README.md`** is that engine's manual: every flag, which
-  weights are fetched from where, which backends it accepts, its training loop.
-  Setup shared by all four binaries (ORT, LibTorch, ffmpeg) is written once in
-  `crates/rvc-cli/README.md` and linked, not copied.
+- **`docs/setup.md`** is everything that is true of all four binaries at once:
+  ffmpeg, ORT and LibTorch, the build, the `--backend`/`--device` table, and
+  where downloaded models land. It exists because that material was previously
+  written once in `crates/rvc-cli/README.md` and linked from the other two — which
+  reads as `stt` depending on `rvc`, obliges a reader who only wants `stt` to
+  open the voice-conversion manual, and drifted anyway. **Anything an engine
+  README would have to say identically belongs here instead.**
+- **`crates/<engine>-cli/README.md`** is that engine's manual and only that:
+  every flag, which weights it fetches from where, its training loop. It links
+  to `docs/setup.md` rather than repeating it.
 - **`docs/*.typ`** are the long-form architecture papers, one per network —
   `rvc-architecture`, `gptsovits-architecture`, `whisper-architecture` — for
   *reviewing* a port rather than using it: what each block computes, what every
   loss term is for, why the training loop has the shape it does. Typst sources
   with the rendered PDF committed beside them, so reading needs no toolchain;
   rebuild with `typst compile docs/<name>.typ` and commit both.
-- **this file** is the fourth: why a decision was made and which trap it avoids.
+- **this file** is the fifth: why a decision was made and which trap it avoids.
   A fact that would be equally true of any VITS repo belongs in a `.typ` paper;
   a fact that will bite whoever edits this code next belongs here.
 
@@ -101,8 +155,9 @@ cargo check -p rvc-train --features cuda,tch    # where the trait bounds bite
 cargo clippy --workspace        # workspace is kept clippy-clean
 cargo fmt
 
-# `--backend auto|onnx|cuda|tch` (aliases: burn/burn-cuda, libtorch/burn-tch);
-# `--device auto|cpu|cuda|cuda:N|mps|vulkan`. Both default to auto.
+# One `--backend auto|onnx|cuda|tch|wgpu` on every binary (aliases burn/burn-cuda,
+# libtorch/burn-tch, webgpu/burn-wgpu); `--device auto|cpu|gpu|gpu:N|mps|vulkan`
+# (cuda/cuda:N spell gpu). Both default to auto. See docs/setup.md.
 cargo run -p rvc-cli   --      convert -m models/voice.safetensors --model-sr 48000 -o out/ in.mp3
 cargo run -p voice-cli -- rvc  convert -m models/voice.safetensors --model-sr 48000 -o out/ in.mp3
 
@@ -154,31 +209,49 @@ back through the PyTorch path is what `load_burn_safetensors_into` exists to
 prevent. Rectangular weights fail loudly on `ShapeMismatch`; a square one would
 load "fine" and be silently scrambled. `burn-kit`'s round-trip test pins it.
 
-**An ONNX Runtime session on the CUDA execution provider must never be dropped.**
-Unwinding one aborts with glibc's "corrupted double-linked list", which turns an
-otherwise successful run into exit 134 — and for a Unix filter the exit code is
-the part that gets checked. `CUDA_VISIBLE_DEVICES=` exits 0, and `rvc convert`
-drives ORT and Burn together without tripping it, so it is narrower than "ORT and
-Burn conflict".
-
-Two things this file previously claimed about it are **wrong**, and both were
-found by testing rather than by reading: a CUDA *Burn* backend is **not** required
-to reproduce it, and it is **not** confined to teardown after a successful run.
-The first fix here leaked the models at the end of the happy path only, so every
-early return — `--backend onnx` with no export, for one — still unwound a live
-session and still aborted, printing the right error and then dying 134 instead of
-1. The lesson is that the leak belongs on the **type that owns the session**
-(`ManuallyDrop`), not at one call site: anything else silently obliges every
-future caller, including every error path, to remember.
-
 Requires **ffmpeg 8.1** dev libraries (and the `ffmpeg` binary for the realtime
-`serve` example). ContentVec + RMVPE ONNX assets auto-download from Hugging Face
-(`rvc models download` to prefetch). Only 48 kHz is supported today.
+filter examples, which is what captures and plays PCM at either end of the pipe).
+ContentVec + RMVPE ONNX assets auto-download from Hugging Face (the `models`
+subcommand prefetches them). Only 48 kHz is supported today.
+
+### Exit 134 when an ORT session drops (RTX 2060, accepted)
+Dropping an ONNX Runtime session on the CUDA execution provider aborts with
+glibc's "corrupted double-linked list" on **this maintainer's RTX 2060**. It was
+worked around by leaking every session (`ManuallyDrop`, `std::mem::forget`).
+**That workaround has been removed deliberately and must not be reinstated** —
+it obliged every present and future call site, including every error path, to
+remember a leak that buys nothing on any other machine.
+
+Measured on the affected machine, `dev` with the workaround against the same
+tree without it:
+
+| | workaround in place | removed |
+|---|---|---|
+| `--backend onnx`, export present | 0, 0, 0 | **134 on 5 of 7 runs** |
+| `--backend onnx`, no export (early return) | 1, 1 | 134, 134 |
+| `--backend tch` + ONNX prosody encoder | 0, 0 | 134, 134, 0 |
+
+Four things make it easy to misdiagnose, which is the reason for the numbers:
+
+- **It is intermittent, at roughly 70–80%.** A single trial can exit 0 and look
+  fixed; the first run after removal did exactly that. Never conclude anything
+  here from one invocation.
+- **It is not the prosody encoder.** With prosody disabled, so `OnnxEngine`'s
+  four sessions are the only ORT sessions in the process, 3 of 3 aborted.
+- **It is not confined to ONNX as the generator.** `--backend tch` with the ORT
+  prosody encoder aborts too, so it tracks the session, not the backend choice.
+- **The audio is unaffected** — byte-identical 1.56 s output that `stt`
+  transcribes correctly. Only the exit code differs.
+
+The user accepts exit 134 on this hardware. Treat it as a **known local defect
+with a recorded measurement**, not as a rule about how ORT sessions must be
+handled anywhere else; the old framing as a general rule is what made the leak
+spread. If it shows up elsewhere, the thing to record is which driver.
 
 ## Architecture
 
 Data crosses every crate boundary as **mono `f32`**, and the whole conversion path
-is `futures::Stream`-in → `futures::Stream`-out, which is why `rvc serve` is a plain
+is `futures::Stream`-in → `futures::Stream`-out, which is why a bare `rvc` is a plain
 Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper.
 
 | crate | role |
@@ -192,13 +265,13 @@ Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper
 | `burn-gptsovits` | the GPT-SoVITS network. `hubert` at 210/0, `quantizer` at 3/0, and `s2` complete at 773/0 (the 3 unused are the codebook's EMA training statistics). **`s2` is verified numerically, not just structurally**: `examples/reconstruct` round-trips real audio through cnhubert, the quantiser and the synthesizer, and the output tracks the source's energy envelope at r=0.91 against a chance baseline of 0.30. `t2s` (`s1`) is at 295/0. Every network of GPT-SoVITS is now ported; `tts-core`/`tts-cli` wire them into a working `tts`, and `tts-train` fine-tunes **both** stages — `s1` for delivery, `s2` for timbre. `SovitsPartial::forward_train` composes `enc_q` → `flow.forward` → random segment → `dec` and returns the five tensors the VITS losses need; the matching `s2D2333k.pth` discriminator loads at 111/0/0. `examples/keys` lists any checkpoint's tensors, which is the first thing to run against a new one |
 | `rvc-train` | native Rust/Burn adversarial training loop (see `crates/rvc-train/ARCHITECTURE.md`) |
 | `hub-kit` | auto-download every engine's assets from Hugging Face |
-| `rvc-cli` | lib **and** the `rvc` binary (clap): `convert`, `serve`, `models`, `train`, `preprocess` |
+| `rvc-cli` | lib **and** the `rvc` binary (clap): the bare invocation streams, plus `convert`, `models`, `train`, `preprocess`, `completions` |
 | `stt-core` | speech recognition: Whisper log-mel front-end, BPE vocabulary, KV-cached greedy decode, segmentation via `audio-kit`'s slicer, and **two runtimes** (native Burn, ONNX Runtime) behind one `Engine` trait |
 | `stt-cli` | lib **and** the `stt` binary |
 | `tts-core` | speech synthesis: reference analysis, `s1` sampling with a KV cache, `s2` decode, and the ONNX prosody encoder behind a trait. **Two runtimes**, the same shape `stt-core` uses: `Engine` is the whole boundary, so `Synthesizer` is not generic and the backend is a constructor call rather than a type parameter. `--backend onnx` runs the whole stack — cnhubert, the quantiser, `ref_enc`, `s1` and `s2` — off four exported graphs, and `auto` picks it when the model directory holds an export |
 | `tts-train` | fine-tuning GPT-SoVITS. `s1` is plain next-token cross-entropy over `T2s::forward_prompt_all` — one model, one optimizer, one loss, so unlike `rvc-train` the number means something on its own. `s2` is the other half: an adversarial VITS loop over `burn-vits`'s shared discriminators, inheriting `rvc-train`'s loss family (mel-L1 ×45, KL ×1, feature matching ×2, LSGAN) rather than inventing one, with GPT-SoVITS's five discriminator periods `[2,3,5,7,11]` against RVC's eight. Verified on 13 clips: mel falls 26.6 → 18.2 over two epochs on GPU and on CPU alike. `--stage s1|s2|both` prepares the corpus exactly once — preparation is the expensive half — and each stage writes its own checkpoint family. A corpus is `<stem>.wav` + `<stem>.txt` pairs, and `stt` is how the transcripts get written |
 | `tts-cli` | lib **and** the `tts` binary |
-| `cli-kit` | logging, shell completions and `--device` parsing, shared by all four binaries |
+| `cli-kit` | logging, shell completions, and the shared `--backend`/`--device`/`--cache-dir` flags — one enum and one alias set for all four binaries, so the spellings cannot drift apart again |
 | `train-kit` | training scaffolding with no model knowledge: `Checkpoint`, `ema_update`, `accumulate`, `materialize`, `Dashboard`. Generic over the module trained, so a GAN and a cross-entropy loop share it |
 | `text-kit` | grapheme-to-phoneme: script-based language splitting, Mandarin g2p (jieba + pinyin + opencpop + tone sandhi), and GPT-SoVITS's 732-symbol table. English g2p is an embedded CMUdict over upstream's deterministic cascade; Mandarin polyphones come from `pypinyin`'s own 47k phrase dictionary. Pure Rust, no ML, no backend — so it is fully testable without weights |
 | `voice-cli` | the `voice` binary: `rvc-cli`, `stt-cli` and `tts-cli` nested as `voice rvc …`, `voice stt` and `voice tts` |
@@ -213,13 +286,15 @@ names a Burn type and the choice is purely run-time. `auto` picks by the `-m`
 extension (`.onnx` → ONNX Runtime), then LibTorch-on-CUDA → CubeCL/CUDA →
 LibTorch-on-CPU. Naming a backend or device explicitly is an error if it is
 unavailable, never a fallback. The CubeCL/CUDA generator is still slower than
-realtime for `serve`; `--backend tch` is ~9x faster per file on an RTX 2060 and is
-what `auto` picks for `.safetensors` weights.
+realtime for the streaming filter; `--backend tch` is ~9x faster per file on an
+RTX 2060 and is what `auto` picks for `.safetensors` weights.
 
-The **alias sets are not yet uniform across engines** — `rvc` accepts a bare
-`burn` for `cuda`, `stt` only `burn-cuda` — which is a genuine inconsistency, not
-a documented distinction. Anything that unifies `--backend` parsing should move
-it into `cli-kit` beside `--device`, which every binary already shares.
+`--backend` is parsed **once**, by `cli_kit::Backend`, with one alias set for
+every binary (`burn`/`burn-cuda` → `cuda`, `libtorch`/`burn-tch` → `tch`,
+`webgpu`/`burn-wgpu` → `wgpu`). It used to be four separate enums, and they had
+drifted: `rvc` accepted a bare `burn` where `stt` insisted on `burn-cuda`, which
+is the kind of difference nobody decides on and everybody has to learn. Adding
+an engine means reusing that enum, never declaring another one beside it.
 
 Device selection lives in `crates/burn-kit/src/device.rs` (`DeviceSpec`,
 `cuda_device`, `libtorch_device`, `wgpu_device`, `guard_init`) — a crate that knows
