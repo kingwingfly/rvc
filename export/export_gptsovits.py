@@ -222,6 +222,19 @@ def main() -> None:
     opts = parser.parse_args()
     wanted = set(opts.only or ["reference", "s1", "s2"])
 
+    # `reference.onnx` is built from `sovits` too — it carries the quantiser and
+    # `ref_enc`, which live in the same checkpoint as the decoder. Exporting `s2`
+    # from fine-tuned weights while leaving `reference.onnx` at whatever was in
+    # the output directory produces a bundle that loads, runs and sounds wrong:
+    # the prompt tokens and the speaker vector come from one model and the
+    # decoder from another. Nothing downstream can detect it, so refuse here.
+    if opts.s2 and opts.only and "reference" not in wanted:
+        raise SystemExit(
+            "--s2 changes reference.onnx as well as s2.onnx: the quantiser and "
+            "ref_enc come from the same checkpoint as the decoder. Add "
+            "`--only reference`, or drop --only and export the whole bundle."
+        )
+
     hubert, sovits, t2s = load_models(opts.models, opts.s1, opts.s2)
     dyn = torch.export.Dim.DYNAMIC
     cfg = T2sConfig()

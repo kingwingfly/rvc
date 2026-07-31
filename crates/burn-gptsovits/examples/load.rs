@@ -34,9 +34,12 @@ impl common::Job for Load {
                 let mut model = Quantizer::<B>::new(&QuantizerConfig::default(), 1, device);
                 model.load_pytorch(&self.weights)
             }
+            // `load_weights`, not `load_pytorch`: this is the one component that
+            // is also *written* by fine-tuning, so the example has to cover the
+            // Burn `.safetensors` path as well as the original `.pth`.
             "sovits" => {
                 let mut model = SovitsPartial::<B>::new(&SovitsConfig::default(), device);
-                model.load_pytorch(&self.weights)
+                model.load_weights(&self.weights)
             }
             "t2s" => {
                 let mut model = T2s::<B>::new(&T2sConfig::default(), device);

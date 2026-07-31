@@ -48,18 +48,24 @@ the graphs are written, and `tts` looks for them in `<models>/onnx` or
 reference|s1|s2` re-exports one stage, which is what you want after a fine-tune
 touched one of them.
 
-> **Known bug: `--s1`/`--s2` do not round-trip correctly yet.** Exporting from an
-> original `.pth`/`.ckpt` is faithful — the resulting graphs match the Burn path
-> to an RMS-difference/RMS ratio of 0.0035. Exporting a Burn `.safetensors` is
-> not: the ratio is 1.14, meaning the two waveforms are less alike than one is to
-> silence, so the graph is not the model that was trained. It exports without
-> error and speaks intelligibly, which is why it went unnoticed — the branch could
-> not be tested until `s2` fine-tuning existed to produce a `.safetensors`, and
-> the two landed together. Weight-norm folding is ruled out (Burn stores
-> `weight_g` as `[out,1,1]` and `weight_v` as `[out,in,k]`, exactly as torch does)
-> and so is a missing parameter (`build_state_dict` is strict and every shape
-> matched), which leaves a shape-invariant mismatch — a transpose applied or
-> skipped on a square weight, or a norm parameter bound to the wrong tensor.
+> **`--s2` changes `reference.onnx` as well as `s2.onnx`.** The quantiser and
+> `ref_enc` — the prompt tokens and the speaker vector — come from the same
+> checkpoint as the decoder, so re-exporting only `s2` after a fine-tune leaves a
+> bundle whose front end and decoder are different models. It loads, runs and
+> sounds wrong, and nothing downstream can tell. Passing `--s2` with `--only` but
+> without `reference` is refused for that reason; `--s1` affects only the two
+> `s1` graphs and needs no such care.
+
+A fine-tuned export round-trips exactly. Against the Burn path at a fixed seed
+with the caller-drawn noise held identical, a whole bundle exported from a
+`tts train` `.safetensors` matches to an RMS-difference/RMS ratio of **0.00002**
+(correlation 1.000000, 0.00 dB mean log-spectral difference).
+
+Measure with **log-spectra or energy envelopes**, not sample-wise RMS: a vocoder's
+output is phase-sensitive, and two runs of the same model can differ enormously by
+that metric while sounding identical. An earlier note here reported this branch as
+broken on exactly that mistake — the comparison had a tuned `s2.onnx` decoding
+against a base `reference.onnx`.
 > Until it is fixed, deploy a fine-tune on Burn (`--backend tch`), not on ONNX.
 
 Four graphs, because the pipeline has four points where control returns to the

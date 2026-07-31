@@ -492,30 +492,34 @@ user has to run. `export_gptsovits.py` accepts *either* weight layout: an origin
 `.safetensors` from `tts train`. That second path is the point of the whole
 exercise — it is how a voice fine-tuned here would reach ONNX Runtime.
 
-**The Burn-`.safetensors` branch is currently wrong, and only the `.pth` branch is
-trustworthy.** Both export without error and both produce intelligible speech, so
-nothing complains; the difference only shows in a cross-runtime comparison at a
-fixed seed, with the caller-drawn noise held identical:
+**`reference.onnx` is built from the `s2` checkpoint too, and forgetting that is
+the one real trap here.** It carries the quantiser and `ref_enc` — the prompt
+tokens and the speaker vector — which live in the same file as the decoder. So
+`--only s2 --s2 tuned.safetensors` writes a bundle whose decoder is the fine-tune
+and whose front end is whatever was in the output directory. It loads, runs, and
+sounds wrong, and nothing downstream can detect it. `export_gptsovits.py` now
+refuses that combination and says to add `--only reference`.
+
+**This is what an earlier entry here reported as a bug in the Burn-`.safetensors`
+branch. That report was wrong and is retracted.** The branch is faithful; the
+measurement that condemned it compared a tuned `s2.onnx` against a *base*
+`reference.onnx`, so the two runtimes were decoding different prompts. Measured
+again with the whole bundle exported from the same weights, at a fixed seed with
+the caller-drawn noise held identical:
 
 | weights exported from | ONNX vs Burn |
 |---|---|
-| `s2G2333k.pth` | max abs 2.5e-03, RMS-diff/RMS **0.0035** |
-| a fine-tuned `.safetensors` | max abs 3.1e-01, RMS-diff/RMS **1.14** |
+| `s2G2333k.pth` | RMS-diff/RMS **0.005**, log-spectrogram corr 0.99998 |
+| a fine-tuned `.safetensors` | RMS-diff/RMS **0.00002**, corr **1.000000**, 0.00 dB |
 
-A ratio above 1 means the two waveforms are less alike than one is to silence, so
-the exported graph is not the model that was trained. It went unnoticed because
-the branch could not be exercised until `s2` fine-tuning existed to produce a
-`.safetensors` to feed it — the exporter and the trainer landed in the same batch.
-
-Two candidates are already eliminated. Weight-norm folding is **not** it: Burn
-mirrors torch exactly, `weight_g` as `[out,1,1]` and `weight_v` as `[out,in,k]`,
-so `fold_weight_norm`'s axis inference behaves the same for both sources. Nor is
-it a missing parameter: `build_state_dict` is strict and every shape matched.
-That points at a **shape-invariant** error — a transpose applied or skipped on a
-square weight, or a norm parameter matched to the wrong tensor — which is the same
-family as the `load_safetensors_into` double-transpose recorded above. **A Burn
-`.safetensors` is not a PyTorch checkpoint, and this is the second bug caused by
-treating it as one.**
+Three checks that were run and should not be repeated from scratch: the Burn
+`.safetensors` applies to `SovitsPartial` at **773/0/0**; every one of the 539
+parameters `build_state_dict` produces from it is within 7% of the base model's,
+as two epochs of fine-tuning should be; and the tensors it emits appear verbatim
+in the exported graph. **The lesson is about the metric, not the weights** —
+sample-wise RMS on a vocoder is phase-sensitive, and two runs of the *same* model
+can differ hugely by it. Compare log-spectra or energy envelopes when asking
+whether two graphs are the same model.
 
 `s1` is emitted as **two** graphs, `s1_prompt` and `s1_step`, because a KV cache
 cannot be a single static graph; the weights therefore appear twice on disk.
