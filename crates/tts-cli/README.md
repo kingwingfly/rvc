@@ -113,8 +113,10 @@ warning). **`stt` is how the transcripts get written** — read them before
 training: a wrong transcript is the corpus-wide version of a wrong reference one.
 
 ```sh
-# fish: transcribe the corpus first
-for f in corpus/*.wav; stt < $f > (path change-extension txt $f); end
+# fish. `stt` reads f32le mono 16 kHz on stdin, so ffmpeg decodes into it.
+for f in corpus/*.wav
+  ffmpeg -v quiet -i $f -f f32le -ar 16000 -ac 1 - | stt > (path change-extension txt $f)
+end
 
 tts train corpus/ -o models/mine --stage both --epochs 10
 tts -r clip.wav -t "<transcript>" \
@@ -140,6 +142,7 @@ corpus rather than to the epochs.
 | `--segment-frames` | `32` | latent frames `s2` renders per step; trades VRAM against little else |
 | `--d-lr-ratio`, `--d-interval` | `1.0`, `1` | hold off an `s2` discriminator that is winning |
 | `--no-save-best` | off | stop keeping a best-so-far `s2` checkpoint |
+| `--backend`, `--device` | `auto` | as above, except that `onnx` is rejected — ONNX Runtime cannot train. `--device` takes a comma-separated list for data-parallel training, the first being the master |
 | `--no-tui` | off | disable the dashboard and log to stderr |
 
 Each stage writes `<stem>.<s1|s2>.safetensors` — the weight **EMA**, markedly
@@ -180,6 +183,8 @@ transcribe with `stt` and compare.
 ```sh
 cargo run -p burn-gptsovits --example load -- sovits <s2G2333k.pth>    # 773/0
 cargo run -p burn-gptsovits --example keys -- --group <any checkpoint> # what a new one expects
+cargo run -p burn-gptsovits --example reconstruct -- \
+  <chinese-hubert-base/pytorch_model.bin> <s2G*.pth> <in.f32le@16k> <out.f32le@32k>
 ```
 
 [`docs/gptsovits-architecture.pdf`](../../docs/gptsovits-architecture.pdf) is the
