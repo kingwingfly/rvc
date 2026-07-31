@@ -7,21 +7,45 @@
 //! ```
 //!
 //! One line in, one utterance out, so a script is a file of lines. `--sr`
-//! resamples the output, which is what feeds `rvc serve`:
+//! resamples the output, which is what feeds the voice-conversion filter:
 //!
 //! ```sh
 //! tts --reference clip.wav --sr 16000 < script.txt \
-//!   | rvc serve -m voice.safetensors --model-sr 48000 > out.f32le
+//!   | rvc -m voice.safetensors --model-sr 48000 > out.f32le
 //! ```
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use clap::{Args, ValueEnum};
+use clap::{Args, Subcommand, ValueEnum};
+use cli_kit::CompletionsArgs;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tts_core::{OUTPUT_SR, SampleOptions, SynthOptions};
 
 use crate::backend::{ModelPaths, TtsBackend, load};
+use crate::train::TrainArgs;
+
+/// The whole of the `tts` command tree, defined once and worn two ways: the
+/// `tts` binary flattens it at its top level, `voice` nests it under a `tts`
+/// subcommand. Every engine here has the same shape — the bare invocation is
+/// the stdin→stdout filter, and everything else is a subcommand.
+#[derive(Debug, Args)]
+pub struct TtsCli {
+    #[command(flatten)]
+    pub synth: TtsArgs,
+    #[command(subcommand)]
+    pub command: Option<TtsCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TtsCommand {
+    /// Fine-tune GPT-SoVITS on a corpus of audio with transcripts.
+    // Boxed because it carries every knob of two training loops, and an enum is
+    // as large as its biggest variant.
+    Train(Box<TrainArgs>),
+    /// Print a shell completion script (bash, zsh, fish, powershell, elvish).
+    Completions(CompletionsArgs),
+}
 
 /// Which language front-end to phonemize with.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
@@ -51,8 +75,9 @@ impl From<Lang> for text_kit::Language {
 pub struct TtsArgs {
     /// Reference recording of the voice to clone (any format ffmpeg reads).
     /// A few seconds of clean speech is what the model expects.
-    // Checked in `run` rather than by clap: these are flattened into a command
-    // that also has a `train` subcommand, and clap would demand them there too.
+    // Checked in `synthesize` rather than by clap: these are flattened into a
+    // command that also has a `train` subcommand, and clap would demand them
+    // there too.
     #[arg(short, long)]
     pub reference: Option<PathBuf>,
     /// What is said in the reference recording. Required, and not a nicety:
@@ -86,7 +111,8 @@ pub struct TtsArgs {
     #[arg(short, long, value_enum, default_value_t = Lang::Zh)]
     pub language: Lang,
     /// Output sample rate. The model produces 32 kHz; anything else is
-    /// resampled, which is how this feeds `rvc serve` at 16 kHz.
+    /// resampled, which is how this feeds the voice-conversion filter at
+    /// 16 kHz.
     #[arg(long, default_value_t = OUTPUT_SR)]
     pub sr: u32,
     /// Runtime: `auto`, `onnx`, `cuda`, `tch` (`libtorch`) or `wgpu`. `auto`
@@ -117,10 +143,10 @@ pub struct TtsArgs {
     pub max_tokens: usize,
 }
 
-pub async fn run(args: TtsArgs) -> Result<()> {
+pub async fn synthesize(args: TtsArgs) -> Result<()> {
     // Before anything is fetched or loaded. Clap cannot enforce these — they are
     // flattened into a command that also has a `train` subcommand, which does not
-    // want them — so `run` is where "required" is decided, and a missing flag
+    // want them — so this is where "required" is decided, and a missing flag
     // should cost a message rather than a model load.
     let reference = args
         .reference
