@@ -228,12 +228,13 @@ pub fn train(
                     inputs.stage.wants_s2(),
                     &device,
                 )?;
-                // Never unwound, for the reason `args::run` gives at its own
-                // `mem::forget`: dropping an ONNX Runtime CUDA session beside a
-                // CUDA Burn backend corrupts the heap, and the abort lands at
-                // exit — after the fine-tuned weights are safely on disk, which
-                // makes it look like training crashed when it did not. Verified
-                // both ways: this same run without `--prosody` exits 0.
+                // Never unwound, for the reason `args::synthesize` gives at its
+                // own `mem::forget`: dropping an ONNX Runtime CUDA session
+                // beside a CUDA Burn backend corrupts the heap, and the abort
+                // lands at exit — after the fine-tuned weights are safely on
+                // disk, which makes it look like training crashed when it did
+                // not. Verified both ways: this same run without `--prosody`
+                // exits 0.
                 // The cost is the encoder's memory held for the rest of the run;
                 // it is inference-only and idle from here on.
                 std::mem::forget(prosody);

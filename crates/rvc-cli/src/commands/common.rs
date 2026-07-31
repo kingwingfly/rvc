@@ -1,5 +1,5 @@
 //! Shared helpers: resolve ONNX assets, build an [`RvcConfig`], and construct a
-//! backend-agnostic [`Converter`] for both `convert` and `serve`.
+//! backend-agnostic [`Converter`] for both the streaming filter and `convert`.
 
 use std::path::{Path, PathBuf};
 
@@ -58,7 +58,7 @@ pub fn resolve_runtime(backend: InferBackend, model: &Path) -> Runtime {
 }
 
 /// Build a streaming [`Converter`] over the selected backend. Shared by
-/// `convert` (batch preset) and `serve` (realtime preset); the same
+/// `convert` (batch preset) and the bare filter (realtime preset); the same
 /// block/overlap/crossfade code drives either the ONNX or the Burn generator.
 pub async fn build_converter(
     opts: &ModelOpts,
@@ -69,23 +69,24 @@ pub async fn build_converter(
     denoise: Option<DenoiseParams>,
 ) -> Result<Converter> {
     let conv_params = ConvertParams { transpose };
-    let runtime = resolve_runtime(backend, &opts.model);
+    let model = opts.model()?;
+    let runtime = resolve_runtime(backend, model);
 
     if runtime == Runtime::Onnx {
         let cfg = build_rvc_config(opts).await?;
-        let model = RvcModel::load(cfg).context("failed to load RVC models")?;
-        return Ok(Converter::new(model, params, conv_params).with_denoise(denoise));
+        let onnx = RvcModel::load(cfg).context("failed to load RVC models")?;
+        return Ok(Converter::new(onnx, params, conv_params).with_denoise(denoise));
     }
 
     let (content, rmvpe) = resolve_feature_models(opts).await?;
     anyhow::ensure!(
-        opts.model.exists(),
+        model.exists(),
         "generator weights not found: {} (train one with the `train` subcommand)",
-        opts.model.display()
+        model.display()
     );
     tracing::info!(
         "loading Burn generator from {} ({}, device {device})",
-        opts.model.display(),
+        model.display(),
         runtime.label()
     );
 
@@ -98,7 +99,7 @@ pub async fn build_converter(
                 rvc_core::cuda_generator(
                     &content,
                     &rmvpe,
-                    &opts.model,
+                    model,
                     opts.model_sr,
                     opts.speaker_id,
                     device,
@@ -113,7 +114,7 @@ pub async fn build_converter(
                 rvc_core::wgpu_generator(
                     &content,
                     &rmvpe,
-                    &opts.model,
+                    model,
                     opts.model_sr,
                     opts.speaker_id,
                     device,
@@ -128,7 +129,7 @@ pub async fn build_converter(
                 rvc_core::libtorch_generator(
                     &content,
                     &rmvpe,
-                    &opts.model,
+                    model,
                     opts.model_sr,
                     opts.speaker_id,
                     device,
@@ -199,17 +200,18 @@ pub async fn build_rvc_config(opts: &ModelOpts) -> Result<RvcConfig> {
         }
     };
 
+    let generator = opts.model()?;
     anyhow::ensure!(
-        opts.model.exists(),
+        generator.exists(),
         "generator model not found: {} (train one with the `train` subcommand)",
-        opts.model.display()
+        generator.display()
     );
 
     let mut cfg = RvcConfig::new(
         ModelPaths {
             content,
             rmvpe,
-            generator: opts.model.clone(),
+            generator: generator.to_path_buf(),
         },
         opts.model_sr,
     );

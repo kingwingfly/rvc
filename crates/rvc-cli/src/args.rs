@@ -1,8 +1,9 @@
 //! Command-line argument definitions (clap derive).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use anyhow::{Context, Result};
+use clap::{Args, Subcommand, ValueEnum};
 pub use cli_kit::CompletionsArgs;
 
 /// Which generator backend runs inference.
@@ -57,35 +58,28 @@ impl From<ComputeBackend> for rvc_train::TrainBackend {
     }
 }
 
-/// rvc — RVC voice conversion toolkit (ONNX Runtime + native Burn).
-#[derive(Debug, Parser)]
-#[command(name = "rvc", version, about)]
-pub struct Cli {
+/// The whole of the `rvc` command tree, defined once and worn two ways: the
+/// `rvc` binary flattens it at its top level, `voice` nests it under an `rvc`
+/// subcommand. Every engine here has the same shape — the bare invocation is
+/// the stdin→stdout filter, and everything else is a subcommand.
+#[derive(Debug, Args)]
+pub struct RvcCli {
+    #[command(flatten)]
+    pub filter: FilterArgs,
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<RvcCommand>,
 }
 
-/// The voice-conversion subcommands, defined once and worn two ways: `rvc`
-/// flattens them at its top level (`rvc convert`), `voice` nests them under an
-/// `rvc` subcommand (`voice rvc convert`).
 #[derive(Debug, Subcommand)]
 pub enum RvcCommand {
     /// Batch-convert audio files into the target timbre (WAV output).
     Convert(ConvertArgs),
-    /// Realtime Unix filter: raw f32le mono PCM on stdin -> stdout.
-    Serve(ServeArgs),
     /// Train an RVC generator on a corpus (native Rust / burn).
-    Train(TrainArgs),
-    /// Slice a corpus into clean per-sentence training clips (dead-air removed).
-    Preprocess(PreprocessArgs),
-}
-
-#[derive(Debug, Subcommand)]
-pub enum Command {
     // Boxed because `TrainArgs` alone is ~320 bytes against 72 for the next
     // largest variant, and clippy is right that every parse shouldn't pay it.
-    #[command(flatten)]
-    Rvc(Box<RvcCommand>),
+    Train(Box<TrainArgs>),
+    /// Slice a corpus into clean per-sentence training clips (dead-air removed).
+    Preprocess(PreprocessArgs),
     /// Download/prefetch shared ONNX assets from Hugging Face.
     Models(ModelsArgs),
     /// Print a shell completion script (bash, zsh, fish, powershell, elvish).
@@ -95,9 +89,9 @@ pub enum Command {
 /// Shared options for locating the three ONNX models.
 #[derive(Debug, Args, Clone)]
 pub struct ModelOpts {
-    /// Trained RVC generator ONNX (`voice.onnx`).
+    /// Trained RVC generator weights (`.safetensors`, or `.onnx` for an export).
     #[arg(short, long)]
-    pub model: PathBuf,
+    pub model: Option<PathBuf>,
     /// Generator output sample rate (40000 or 48000).
     #[arg(long, default_value_t = 48000)]
     pub model_sr: u32,
@@ -114,6 +108,21 @@ pub struct ModelOpts {
     /// Speaker id fed to the generator (single-speaker models use 0).
     #[arg(long, default_value_t = 0)]
     pub speaker_id: i64,
+}
+
+impl ModelOpts {
+    /// The generator weights every conversion path needs.
+    ///
+    /// Optional to clap only because these options are also flattened beside
+    /// the subcommands, for the bare filter invocation — requiring `-m` there
+    /// would require it of `train` and `preprocess` too. So "required" is
+    /// decided here, and callers check it before anything is fetched or loaded.
+    pub fn model(&self) -> Result<&Path> {
+        self.model.as_deref().context(
+            "-m/--model is required: the trained generator weights \
+             (train one with the `train` subcommand)",
+        )
+    }
 }
 
 #[derive(Debug, Args)]
@@ -141,8 +150,9 @@ pub struct ConvertArgs {
     pub denoise: DenoiseOpts,
 }
 
+/// The bare invocation: raw f32le mono PCM in, raw f32le mono PCM out.
 #[derive(Debug, Args)]
-pub struct ServeArgs {
+pub struct FilterArgs {
     #[command(flatten)]
     pub models: ModelOpts,
     /// Pitch shift in semitones.
@@ -164,8 +174,9 @@ pub struct ServeArgs {
     pub denoise: DenoiseOpts,
 }
 
-/// De-hiss options shared by `convert` and `serve`. Off unless `--denoise` is
-/// given; the tuning flags only take effect when it is. Defaults mirror
+/// De-hiss options shared by the streaming filter and `convert`. Off unless
+/// `--denoise` is given; the tuning flags only take effect when it is. Defaults
+/// mirror
 /// [`rvc_core::DenoiseParams::default`]; `--denoise-strength` is the main knob.
 #[derive(Debug, Args, Clone)]
 pub struct DenoiseOpts {

@@ -1,6 +1,7 @@
 //! Raw interleaved `f32` little-endian PCM helpers for the Unix-filter path.
 //!
-//! `rvc serve` reads raw PCM from stdin and writes raw PCM to stdout so it
+//! The voice-conversion filter reads raw PCM from stdin and writes raw PCM to
+//! stdout so it
 //! composes with ffmpeg pipes. These helpers turn any [`AsyncRead`] into a
 //! stream of mono `f32` chunks and drain a stream back into any [`AsyncWrite`].
 
