@@ -6,7 +6,8 @@
 //! realtime stdin/stdout piping.
 //!
 //! - [`decode`] turns mp3/wav/... files into a resampled mono `f32` stream.
-//! - [`pcm`] turns raw `f32le` stdin/stdout into/out of that same stream shape.
+//! - [`pcm`] turns raw `f32le` stdin/stdout into/out of that same stream shape,
+//!   and rate-adapts a chunk when the two ends of a pipe disagree.
 //! - [`encode`] writes a stream to a float WAV file.
 //! - [`filter`] applies a streaming libavfilter chain (e.g. de-noise) in-process.
 
@@ -26,5 +27,5 @@ pub type Samples = Vec<f32>;
 pub use decode::{DecodeOptions, decode_path, decode_paths};
 pub use encode::{write_wav, write_wav_file};
 pub use filter::AudioFilter;
-pub use pcm::{read_f32le, write_f32le};
+pub use pcm::{read_f32le, resample_linear, write_f32le, write_f32le_chunk};
 pub use slice::{SliceOptions, slice};

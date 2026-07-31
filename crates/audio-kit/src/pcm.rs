@@ -1,9 +1,10 @@
 //! Raw interleaved `f32` little-endian PCM helpers for the Unix-filter path.
 //!
-//! The voice-conversion filter reads raw PCM from stdin and writes raw PCM to
-//! stdout so it
-//! composes with ffmpeg pipes. These helpers turn any [`AsyncRead`] into a
-//! stream of mono `f32` chunks and drain a stream back into any [`AsyncWrite`].
+//! An engine that filters raw PCM reads it from stdin and writes it to stdout so
+//! it composes with ffmpeg pipes. These helpers turn any [`AsyncRead`] into a
+//! stream of mono `f32` chunks and drain a stream — or a single chunk — back into
+//! any [`AsyncWrite`], and [`resample_linear`] adapts the rate when the two ends
+//! of such a pipe disagree.
 
 use futures::{Stream, StreamExt};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -58,16 +59,117 @@ where
     W: AsyncWrite + Unpin,
     S: Stream<Item = Result<Samples>> + Unpin,
 {
-    let mut bytes: Vec<u8> = Vec::new();
     while let Some(item) = stream.next().await {
-        let chunk = item?;
-        bytes.clear();
-        bytes.reserve(chunk.len() * 4);
-        for s in chunk {
-            bytes.extend_from_slice(&s.to_le_bytes());
-        }
-        writer.write_all(&bytes).await?;
+        write_f32le_chunk(&mut writer, &item?).await?;
     }
     writer.flush().await?;
     Ok(())
+}
+
+/// Write one chunk of mono `f32` samples to `writer` as raw `f32le` PCM.
+///
+/// The writer is **not** flushed, so a realtime caller can flush per chunk for
+/// latency and a batch one can leave it to its `BufWriter`.
+pub async fn write_f32le_chunk<W>(mut writer: W, samples: &[f32]) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let mut bytes = Vec::with_capacity(samples.len() * 4);
+    for s in samples {
+        bytes.extend_from_slice(&s.to_le_bytes());
+    }
+    writer.write_all(&bytes).await?;
+    Ok(())
+}
+
+/// Resample mono PCM from `from_sr` to `to_sr` by linear interpolation.
+///
+/// Adequate wherever the signal is already band-limited well below either
+/// rate's Nyquist — a synthesizer's output is, so this costs nothing audible
+/// and saves a dependency on a filter design. It is *not* a general-purpose
+/// resampler: feeding it full-band audio being downsampled will alias, and
+/// [`decode`](crate::decode) (which resamples through ffmpeg) is the right tool
+/// for that.
+///
+/// Empty input yields empty output. A zero rate is meaningless — the ratio
+/// would be non-finite and the output length arbitrary — so it yields empty
+/// output too rather than panicking.
+pub fn resample_linear(pcm: &[f32], from_sr: u32, to_sr: u32) -> Samples {
+    if from_sr == to_sr {
+        return pcm.to_vec();
+    }
+    if pcm.is_empty() || from_sr == 0 || to_sr == 0 {
+        return Vec::new();
+    }
+    let ratio = from_sr as f64 / to_sr as f64;
+    let n = (pcm.len() as f64 / ratio) as usize;
+    (0..n)
+        .map(|i| {
+            let x = i as f64 * ratio;
+            let (a, f) = (x as usize, (x - x.floor()) as f32);
+            // The last output sample can land on the final input sample, whose
+            // right-hand neighbour does not exist; hold it instead of reading past.
+            let b = (a + 1).min(pcm.len() - 1);
+            pcm[a] * (1.0 - f) + pcm[b] * f
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resample_linear;
+
+    /// A ramp: every sample is its own index, so an interpolated output sample
+    /// is exactly its position in input coordinates.
+    fn ramp(n: usize) -> Vec<f32> {
+        (0..n).map(|i| i as f32).collect()
+    }
+
+    #[test]
+    fn matching_rates_are_a_copy() {
+        let pcm = ramp(64);
+        assert_eq!(resample_linear(&pcm, 32000, 32000), pcm);
+    }
+
+    #[test]
+    fn downsampling_halves_the_length() {
+        let out = resample_linear(&ramp(100), 32000, 16000);
+        assert_eq!(out.len(), 50);
+        // Output i reads input 2i.
+        for (i, &s) in out.iter().enumerate() {
+            assert!((s - (2 * i) as f32).abs() < 1e-3, "{i}: {s}");
+        }
+    }
+
+    #[test]
+    fn upsampling_triples_the_length_and_holds_the_last_sample() {
+        let out = resample_linear(&ramp(10), 16000, 48000);
+        assert_eq!(out.len(), 30);
+        // Output i reads input i/3, up to the last sample that has a right-hand
+        // neighbour to interpolate towards.
+        for (i, &s) in out.iter().take(28).enumerate() {
+            assert!((s - i as f32 / 3.0).abs() < 1e-3, "{i}: {s}");
+        }
+        // Past that the final input sample is held rather than read past.
+        assert_eq!(&out[28..], &[9.0, 9.0]);
+    }
+
+    #[test]
+    fn a_ratio_that_does_not_divide_interpolates_between_samples() {
+        let out = resample_linear(&ramp(100), 48000, 32000);
+        assert_eq!(out.len(), 66);
+        assert_eq!(out[0], 0.0);
+        assert!((out[1] - 1.5).abs() < 1e-3, "{}", out[1]);
+        assert!(out.iter().all(|s| s.is_finite()));
+        // The tail reaches the input's tail rather than stopping short of it.
+        let last = *out.last().unwrap();
+        assert!(last > 97.0 && last < 99.0, "{last}");
+    }
+
+    #[test]
+    fn degenerate_inputs_are_empty_not_a_panic() {
+        assert!(resample_linear(&[], 32000, 16000).is_empty());
+        assert!(resample_linear(&ramp(8), 0, 16000).is_empty());
+        assert!(resample_linear(&ramp(8), 32000, 0).is_empty());
+    }
 }
