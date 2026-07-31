@@ -307,13 +307,20 @@ pub struct TrainArgs {
         conflicts_with = "pretrained_g"
     )]
     pub resume: Option<PathBuf>,
-    /// Pretrained generator base (`f0G48k.pth`) to warm-start from
-    /// (HF `lj1995/VoiceConversionWebUI`).
-    #[arg(long)]
+    /// Pretrained generator base to warm-start from [default:
+    /// `<-o's directory>/pretrained/f0G48k.pth`, downloaded from HF
+    /// `lj1995/VoiceConversionWebUI` on first use].
+    #[arg(long, conflicts_with = "no_pretrained")]
     pub pretrained_g: Option<PathBuf>,
-    /// Pretrained discriminator base (`f0D48k.pth`) to warm-start from.
-    #[arg(long)]
+    /// Pretrained discriminator base to warm-start from [default:
+    /// `<-o's directory>/pretrained/f0D48k.pth`, downloaded on first use].
+    #[arg(long, conflicts_with = "no_pretrained")]
     pub pretrained_d: Option<PathBuf>,
+    /// Train from scratch: no warm-start, and no download of the bases. Poor on
+    /// a small corpus, which is why they are fetched by default. `--resume`
+    /// fetches nothing either: it continues from weights that already exist.
+    #[arg(long)]
+    pub no_pretrained: bool,
     /// ContentVec encoder ONNX [default: auto-downloaded].
     #[arg(long)]
     pub content: Option<PathBuf>,
