@@ -9,7 +9,7 @@ use crate::args::ConvertArgs;
 use crate::commands::common::{build_converter, resolve_backend};
 
 pub async fn run(args: ConvertArgs) -> Result<()> {
-    let backend = resolve_backend(args.backend, &args.models.model);
+    let backend = resolve_backend(args.backend, args.models.model()?);
 
     // One loaded model (GPU/ORT init is expensive), reused across files.
     let mut converter = build_converter(
@@ -33,7 +33,7 @@ pub async fn run(args: ConvertArgs) -> Result<()> {
         converter.reset();
         let out = tokio::task::block_in_place(|| converter.convert_all(&wav16k))
             .with_context(|| format!("converting {}", input.display()))?;
-        write_out(&args.output_dir, input, &args.models.model, model_sr, out).await?;
+        write_out(&args.output_dir, input, args.models.model()?, model_sr, out).await?;
     }
     Ok(())
 }

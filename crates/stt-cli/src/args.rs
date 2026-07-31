@@ -11,12 +11,14 @@
 //! the detected language, which is what a subtitle file or a TTS training
 //! manifest needs.
 //!
-//! Unlike `rvc serve` this is **not** streaming: the whole input is read
-//! before anything is transcribed, because segmentation looks for silences
-//! across the recording and Whisper's own mel normalisation is per 30 s window.
+//! Unlike the voice-conversion filter this is **not** streaming: the whole
+//! input is read before anything is transcribed, because segmentation looks for
+//! silences across the recording and Whisper's own mel normalisation is per
+//! 30 s window.
 
 use anyhow::{Context, Result};
-use clap::{Args, ValueEnum};
+use clap::{Args, Subcommand, ValueEnum};
+use cli_kit::CompletionsArgs;
 use futures::StreamExt;
 use std::path::PathBuf;
 use stt_core::{DecodeOptions, TranscribeOptions};
@@ -24,6 +26,24 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 
 use crate::backend::load_transcriber;
 pub use cli_kit::Backend;
+
+/// The whole of the `stt` command tree, defined once and worn two ways: the
+/// `stt` binary flattens it at its top level, `voice` nests it under an `stt`
+/// subcommand. Every engine here has the same shape — the bare invocation is
+/// the stdin→stdout filter, and everything else is a subcommand.
+#[derive(Debug, Args)]
+pub struct SttCli {
+    #[command(flatten)]
+    pub transcribe: SttArgs,
+    #[command(subcommand)]
+    pub command: Option<SttCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SttCommand {
+    /// Print a shell completion script (bash, zsh, fish, powershell, elvish).
+    Completions(CompletionsArgs),
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum Format {
@@ -87,7 +107,7 @@ pub struct SttArgs {
     pub max_tokens: usize,
 }
 
-pub async fn run(args: SttArgs) -> Result<()> {
+pub async fn transcribe(args: SttArgs) -> Result<()> {
     anyhow::ensure!(
         args.max_clip > 0.0 && args.max_clip <= 30.0,
         "--max-clip must be in (0, 30]: one segment has to fit Whisper's 30 s encoder window"

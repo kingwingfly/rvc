@@ -1,15 +1,15 @@
 //! `voice` argument definitions.
 //!
-//! The voice-conversion flags are not defined here — [`rvc_cli::args::RvcCommand`]
-//! is the single definition, worn nested (`voice rvc convert`) instead of flat
-//! (`rvc convert`). This file only adds the nesting and the engines the `rvc`
-//! binary does not have.
+//! No engine's flags are defined here. Each `*-cli` crate exports the whole of
+//! its own command tree — [`rvc_cli::args::RvcCli`], [`stt_cli::SttCli`],
+//! [`tts_cli::TtsCli`] — and this file only nests them, so `voice rvc convert`
+//! and `rvc convert` are one definition worn two ways.
 
 use clap::{Parser, Subcommand};
-use rvc_cli::args::{CompletionsArgs, ModelsArgs, RvcCommand};
+use rvc_cli::args::{CompletionsArgs, ModelsArgs, RvcCli};
 
-use stt_cli::SttArgs;
-use tts_cli::TtsArgs;
+use stt_cli::SttCli;
+use tts_cli::TtsCli;
 
 /// voice — speech toolkit: recognition, synthesis and voice conversion, each a
 /// filter that composes in a pipe.
@@ -22,19 +22,16 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Voice conversion: retimbre audio into a trained target voice.
-    // Boxed because `TrainArgs` alone dwarfs every other variant; see the same
-    // note on `rvc_cli::args::Command`.
-    Rvc {
-        #[command(subcommand)]
-        command: Box<RvcCommand>,
-    },
+    /// Voice conversion: f32le mono PCM @16 kHz on stdin, converted PCM on
+    /// stdout; `convert`, `train` and `preprocess` beside it.
+    // Every engine's tree is boxed because each carries its trainer's arguments,
+    // and an enum is as large as its biggest variant.
+    Rvc(Box<RvcCli>),
     /// Speech recognition: f32le mono PCM @16 kHz on stdin, text on stdout.
-    Stt(Box<SttArgs>),
-    /// Speech synthesis: text on stdin, f32le mono PCM on stdout.
-    Tts(Box<TtsArgs>),
-    /// Fine-tune GPT-SoVITS on a corpus of audio with transcripts.
-    TtsTrain(Box<tts_cli::TrainArgs>),
+    Stt(Box<SttCli>),
+    /// Speech synthesis: text on stdin, f32le mono PCM on stdout; `train`
+    /// beside it.
+    Tts(Box<TtsCli>),
     /// Download/prefetch shared model assets from Hugging Face.
     Models(ModelsArgs),
     /// Print a shell completion script (bash, zsh, fish, powershell, elvish).
