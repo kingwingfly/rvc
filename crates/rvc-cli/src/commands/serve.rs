@@ -51,15 +51,11 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     let mut output = Box::pin(convert_stream(converter, input));
 
     let mut stdout = BufWriter::new(tokio::io::stdout());
-    let mut bytes: Vec<u8> = Vec::new();
     while let Some(item) = output.next().await {
         let chunk = item.context("conversion failed")?;
-        bytes.clear();
-        bytes.reserve(chunk.len() * 4);
-        for s in chunk {
-            bytes.extend_from_slice(&s.to_le_bytes());
-        }
-        stdout.write_all(&bytes).await.context("writing stdout")?;
+        audio_kit::write_f32le_chunk(&mut stdout, &chunk)
+            .await
+            .context("writing stdout")?;
         // Flush eagerly so downstream players get low latency.
         stdout.flush().await.ok();
     }

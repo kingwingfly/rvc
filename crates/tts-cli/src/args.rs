@@ -228,7 +228,10 @@ pub async fn run(args: TtsArgs) -> Result<()> {
         let pcm = tokio::task::block_in_place(|| model.say(&line, &reference, &opts))
             .with_context(|| format!("synthesising {line:?}"))?;
         tracing::info!("{:.2} s  {line}", pcm.len() as f32 / OUTPUT_SR as f32);
-        write_pcm(&mut out, &pcm, args.sr).await?;
+        let pcm = audio_kit::resample_linear(&pcm, OUTPUT_SR, args.sr);
+        audio_kit::write_f32le_chunk(&mut out, &pcm)
+            .await
+            .context("writing stdout")?;
         spoken += 1;
     }
 
@@ -263,28 +266,4 @@ async fn read_reference(path: &std::path::Path) -> Result<Vec<f32>> {
         audio.extend_from_slice(&chunk.with_context(|| format!("decoding {}", path.display()))?);
     }
     Ok(audio)
-}
-
-/// Write PCM to stdout, resampling if the caller asked for another rate.
-async fn write_pcm<W: AsyncWriteExt + Unpin>(out: &mut W, pcm: &[f32], sr: u32) -> Result<()> {
-    let pcm = if sr == OUTPUT_SR {
-        pcm.to_vec()
-    } else {
-        // Linear resample. The synthesizer's output is already band-limited well
-        // below either rate's Nyquist, so this costs nothing audible and saves a
-        // dependency on a filter design.
-        let ratio = OUTPUT_SR as f64 / sr as f64;
-        let n = (pcm.len() as f64 / ratio) as usize;
-        (0..n)
-            .map(|i| {
-                let x = i as f64 * ratio;
-                let (a, f) = (x as usize, (x - x.floor()) as f32);
-                let b = (a + 1).min(pcm.len() - 1);
-                pcm[a] * (1.0 - f) + pcm[b] * f
-            })
-            .collect()
-    };
-    let bytes: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
-    out.write_all(&bytes).await.context("writing stdout")?;
-    Ok(())
 }
