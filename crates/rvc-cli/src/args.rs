@@ -71,6 +71,21 @@ impl ModelOpts {
              (train one with the `train` subcommand)",
         )
     }
+
+    /// Reject values clap's types accept but the pipeline cannot use.
+    pub fn verify(&self) -> Result<()> {
+        anyhow::ensure!(
+            matches!(self.model_sr, 40_000 | 48_000),
+            "--model-sr must be 40000 or 48000, not {}: it is a property of the \
+             trained generator, not a resampling request",
+            self.model_sr
+        );
+        anyhow::ensure!(
+            self.speaker_id >= 0,
+            "--speaker-id must not be negative (single-speaker models use 0)"
+        );
+        Ok(())
+    }
 }
 
 #[derive(Debug, Args)]
@@ -98,6 +113,14 @@ pub struct ConvertArgs {
     pub denoise: DenoiseOpts,
 }
 
+impl ConvertArgs {
+    /// Reject values clap's types accept but the pipeline cannot use.
+    pub fn verify(&self) -> Result<()> {
+        self.models.verify()?;
+        self.denoise.verify()
+    }
+}
+
 /// The bare invocation: raw f32le mono PCM in, raw f32le mono PCM out.
 #[derive(Debug, Args)]
 pub struct FilterArgs {
@@ -120,6 +143,17 @@ pub struct FilterArgs {
     pub device: burn_kit::DeviceSpec,
     #[command(flatten)]
     pub denoise: DenoiseOpts,
+}
+
+impl FilterArgs {
+    /// Reject values clap's types accept but the pipeline cannot use.
+    pub fn verify(&self) -> Result<()> {
+        self.models.verify()?;
+        // A zero-sample read would spin on stdin forever without ever handing
+        // the converter a block to work on.
+        anyhow::ensure!(self.chunk > 0, "--chunk must be at least 1 sample");
+        self.denoise.verify()
+    }
 }
 
 /// De-hiss options shared by the streaming filter and `convert`. Off unless
@@ -149,6 +183,31 @@ pub struct DenoiseOpts {
 }
 
 impl DenoiseOpts {
+    /// Reject a de-hiss configuration `anlmdn` would refuse or misbehave on.
+    ///
+    /// Only when `--denoise` is on: the tuning flags have defaults, so checking
+    /// them unconditionally would reject a run that never denoises anything.
+    pub fn verify(&self) -> Result<()> {
+        if !self.denoise {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            self.denoise_strength > 0.0,
+            "--denoise-strength must be positive (drop --denoise to disable the stage)"
+        );
+        anyhow::ensure!(self.denoise_patch > 0.0, "--denoise-patch must be positive");
+        // Not cosmetic: `anlmdn` searches a window for patches to compare, so a
+        // window no larger than the patch leaves it nothing to average over.
+        anyhow::ensure!(
+            self.denoise_research > self.denoise_patch,
+            "--denoise-research ({}) must exceed --denoise-patch ({}): the research \
+             window is where similar patches are looked for",
+            self.denoise_research,
+            self.denoise_patch
+        );
+        Ok(())
+    }
+
     /// The [`rvc_core::DenoiseParams`] these flags describe, or `None` when
     /// `--denoise` was not passed (stage disabled).
     pub fn params(&self) -> Option<rvc_core::DenoiseParams> {
@@ -224,6 +283,35 @@ pub struct PreprocessArgs {
     /// Peak-normalize each written clip to ~0.95 full-scale.
     #[arg(long)]
     pub normalize: bool,
+}
+
+impl PreprocessArgs {
+    /// Reject a slicer configuration that would silently produce no clips.
+    pub fn verify(&self) -> Result<()> {
+        anyhow::ensure!(self.model_sr > 0, "--model-sr must be positive");
+        anyhow::ensure!(
+            self.silence_db <= 0.0,
+            "--silence-db is dBFS, so it must be at most 0 (full scale); {} would \
+             treat every sample as silence",
+            self.silence_db
+        );
+        anyhow::ensure!(
+            self.min_silence > 0.0,
+            "--min-silence must be positive: a zero-length gap is every sample boundary"
+        );
+        anyhow::ensure!(self.min_clip >= 0.0, "--min-clip must not be negative");
+        anyhow::ensure!(self.pad >= 0.0, "--pad must not be negative");
+        // `0` is the documented "never split" sentinel, so it is the one value
+        // allowed below `--min-clip`.
+        anyhow::ensure!(
+            self.max_clip == 0.0 || self.max_clip >= self.min_clip,
+            "--max-clip ({}) is below --min-clip ({}), so every clip would be cut \
+             to a length that is then discarded (use 0 to never split)",
+            self.max_clip,
+            self.min_clip
+        );
+        Ok(())
+    }
 }
 
 #[derive(Debug, Args)]
@@ -335,4 +423,57 @@ pub struct TrainArgs {
     /// Disable the TUI dashboard and log to stderr (auto-off when not a TTY).
     #[arg(long)]
     pub no_tui: bool,
+}
+
+impl TrainArgs {
+    /// Reject a training configuration that cannot converge, or cannot start.
+    ///
+    /// Checked before the corpus is decoded and before a base is downloaded: a
+    /// typo in a learning rate should cost a message, not an hour of GPU and a
+    /// model full of `NaN`.
+    pub fn verify(&self) -> Result<()> {
+        anyhow::ensure!(
+            matches!(self.model_sr, 40_000 | 48_000),
+            "--model-sr must be 40000 or 48000, not {}",
+            self.model_sr
+        );
+        anyhow::ensure!(self.epochs > 0, "--epochs must be at least 1");
+        anyhow::ensure!(self.batch_size > 0, "--batch-size must be at least 1");
+        anyhow::ensure!(
+            self.grad_accum > 0,
+            "--grad-accum must be at least 1 (1 = off)"
+        );
+        anyhow::ensure!(self.d_interval > 0, "--d-interval must be at least 1");
+        anyhow::ensure!(self.speaker_id >= 0, "--speaker-id must not be negative");
+        anyhow::ensure!(
+            self.lr > 0.0 && self.lr.is_finite(),
+            "--lr must be a positive, finite number"
+        );
+        anyhow::ensure!(
+            self.d_lr_ratio > 0.0 && self.d_lr_ratio.is_finite(),
+            "--d-lr-ratio must be a positive, finite number (1.0 = same LR as the generator)"
+        );
+        // `1.0` is "no decay" and is the upper bound; at or below zero the LR
+        // would reach zero or go negative partway through the run.
+        anyhow::ensure!(
+            self.lr_final > 0.0 && self.lr_final <= 1.0,
+            "--lr-final is a fraction of --lr and must be in (0, 1], not {}: at or \
+             below 0 the run would end with no learning rate at all, and above 1 it \
+             would end faster than it started",
+            self.lr_final
+        );
+        // `0` disables the EMA and saves the raw weights; `1` would mean a window
+        // as long as the run, which never updates.
+        anyhow::ensure!(
+            (0.0..1.0).contains(&self.ema_frac),
+            "--ema-frac is a fraction of the run and must be in [0, 1); 0 saves the \
+             raw weights"
+        );
+        anyhow::ensure!(
+            self.snr_weight >= 0.0 && self.snr_weight.is_finite(),
+            "--snr-weight must be zero (uniform) or a positive, finite exponent"
+        );
+        anyhow::ensure!(!self.device.is_empty(), "--device names no device");
+        Ok(())
+    }
 }

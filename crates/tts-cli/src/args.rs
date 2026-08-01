@@ -145,7 +145,30 @@ pub struct TtsArgs {
     pub max_tokens: usize,
 }
 
+impl TtsArgs {
+    /// Reject values clap's types accept but sampling or synthesis cannot use.
+    pub fn verify(&self) -> Result<()> {
+        anyhow::ensure!(self.sr > 0, "--sr must be positive");
+        // Sampling draws from the `k` best tokens, so `k = 0` draws from nothing.
+        anyhow::ensure!(self.top_k > 0, "--top-k must be at least 1");
+        anyhow::ensure!(self.max_tokens > 0, "--max-tokens must be at least 1");
+        // The logits are divided by it, so zero is a division and a negative
+        // value inverts the distribution into picking the *least* likely token.
+        anyhow::ensure!(
+            self.temperature > 0.0 && self.temperature.is_finite(),
+            "--temperature must be a positive, finite number (below 1 sharpens, above 1 flattens)"
+        );
+        anyhow::ensure!(
+            self.repetition_penalty > 0.0 && self.repetition_penalty.is_finite(),
+            "--repetition-penalty must be a positive, finite number (1.0 = no penalty)"
+        );
+        Ok(())
+    }
+}
+
 pub async fn synthesize(args: TtsArgs) -> Result<()> {
+    args.verify()?;
+
     // Before anything is fetched or loaded. Clap cannot enforce these — they are
     // flattened into a command that also has a `train` subcommand, which does not
     // want them — so this is where "required" is decided, and a missing flag

@@ -33,6 +33,7 @@ fn train_backend(backend: Backend) -> Result<rvc_train::TrainBackend> {
 }
 
 pub async fn run(args: TrainArgs) -> Result<()> {
+    args.verify()?;
     // Before anything is fetched: a backend that cannot train should not cost a
     // model download first.
     let backend = train_backend(args.backend)?;

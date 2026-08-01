@@ -30,6 +30,7 @@ use crate::args::FilterArgs;
 use crate::commands::common::build_converter;
 
 pub async fn run(args: FilterArgs) -> Result<()> {
+    args.verify()?;
     // Clap cannot mark `-m` required — these options sit beside the subcommands,
     // which would then demand it too — so it is checked here, before a download
     // or a model load can happen.

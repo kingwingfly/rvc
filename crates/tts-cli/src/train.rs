@@ -158,7 +158,61 @@ pub struct TrainArgs {
     pub no_tui: bool,
 }
 
+impl TrainArgs {
+    /// Reject a fine-tuning configuration that cannot converge, or cannot start.
+    ///
+    /// Checked before the corpus is prepared and before a base is downloaded, for
+    /// the same reason as the overwrite guard: a mistyped learning rate should
+    /// cost a message, not an hour of GPU and a model full of `NaN`.
+    pub fn verify(&self) -> Result<()> {
+        anyhow::ensure!(self.epochs > 0, "--epochs must be at least 1");
+        anyhow::ensure!(self.batch_size > 0, "--batch-size must be at least 1");
+        anyhow::ensure!(self.d_interval > 0, "--d-interval must be at least 1");
+        anyhow::ensure!(self.max_tokens > 0, "--max-tokens must be at least 1");
+        anyhow::ensure!(
+            self.segment_frames > 0,
+            "--segment-frames must be at least 1: it is the window the decoder is trained on"
+        );
+        anyhow::ensure!(
+            self.lr > 0.0 && self.lr.is_finite(),
+            "--lr must be a positive, finite number"
+        );
+        anyhow::ensure!(
+            self.s2_lr > 0.0 && self.s2_lr.is_finite(),
+            "--s2-lr must be a positive, finite number"
+        );
+        anyhow::ensure!(
+            self.d_lr_ratio > 0.0 && self.d_lr_ratio.is_finite(),
+            "--d-lr-ratio must be a positive, finite number (1.0 = same LR as the generator)"
+        );
+        anyhow::ensure!(
+            self.lr_final > 0.0 && self.lr_final <= 1.0,
+            "--lr-final is a fraction of --lr and must be in (0, 1], not {}: at or \
+             below 0 the run would end with no learning rate at all, and above 1 it \
+             would end faster than it started",
+            self.lr_final
+        );
+        anyhow::ensure!(
+            (0.0..1.0).contains(&self.ema_frac),
+            "--ema-frac is a fraction of the run and must be in [0, 1); 0 saves the \
+             raw weights"
+        );
+        anyhow::ensure!(!self.device.is_empty(), "--device names no device");
+        // Only `s2` has a discriminator, so a `--pretrained-d` under `--stage s1`
+        // would be fetched, or read from disk, and then never opened. Saying so
+        // is better than obeying a flag that cannot do anything.
+        anyhow::ensure!(
+            self.pretrained_d.is_none() || self.stage.wants_s2(),
+            "--pretrained-d is an `s2` discriminator, which `--stage s1` never trains \
+             (use `--stage s2` or `--stage both`)"
+        );
+        Ok(())
+    }
+}
+
 pub async fn run(args: TrainArgs) -> Result<()> {
+    args.verify()?;
+
     // Before the base models are fetched and the corpus is encoded — preparation
     // is the expensive half of a fine-tune, and discovering the collision after
     // it has already spent what the check exists to save. Only the stages that

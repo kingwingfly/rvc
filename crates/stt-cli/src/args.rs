@@ -108,11 +108,41 @@ pub struct SttArgs {
     pub max_tokens: usize,
 }
 
+impl SttArgs {
+    /// Reject values clap's types accept but the decoder cannot use.
+    pub fn verify(&self) -> Result<()> {
+        // 30 s is not a tuning choice: it is the width of Whisper's encoder
+        // window, and a longer segment simply would not fit one.
+        anyhow::ensure!(
+            self.max_clip > 0.0 && self.max_clip <= 30.0,
+            "--max-clip must be in (0, 30]: one segment has to fit Whisper's 30 s encoder window"
+        );
+        anyhow::ensure!(self.chunk > 0, "--chunk must be at least 1 sample");
+        anyhow::ensure!(self.max_tokens > 0, "--max-tokens must be at least 1");
+        anyhow::ensure!(self.min_clip >= 0.0, "--min-clip must not be negative");
+        anyhow::ensure!(
+            self.min_silence > 0.0,
+            "--min-silence must be positive: a zero-length gap is every sample boundary"
+        );
+        anyhow::ensure!(
+            self.silence_db <= 0.0,
+            "--silence-db is dBFS, so it must be at most 0 (full scale); {} would \
+             treat every sample as silence",
+            self.silence_db
+        );
+        anyhow::ensure!(
+            self.min_clip <= self.max_clip,
+            "--min-clip ({}) exceeds --max-clip ({}), so every segment would be cut \
+             to a length that is then discarded",
+            self.min_clip,
+            self.max_clip
+        );
+        Ok(())
+    }
+}
+
 pub async fn transcribe(args: SttArgs) -> Result<()> {
-    anyhow::ensure!(
-        args.max_clip > 0.0 && args.max_clip <= 30.0,
-        "--max-clip must be in (0, 30]: one segment has to fit Whisper's 30 s encoder window"
-    );
+    args.verify()?;
 
     let dir = match &args.model {
         Some(dir) => dir.clone(),

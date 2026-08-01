@@ -19,6 +19,7 @@ use crate::args::PreprocessArgs;
 const AUDIO_EXTS: &[&str] = &["mp3", "wav", "flac", "m4a", "ogg", "opus", "aac", "wma"];
 
 pub async fn run(args: PreprocessArgs) -> Result<()> {
+    args.verify()?;
     let opts = SliceOptions {
         silence_db: args.silence_db,
         min_silence: args.min_silence,

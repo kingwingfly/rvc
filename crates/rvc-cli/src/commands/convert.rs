@@ -9,6 +9,7 @@ use crate::args::ConvertArgs;
 use crate::commands::common::{build_converter, resolve_backend};
 
 pub async fn run(args: ConvertArgs) -> Result<()> {
+    args.verify()?;
     let backend = resolve_backend(args.backend, args.models.model()?);
 
     // One loaded model (GPU/ORT init is expensive), reused across files.
