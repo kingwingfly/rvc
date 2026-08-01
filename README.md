@@ -78,8 +78,8 @@ READMEs and [`docs/setup.md`](docs/setup.md):
 | [`docs/rvc-architecture.typ`](docs/rvc-architecture.typ) | RVC v2 — the VITS-derived synthesizer, the NSF source module, the adversarial objective |
 | [`docs/gptsovits-architecture.typ`](docs/gptsovits-architecture.typ) | GPT-SoVITS v2 — cnhubert, the semantic quantiser, `s1` (text → tokens) and `s2` (tokens → waveform) |
 | [`docs/whisper-architecture.typ`](docs/whisper-architecture.typ) | Whisper large-v3-turbo — the log-mel front-end, the encoder/decoder stack, KV-cached greedy decoding |
+| [`docs/training.md`](docs/training.md) | every training loop in the toolkit: the shared objective, `train-kit`, warm-start, devices |
 | [CLAUDE.md](CLAUDE.md) | why each decision was made and which trap it avoids — read before changing anything |
-| [`crates/rvc-train/ARCHITECTURE.md`](crates/rvc-train/ARCHITECTURE.md) | the RVC training loop in detail |
 
 The architecture papers are written for *reviewing and maintaining a port*
 rather than for driving the CLI. The convention is a [Typst](https://typst.app)

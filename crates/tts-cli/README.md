@@ -159,13 +159,18 @@ have to stay balanced and `mel` is the number to watch.
 On a terminal a live dashboard plots them and **`q` stops early and saves**. Off
 a TTY (or with `--no-tui`) logging is on stderr, and Ctrl-C stops and saves.
 
+How the two loops work — `s2` is the same VITS GAN `rvc` trains with, `s1` is
+not — is [`docs/training.md`](../../docs/training.md).
+
 ## Where files land
 
 Assets split by who reads them. **Inference assets** (cnhubert, `s1*.ckpt`,
 `s2G*.pth`, the prosody BERT) are shared across every run, so they live in a
 cache — `--cache-dir`, else `TTS_CACHE_DIR`, else `VOICE_CACHE_DIR`, else
-`$XDG_CACHE_HOME/voice`, else `~/.cache/voice`, and `-h` prints whichever that
-resolves to. `--models` and `--prosody` name a directory instead and download
+`voice` under the XDG cache root, which is `~/.cache` unless `$XDG_CACHE_HOME`
+names an absolute path. So the usual answer is `~/.cache/voice`, and `-h` prints
+whichever it resolves to on this machine. `--models` and `--prosody` name a
+directory instead and download
 nothing. **The `s2` discriminator base** (`s2D*.pth`) is read only by training and
 belongs to one run rather than to the machine, so it lands in
 `<out-dir>/pretrained/`. Everything else is written under the directory you

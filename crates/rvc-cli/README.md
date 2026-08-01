@@ -168,8 +168,10 @@ uv run --project export python export/export_onnx.py models/voice.safetensors mo
 
 Assets split by who reads them. **Inference assets** (ContentVec, RMVPE) are
 shared across every run, so they live in a cache — `--cache-dir`, else
-`RVC_CACHE_DIR`, else `VOICE_CACHE_DIR`, else `$XDG_CACHE_HOME/voice`, else
-`~/.cache/voice`, and `-h` prints whichever that resolves to. **Warm-start
+`RVC_CACHE_DIR`, else `VOICE_CACHE_DIR`, else `voice` under the XDG cache root,
+which is `~/.cache` unless `$XDG_CACHE_HOME` names an absolute path. So the
+usual answer is `~/.cache/voice`, and `-h` prints whichever it resolves to on
+this machine. **Warm-start
 bases** belong to one training run rather than to the machine, so they land in
 `<out-dir>/pretrained/`, beside the model they produced. Everything else is
 written under the directory you invoked from, the training log `./train.log`
@@ -181,4 +183,5 @@ Only 48 kHz is supported; 40 kHz training is not written yet. There is no
 index/retrieval blend or `protect` for tighter timbre match. Multi-device
 training works but is not *faster*, and **only GPU+CPU has been exercised, never
 two GPUs**. The training loop is documented in
-[`crates/rvc-train/ARCHITECTURE.md`](../rvc-train/ARCHITECTURE.md).
+[`docs/training.md`](../../docs/training.md), which covers every trainer in the
+toolkit.

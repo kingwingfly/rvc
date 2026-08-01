@@ -155,8 +155,10 @@ does not resume a partial blob, so the next run would otherwise start over.
 
 Whisper is inference-only here, so its weights are a machine-wide asset rather
 than part of any one run: they go to a cache — `--cache-dir`, else
-`STT_CACHE_DIR`, else `VOICE_CACHE_DIR`, else `$XDG_CACHE_HOME/voice`, else
-`~/.cache/voice`, and `-h` prints whichever that resolves to. **Nothing is ever
+`STT_CACHE_DIR`, else `VOICE_CACHE_DIR`, else `voice` under the XDG cache root,
+which is `~/.cache` unless `$XDG_CACHE_HOME` names an absolute path. So the
+usual answer is `~/.cache/voice`, and `-h` prints whichever it resolves to on
+this machine. **Nothing is ever
 downloaded into the directory you redirected output to.** Transcripts go where
 you point stdout, and nothing else is written.
 

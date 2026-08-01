@@ -69,9 +69,15 @@ Split by **who reads the file**, because the two kinds have opposite lifetimes:
 - **Inference assets** (ContentVec, RMVPE, Whisper, the prosody encoder,
   cnhubert, `s1*.ckpt`, `s2G*.pth`) are shared across every run on the machine,
   so they go to a cache: `--cache-dir` → `{RVC,STT,TTS}_CACHE_DIR` →
-  `VOICE_CACHE_DIR` → `$XDG_CACHE_HOME/voice` → `~/.cache/voice`. The resolved
-  path is a **computed clap default**, so `-h` prints where this machine will
-  actually put them rather than a placeholder.
+  `VOICE_CACHE_DIR` → `voice` under the XDG cache root, which is
+  `$XDG_CACHE_HOME` when absolute and `~/.cache` otherwise. The resolved path is
+  a **computed clap default**, so `-h` prints where this machine will actually
+  put them rather than a placeholder. The last step is written as a *root* that
+  `voice` is joined onto, not as two independent branches, because that is what
+  makes `~/voice` unreachable — the toolkit's directory can only appear inside a
+  cache, never beside the user's own folders — and a relative `XDG_CACHE_HOME`
+  is ignored, since a CWD-relative cache is the exact failure this split exists
+  to prevent.
 - **Training warm-start bases** (`f0G48k.pth`, `f0D48k.pth`, `s2D*.pth`) belong
   to one experiment, so they go to `pretrained/` inside that run's **output
   directory** — beside the checkpoints they produced, which is what makes a run
@@ -109,7 +115,7 @@ an engine depends on must never be named `voice-*` — that is why the shared
 crates are `*-kit`. `voice-cli` is the only `voice-*` crate.
 
 ### Where documentation goes
-Five places, and putting a paragraph in the wrong one is exactly how `README.md`
+Six places, and putting a paragraph in the wrong one is exactly how `README.md`
 once grew ninety lines of engine manual:
 
 - **`README.md`** is an *index*: what `voice` is, the pipeline, which binary to
@@ -123,8 +129,18 @@ once grew ninety lines of engine manual:
   open the voice-conversion manual, and drifted anyway. **Anything an engine
   README would have to say identically belongs here instead.**
 - **`crates/<engine>-cli/README.md`** is that engine's manual and only that:
-  every flag, which weights it fetches from where, its training loop. It links
-  to `docs/setup.md` rather than repeating it.
+  every flag, which weights it fetches from where, how to drive its training. It
+  links to `docs/setup.md` and `docs/training.md` rather than repeating them.
+- **`docs/training.md`** is to the trainers what `setup.md` is to the binaries:
+  everything true of every training loop at once — the shared VITS objective,
+  what is in `train-kit` and what is deliberately *not*, warm-start, the
+  checkpoint family, devices and the multi-device plan. It replaced
+  `crates/rvc-train/ARCHITECTURE.md`, which described one engine's loop from
+  inside that engine's crate, and so had no place to put the two facts that
+  matter most: that `rvc-train` and `tts-train`'s `s2` are the *same* loop over
+  the same losses, and that `s1` is deliberately not. A per-crate document
+  cannot say what two crates share. **A flag's default belongs in the engine
+  README, not here** — this page explains the mechanism, the README drives it.
 - **`docs/*.typ`** are the long-form architecture papers, one per network —
   `rvc-architecture`, `gptsovits-architecture`, `whisper-architecture` — for
   *reviewing* a port rather than using it: what each block computes, what every
@@ -263,7 +279,7 @@ Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper
 | `burn-rvc` | what is RVC's alone: `SourceModule` (NSF), the 768-dim `TextEncoder`, `GeneratorNsf`, the synthesizer wiring; re-exports `burn-vits` so it still reads as one model |
 | `burn-whisper` | the Whisper network (standalone Burn port); mirrors HF's `state_dict` layout so `openai/whisper-large-v3-turbo` loads unchanged |
 | `burn-gptsovits` | the GPT-SoVITS network. `hubert` at 210/0, `quantizer` at 3/0, and `s2` complete at 773/0 (the 3 unused are the codebook's EMA training statistics). **`s2` is verified numerically, not just structurally**: `examples/reconstruct` round-trips real audio through cnhubert, the quantiser and the synthesizer, and the output tracks the source's energy envelope at r=0.91 against a chance baseline of 0.30. `t2s` (`s1`) is at 295/0. Every network of GPT-SoVITS is now ported; `tts-core`/`tts-cli` wire them into a working `tts`, and `tts-train` fine-tunes **both** stages — `s1` for delivery, `s2` for timbre. `SovitsPartial::forward_train` composes `enc_q` → `flow.forward` → random segment → `dec` and returns the five tensors the VITS losses need; the matching `s2D2333k.pth` discriminator loads at 111/0/0. `examples/keys` lists any checkpoint's tensors, which is the first thing to run against a new one |
-| `rvc-train` | native Rust/Burn adversarial training loop (see `crates/rvc-train/ARCHITECTURE.md`) |
+| `rvc-train` | native Rust/Burn adversarial training loop (see `docs/training.md`) |
 | `hub-kit` | auto-download every engine's assets from Hugging Face |
 | `rvc-cli` | lib **and** the `rvc` binary (clap): the bare invocation streams, plus `convert`, `models`, `train`, `preprocess`, `completions` |
 | `stt-core` | speech recognition: Whisper log-mel front-end, BPE vocabulary, KV-cached greedy decode, segmentation via `audio-kit`'s slicer, and **two runtimes** (native Burn, ONNX Runtime) behind one `Engine` trait |
@@ -539,6 +555,10 @@ Exported graph contract (matches `rvc-core`):
 `phone[1,T,768] f32, phone_lengths[1] i64, pitch[1,T] i64, pitchf[1,T] f32, ds[1] i64, rnd[1,192,T] f32 → audio[1,1,L] f32`.
 
 ## Training notes
+
+How the loops actually work — the shared objective, `train-kit`, warm-start, the
+checkpoint family, the multi-device plan — is `docs/training.md`. What follows is
+only what will bite whoever edits them.
 
 Native Rust/Burn on a GPU; `trainer::run` is generic over `AutodiffBackend` and
 `crates/rvc-train/src/lib.rs` picks the concrete one at run time from `--backend`.
