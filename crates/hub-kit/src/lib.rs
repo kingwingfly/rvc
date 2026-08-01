@@ -62,8 +62,9 @@ pub fn default_rmvpe() -> ModelRef {
     ModelRef::new("lj1995", "VoiceConversionWebUI", "rmvpe.onnx")
 }
 
-/// The toolkit-wide cache directory: `$VOICE_CACHE_DIR`, else
-/// `$XDG_CACHE_HOME/voice`, else `~/.cache/voice`.
+/// The toolkit-wide cache directory: `$VOICE_CACHE_DIR`, else `voice` under the
+/// XDG cache root — `$XDG_CACHE_HOME` when it names an absolute path, otherwise
+/// `~/.cache`, so the answer is `~/.cache/voice` on a machine that sets neither.
 pub fn default_cache_dir() -> PathBuf {
     resolve_cache_dir(None, |k| std::env::var_os(k))
 }
@@ -88,17 +89,26 @@ fn resolve_cache_dir(
             return PathBuf::from(dir);
         }
     }
-    if let Some(xdg) = read("XDG_CACHE_HOME") {
-        return PathBuf::from(xdg).join("voice");
-    }
-    if let Some(home) = read("HOME") {
-        return PathBuf::from(home).join(".cache").join("voice");
-    }
-    // Never CWD-relative. A cache that moves with the shell's working directory
-    // re-downloads gigabytes the first time the user runs from somewhere else,
-    // and leaves a hidden folder wherever they happened to stand — including in
-    // an output directory.
-    std::env::temp_dir().join("voice-cache")
+    // The XDG cache *root*, which is then always joined with `voice`. Written
+    // this way round rather than as two independent branches because the shape
+    // is what stops `~/voice`: a home directory is never itself the root, only
+    // `~/.cache` is, so the toolkit's directory cannot surface beside the user's
+    // own folders. `XDG_CACHE_HOME` is honoured only when absolute — the spec
+    // says a relative value must be ignored, and here that is load-bearing
+    // rather than pedantic, since a relative root is a cache that moves with the
+    // shell's working directory: it re-downloads gigabytes the first time the
+    // user runs from somewhere else and leaves a folder wherever they happened
+    // to stand, including inside an output directory.
+    let root = read("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| read("HOME").map(|h| PathBuf::from(h).join(".cache")))
+        // No `HOME` at all is a broken environment rather than a configuration,
+        // and there is no `~` left to expand. A temporary directory keeps `-h`
+        // and every download working; it does not survive a reboot, which is the
+        // best that can be promised without somewhere to put a home cache.
+        .unwrap_or_else(|| std::env::temp_dir().join("voice-cache"));
+    root.join("voice")
 }
 
 /// Tell the user once where the cache went, rather than silently re-downloading
@@ -449,6 +459,25 @@ mod tests {
             resolve_cache_dir(None, &home_only),
             Path::new("/home/u/.cache/voice")
         );
+    }
+
+    /// The toolkit's directory hangs off a *cache* root, never off the home
+    /// directory itself: `~/.cache/voice` is the fallback, `~/voice` is not a
+    /// path this can produce. A relative `XDG_CACHE_HOME` is ignored rather than
+    /// resolved against the working directory, which the XDG spec requires and
+    /// which is the same rule as the test below.
+    #[test]
+    fn never_directly_under_home() {
+        for e in [
+            env(&[("HOME", "/home/u")]),
+            env(&[("XDG_CACHE_HOME", "cache"), ("HOME", "/home/u")]),
+            env(&[("XDG_CACHE_HOME", "../cache"), ("HOME", "/home/u")]),
+        ] {
+            assert_eq!(
+                resolve_cache_dir(None, &e),
+                Path::new("/home/u/.cache/voice")
+            );
+        }
     }
 
     /// The point of the whole rewrite: whatever the environment says — including

@@ -160,8 +160,13 @@ they go to a **cache**, resolved in this order:
 1. `--cache-dir`,
 2. `RVC_CACHE_DIR` / `STT_CACHE_DIR` / `TTS_CACHE_DIR`, per engine,
 3. `VOICE_CACHE_DIR`, for all of them at once,
-4. `$XDG_CACHE_HOME/voice`,
-5. `~/.cache/voice`.
+4. `voice` under the XDG cache root — `$XDG_CACHE_HOME` when that names an
+   absolute path, otherwise `~/.cache`.
+
+So a machine that sets none of them caches in **`~/.cache/voice`**. The last
+step is a cache *root* joined with `voice`, never the home directory joined with
+it: nothing here can produce `~/voice`, and a relative `XDG_CACHE_HOME` is
+ignored rather than resolved against wherever you happened to be standing.
 
 The resolved path is the printed default of `--cache-dir`, so `-h` always tells
 you where a given machine will put them. **A shared asset never lands in an
