@@ -4,9 +4,15 @@
 //! its own command tree — [`rvc_cli::args::RvcCli`], [`stt_cli::SttCli`],
 //! [`tts_cli::TtsCli`] — and this file only nests them, so `voice rvc convert`
 //! and `rvc convert` are one definition worn two ways.
+//!
+//! There is deliberately no top-level asset command. There used to be a `voice
+//! models`, which announced itself as fetching "shared model assets" and in
+//! fact fetched only voice conversion's two. Every engine has a `download` of
+//! its own now, and nesting them is what says which engine's weights a
+//! gigabyte is about to be spent on.
 
 use clap::{Parser, Subcommand};
-use rvc_cli::args::{CompletionsArgs, ModelsArgs, RvcCli};
+use rvc_cli::args::{CompletionsArgs, RvcCli};
 
 use stt_cli::SttCli;
 use tts_cli::TtsCli;
@@ -23,17 +29,16 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Voice conversion: f32le mono PCM @16 kHz on stdin, converted PCM on
-    /// stdout; `convert`, `train` and `preprocess` beside it.
+    /// stdout; `convert`, `train`, `preprocess` and `download` beside it.
     // Every engine's tree is boxed because each carries its trainer's arguments,
     // and an enum is as large as its biggest variant.
     Rvc(Box<RvcCli>),
-    /// Speech recognition: f32le mono PCM @16 kHz on stdin, text on stdout.
+    /// Speech recognition: f32le mono PCM @16 kHz on stdin, text on stdout;
+    /// `download` beside it.
     Stt(Box<SttCli>),
-    /// Speech synthesis: text on stdin, f32le mono PCM on stdout; `train`
-    /// beside it.
+    /// Speech synthesis: text on stdin, f32le mono PCM on stdout; `train`,
+    /// `preprocess` and `download` beside it.
     Tts(Box<TtsCli>),
-    /// Download/prefetch shared model assets from Hugging Face.
-    Models(ModelsArgs),
     /// Print a shell completion script (bash, zsh, fish, powershell, elvish).
     Completions(CompletionsArgs),
 }

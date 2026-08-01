@@ -18,7 +18,7 @@ Build it with `cargo build --release -p rvc-cli`. Every command below is also
 | `rvc convert <files…>` | batch-convert files to WAV |
 | `rvc train <corpus…>` | fine-tune a generator on a target voice |
 | `rvc preprocess <files…>` | slice a corpus into clean per-sentence clips |
-| `rvc models download` | prefetch the shared ContentVec + RMVPE assets |
+| `rvc download` | prefetch what a conversion fetches on its first run |
 | `rvc completions <shell>` | completion script for bash, zsh, fish, powershell or elvish |
 
 ## Flags

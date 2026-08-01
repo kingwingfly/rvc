@@ -22,9 +22,10 @@ pub use cli_kit::Backend;
 /// for building it.
 pub async fn run<C: CommandFactory>(cli: SttCli) -> Result<()> {
     match cli.command {
-        // Transcribing is the whole engine, so it is the bare invocation rather
-        // than a subcommand; `completions` is the only thing beside it.
+        // Transcribing is the whole engine, so it is the bare invocation;
+        // everything else is a subcommand beside it.
         None => args::transcribe(cli.transcribe).await,
+        Some(SttCommand::Download(a)) => args::download(a).await,
         Some(SttCommand::Completions(a)) => cli_kit::completions(a, C::command()),
     }
 }

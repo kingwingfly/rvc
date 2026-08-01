@@ -41,8 +41,36 @@ pub struct SttCli {
 
 #[derive(Debug, Subcommand)]
 pub enum SttCommand {
+    /// Prefetch the weights recognition needs, so the first run is offline.
+    Download(DownloadArgs),
     /// Print a shell completion script (bash, zsh, fish, powershell, elvish).
     Completions(CompletionsArgs),
+}
+
+/// What a default `stt` run would fetch on demand, fetched up front instead.
+///
+/// Nothing else: the repo is the only thing recognition downloads, and there is
+/// no training-only weight here to leave out.
+#[derive(Debug, Args)]
+pub struct DownloadArgs {
+    /// Override the model repo as `owner/name`
+    /// [default: openai/whisper-large-v3-turbo].
+    #[arg(long, value_name = "OWNER/NAME")]
+    pub repo: Option<String>,
+    /// Directory the downloaded models are cached in. Shared by every engine
+    /// unless `$STT_CACHE_DIR` (or `$VOICE_CACHE_DIR`) says otherwise.
+    #[arg(long, default_value_os_t = hub_kit::cache_dir_for("STT_CACHE_DIR"))]
+    pub cache_dir: PathBuf,
+}
+
+pub async fn download(args: DownloadArgs) -> Result<()> {
+    let assets = hub_kit::fetch_whisper(args.repo.as_deref(), &args.cache_dir)
+        .await
+        .context("failed to fetch the Whisper model")?;
+    // Where it landed is the point of the command, so it goes to stdout — it is
+    // also what `--model` takes, which is how an offline machine is set up.
+    println!("whisper: {}", assets.dir.display());
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]

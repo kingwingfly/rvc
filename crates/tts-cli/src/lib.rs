@@ -7,6 +7,7 @@
 
 pub mod args;
 pub mod backend;
+pub mod download;
 pub mod train;
 
 use anyhow::Result;
@@ -29,6 +30,7 @@ pub async fn run<C: CommandFactory>(cli: TtsCli) -> Result<()> {
         None => args::synthesize(cli.synth).await,
         Some(TtsCommand::Train(a)) => train::run(*a).await,
         Some(TtsCommand::Preprocess(a)) => preprocess_kit::run(a).await,
+        Some(TtsCommand::Download(a)) => download::run(a).await,
         Some(TtsCommand::Completions(a)) => cli_kit::completions(a, C::command()),
     }
 }

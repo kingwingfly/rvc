@@ -29,8 +29,8 @@ pub enum RvcCommand {
     Train(Box<TrainArgs>),
     /// Slice a corpus into clean per-sentence training clips (dead-air removed).
     Preprocess(PreprocessArgs),
-    /// Download/prefetch shared ONNX assets from Hugging Face.
-    Models(ModelsArgs),
+    /// Prefetch the weights a conversion needs, so the first run is offline.
+    Download(DownloadArgs),
     /// Print a shell completion script (bash, zsh, fish, powershell, elvish).
     Completions(CompletionsArgs),
 }
@@ -221,19 +221,7 @@ impl DenoiseOpts {
 }
 
 #[derive(Debug, Args)]
-pub struct ModelsArgs {
-    #[command(subcommand)]
-    pub command: ModelsCommand,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum ModelsCommand {
-    /// Download the shared ContentVec + RMVPE ONNX assets.
-    Download(ModelsDownloadArgs),
-}
-
-#[derive(Debug, Args)]
-pub struct ModelsDownloadArgs {
+pub struct DownloadArgs {
     /// Directory the downloaded models are cached in. Shared by every engine
     /// unless `$RVC_CACHE_DIR` (or `$VOICE_CACHE_DIR`) says otherwise.
     #[arg(long, default_value_os_t = hub_kit::cache_dir_for("RVC_CACHE_DIR"))]

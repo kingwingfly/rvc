@@ -21,7 +21,6 @@ mod args;
 use anyhow::Result;
 use clap::{CommandFactory, Parser};
 use rvc_cli::args::RvcCommand;
-use rvc_cli::commands;
 use tts_cli::TtsCommand;
 
 use args::{Cli, Command};
@@ -47,7 +46,6 @@ async fn main() -> Result<()> {
         Command::Rvc(c) => rvc_cli::run::<Cli>(*c).await,
         Command::Stt(c) => stt_cli::run::<Cli>(*c).await,
         Command::Tts(c) => tts_cli::run::<Cli>(*c).await,
-        Command::Models(a) => commands::models::run(a).await,
         Command::Completions(a) => cli_kit::completions(a, Cli::command()),
     }
 }

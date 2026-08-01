@@ -23,6 +23,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tts_core::{OUTPUT_SR, SampleOptions, SynthOptions};
 
 use crate::backend::{ModelPaths, load};
+use crate::download::DownloadArgs;
 use crate::train::TrainArgs;
 pub use cli_kit::Backend;
 pub use preprocess_kit::PreprocessArgs;
@@ -47,6 +48,8 @@ pub enum TtsCommand {
     Train(Box<TrainArgs>),
     /// Slice a corpus into clean per-sentence clips (dead-air removed).
     Preprocess(PreprocessArgs),
+    /// Prefetch the weights synthesis needs, so the first run is offline.
+    Download(DownloadArgs),
     /// Print a shell completion script (bash, zsh, fish, powershell, elvish).
     Completions(CompletionsArgs),
 }

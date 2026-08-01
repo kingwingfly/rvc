@@ -20,9 +20,9 @@ exporter under [`export/`](export/README.md).
 
 | | the bare invocation | subcommands |
 |---|---|---|
-| **`rvc`** | PCM in → retimbred PCM out | `convert`, `train`, `preprocess`, `models`, `completions` |
-| **`stt`** | PCM in → text out | `completions` |
-| **`tts`** | text in → PCM out | `train`, `preprocess`, `completions` |
+| **`rvc`** | PCM in → retimbred PCM out | `convert`, `train`, `preprocess`, `download`, `completions` |
+| **`stt`** | PCM in → text out | `download`, `completions` |
+| **`tts`** | text in → PCM out | `train`, `preprocess`, `download`, `completions` |
 | **`voice`** | — | `voice rvc …`, `voice stt …`, `voice tts …`, all three unchanged |
 
 ## Install

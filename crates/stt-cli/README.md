@@ -33,8 +33,9 @@ to benchmark, not to test.
 ## Shape
 
 Recognition is the **bare invocation**, the same as `rvc` and `tts`: stdin to
-stdout, logs on stderr, no `--input` flag. `stt completions <shell>` is the only
-subcommand beside it.
+stdout, logs on stderr, no `--input` flag. Two subcommands sit beside it —
+`stt download`, which fetches the weights the first run would otherwise pull
+from Hugging Face, and `stt completions <shell>`.
 
 ```sh
 ffmpeg -v quiet -i take.mp3 -f f32le -ar 16000 -ac 1 - | stt
@@ -150,6 +151,15 @@ Whisper's weights go to the shared cache — `--cache-dir` or `$STT_CACHE_DIR`,
 resolved as [`docs/setup.md`](../../docs/setup.md#where-models-are-stored)
 describes and printed by `-h`. Transcripts go where you point stdout, and
 nothing else is written.
+
+`stt download` fetches them without transcribing anything, which is how a
+machine that will be offline later — or a batch job that must not spend its
+first minutes downloading — gets set up. It prints the directory it filled, and
+that is exactly what `--model` takes:
+
+```sh
+stt --model "$(stt download | sed -n 's/^whisper: //p')" < take.f32le
+```
 
 ## Status and limits
 

@@ -172,6 +172,12 @@ So a machine that sets none of them caches in **`~/.cache/voice`**.
 output directory**, so pointing two runs at two output folders does not fetch
 Whisper twice.
 
+Every engine will fetch what it needs on its first run, and each has a
+`download` subcommand that does it up front instead — `rvc download`,
+`stt download`, `tts download`. Each prints the paths it filled, which are what
+that engine's `--model`/`--models` flags take, so this is also how a machine
+that will be offline later is set up.
+
 **Training warm-start bases** — RVC's `f0G48k.pth`/`f0D48k.pth` and
 GPT-SoVITS's `s2D*.pth` — are shared in the same way, so they go to
 `pretrained/` inside that cache, flat under their upstream names so you can drop

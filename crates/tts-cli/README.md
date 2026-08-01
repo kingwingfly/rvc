@@ -18,9 +18,18 @@ Build it with `cargo build --release -p tts-cli`. Every command below is also
 | `tts -r <clip> -t <transcript>` | **the bare invocation is the filter** — one line of text per utterance on stdin, f32le mono PCM on stdout |
 | `tts train <corpus>` | fine-tune `s1`, `s2` or both on a voice |
 | `tts preprocess <files…>` | slice recordings into clean per-sentence clips, ready for `stt` |
+| `tts download` | prefetch what a synthesis fetches on its first run |
 | `tts completions <shell>` | completion script for bash, zsh, fish, powershell or elvish |
 
 Logs go to stderr, so stdout is only ever samples. Blank input lines are skipped.
+
+`tts download` fetches what a default run fetches on demand — the GPT-SoVITS
+bundle and the prosody encoder — and prints where each landed, which is what
+`--models` and `--prosody` take. It is the way to set up a machine that will be
+offline later, or to keep a batch job from spending its first minutes on the
+network. `--no-prosody` leaves out the ~1.3 GB encoder; the `s2` discriminator
+is never fetched here at all, because only fine-tuning opens one and `train`
+gets it when asked.
 
 ```sh
 echo "今天天气很好" \

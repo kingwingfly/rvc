@@ -48,9 +48,11 @@ synthesis are siblings. Anything two of them need moves to a neutral crate first
 
 ### The shape every CLI has
 **Running a binary with no subcommand is the stdin→stdout filter.** Subcommands
-are for everything that is not streaming: `rvc convert|train|preprocess|models|completions`,
-`tts train|preprocess|completions`, `stt completions`. `stt` and `tts` were already this
-shape; `rvc` reached it by promoting `rvc serve` to the bare invocation.
+are for everything that is not streaming:
+`rvc convert|train|preprocess|download|completions`,
+`tts train|preprocess|download|completions`, `stt download|completions`. `stt`
+and `tts` were already this shape; `rvc` reached it by promoting `rvc serve` to
+the bare invocation.
 
 That is a deliberate promotion rather than a deletion. Streaming is the *primary*
 mode of a Unix filter — it is the thing the whole `futures::Stream` pipeline
@@ -62,6 +64,17 @@ The corollary is that **`voice` nests, it never renames.** `voice tts train`, no
 `voice tts-train`: `voice` hosts each engine's clap type unchanged, so a
 subcommand added to `tts` appears under `voice tts` with no edit to `voice-cli`
 at all. A hyphenated name is the tell that someone flattened a level by hand.
+
+**Every engine has a `download`, and it fetches exactly what a default bare
+invocation would fetch on demand** — no more, so a synthesis-only user is never
+charged for the `s2` discriminator, and no less, so the first real run needs no
+network. It is one level deep, like every other subcommand: `rvc download` was
+`rvc models download`, whose extra level bought nothing and could not be
+mirrored on the other two without inventing a `models` noun for each. There is
+deliberately no top-level `voice download`. The old `voice models` was one — it
+announced "shared model assets" and fetched only voice conversion's two — and
+the honest form of a cross-engine fetch is naming the engine whose gigabytes
+are being spent: `voice stt download`.
 
 ### Where downloaded weights land
 Split by **who reads the file**, because the two kinds have opposite lifetimes:
@@ -254,7 +267,7 @@ afterwards, and
 `crates/audio-kit/build.rs` refuses a build that has an unpacked `./ffmpeg` at
 the project root without naming it — `ffmpeg-sys-next` would not look there, and
 its pkg-config failure never mentions the directory sitting in front of you.
-ContentVec + RMVPE ONNX assets auto-download from Hugging Face (the `models`
+ContentVec + RMVPE ONNX assets auto-download from Hugging Face (the `download`
 subcommand prefetches them). Only 48 kHz is supported today.
 
 ### Exit 134 when an ORT session drops (RTX 2060, accepted)
@@ -308,7 +321,7 @@ Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper
 | `burn-gptsovits` | the GPT-SoVITS network. `hubert` at 210/0, `quantizer` at 3/0, and `s2` complete at 773/0 (the 3 unused are the codebook's EMA training statistics). **`s2` is verified numerically, not just structurally**: `examples/reconstruct` round-trips real audio through cnhubert, the quantiser and the synthesizer, and the output tracks the source's energy envelope at r=0.91 against a chance baseline of 0.30. `t2s` (`s1`) is at 295/0. Every network of GPT-SoVITS is now ported; `tts-core`/`tts-cli` wire them into a working `tts`, and `tts-train` fine-tunes **both** stages — `s1` for delivery, `s2` for timbre. `SovitsPartial::forward_train` composes `enc_q` → `flow.forward` → random segment → `dec` and returns the five tensors the VITS losses need; the matching `s2D2333k.pth` discriminator loads at 111/0/0. `examples/keys` lists any checkpoint's tensors, which is the first thing to run against a new one |
 | `rvc-train` | native Rust/Burn adversarial training loop (see `docs/training.md`) |
 | `hub-kit` | auto-download every engine's assets from Hugging Face |
-| `rvc-cli` | lib **and** the `rvc` binary (clap): the bare invocation streams, plus `convert`, `models`, `train`, `preprocess`, `completions` |
+| `rvc-cli` | lib **and** the `rvc` binary (clap): the bare invocation streams, plus `convert`, `train`, `preprocess`, `download`, `completions` |
 | `stt-core` | speech recognition: Whisper log-mel front-end, BPE vocabulary, KV-cached greedy decode, segmentation via `audio-kit`'s slicer, and **two runtimes** (native Burn, ONNX Runtime) behind one `Engine` trait |
 | `stt-cli` | lib **and** the `stt` binary |
 | `tts-core` | speech synthesis: reference analysis, `s1` sampling with a KV cache, `s2` decode, and the ONNX prosody encoder behind a trait. **Two runtimes**, the same shape `stt-core` uses: `Engine` is the whole boundary, so `Synthesizer` is not generic and the backend is a constructor call rather than a type parameter. `--backend onnx` runs the whole stack — cnhubert, the quantiser, `ref_enc`, `s1` and `s2` — off four exported graphs, and `auto` picks it when the model directory holds an export |
