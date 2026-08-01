@@ -73,9 +73,22 @@ pub fn run<AB: AutodiffBackend>(
     let device = &devices[0];
     let cfg = T2sConfig::default();
     let mut model = T2s::<AB>::new(&cfg, device);
-    model
+    let applied = model
         .load_weights(s1_path)
         .map_err(|e| crate::error::TrainError::Weights(format!("s1: {e}")))?;
+    // The loader allows a partial apply so a coverage report can be inspected,
+    // which makes an empty one a success unless somebody checks — and an
+    // unchecked warm-start silently trains a randomly initialised model for
+    // however long the run lasts. `s2` refuses the same way.
+    if !applied.errors.is_empty() || !applied.missing.is_empty() {
+        return Err(crate::error::TrainError::Weights(format!(
+            "s1 warm-start incomplete ({} missing, {} failed to apply): {} is \
+             not a full T2S checkpoint",
+            applied.missing.len(),
+            applied.errors.len(),
+            s1_path.display()
+        )));
+    }
 
     let usable: Vec<&Clip> = clips
         .iter()

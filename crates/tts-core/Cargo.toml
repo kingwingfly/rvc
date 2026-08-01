@@ -22,7 +22,9 @@ burn-gptsovits.workspace = true
 burn-vits.workspace = true
 burn = { workspace = true }
 hub-kit.workspace = true
-burn-kit.workspace = true
+# `store` for `ApplyResult`: `burn-gptsovits` enables it too, but relying on
+# another crate's feature to make this one compile is unification by luck.
+burn-kit = { workspace = true, features = ["store"] }
 # The prosody encoder is inference-only and published as ONNX, so it runs on
 # ONNX Runtime rather than being ported. See `bert.rs`.
 ort = { workspace = true, optional = true }

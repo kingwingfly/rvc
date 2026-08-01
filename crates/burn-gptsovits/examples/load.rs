@@ -34,16 +34,17 @@ impl common::Job for Load {
                 let mut model = Quantizer::<B>::new(&QuantizerConfig::default(), 1, device);
                 model.load_pytorch(&self.weights)
             }
-            // `load_weights`, not `load_pytorch`: this is the one component that
-            // is also *written* by fine-tuning, so the example has to cover the
-            // Burn `.safetensors` path as well as the original `.pth`.
+            // `load_weights`, not `load_pytorch`: these are the two components
+            // fine-tuning also *writes*, so the example has to cover the Burn
+            // `.safetensors` path as well as the original `.pth`/`.ckpt` — it is
+            // the harness to reach for when `tts` refuses a tuned checkpoint.
             "sovits" => {
                 let mut model = SovitsPartial::<B>::new(&SovitsConfig::default(), device);
                 model.load_weights(&self.weights)
             }
             "t2s" => {
                 let mut model = T2s::<B>::new(&T2sConfig::default(), device);
-                model.load_pytorch(&self.weights)
+                model.load_weights(&self.weights)
             }
             // The adversary `s2` fine-tuning warm-starts from. Its state dict
             // sits under `weight`, where RVC's sits under `model` — the one

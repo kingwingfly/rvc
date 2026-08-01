@@ -30,7 +30,20 @@ pub struct BurnEngine<B: Backend> {
 /// slot for is merely a superset (a fine-tuned `s2` holds `enc_q`, which only
 /// training reads), but a *model parameter* with no tensor behind it is random
 /// weight the model will happily run.
+///
+/// `errors` matters for the same reason and is not covered by `missing`: the
+/// applier drops a path that failed to apply from *both* lists, so a shape
+/// mismatch — an `s2G` from a later GPT-SoVITS against the v2 config, say —
+/// reads as full coverage while the parameter keeps its initialised value. The
+/// safetensors store raises those itself; the PyTorch path only reports them.
 fn covered(what: &str, result: &burn_kit::ApplyResult) -> Result<()> {
+    if let Some(first) = result.errors.first() {
+        return Err(TtsError::Weights(format!(
+            "{what}: {} of the checkpoint's tensors could not be applied \
+             ({first}) — the file does not match the model",
+            result.errors.len(),
+        )));
+    }
     if result.applied.is_empty() || !result.missing.is_empty() {
         return Err(TtsError::Weights(format!(
             "{what}: {} of {} parameters had no weights in the checkpoint \
@@ -54,17 +67,20 @@ impl<B: Backend> BurnEngine<B> {
         let weights =
             |what: &str, e: Box<dyn std::error::Error>| TtsError::Weights(format!("{what}: {e}"));
 
+        // Every loader here allows a partial apply, so that a coverage report can
+        // be inspected rather than a single mismatch aborting the load. That
+        // makes an empty apply a *success* unless somebody looks: a checkpoint
+        // whose names no longer match the module tree would leave every parameter
+        // at its freshly-initialised value and synthesise noise. Which is exactly
+        // the shape of failure worth refusing, so check every report — cnhubert's
+        // most of all, since `load_pytorch_into` cannot even fail on a file that
+        // is a different model entirely.
         let mut model = Hubert::<B>::new(&HubertConfig::chinese_base(), device);
-        model
+        let applied = model
             .load_pytorch(hubert)
             .map_err(|e| weights("cnhubert", e))?;
+        covered("cnhubert", &applied)?;
 
-        // Both loaders allow a partial apply, so that a coverage report can be
-        // inspected rather than a single mismatch aborting the load. That makes
-        // an empty apply a *success* unless somebody looks: a `.safetensors`
-        // whose names no longer match the module tree would leave every
-        // parameter at its freshly-initialised value and synthesise noise. Which
-        // is exactly the shape of failure worth refusing, so check the report.
         let mut t2s = T2s::<B>::new(&T2sConfig::default(), device);
         let applied = t2s.load_weights(s1).map_err(|e| weights("s1", e))?;
         covered("s1", &applied)?;

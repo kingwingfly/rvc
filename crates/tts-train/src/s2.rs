@@ -120,10 +120,15 @@ pub fn run<AB: AutodiffBackend>(
     let cfg = SovitsConfig::default();
     let mut net_g = SovitsPartial::<AB>::new(&cfg, device);
     let applied = net_g.load_weights(s2).map_err(|e| weights("s2", e))?;
-    if !applied.missing.is_empty() {
+    // `errors` as well as `missing`: the applier drops a path that failed to
+    // apply from *both* lists, so a shape mismatch reads as full coverage while
+    // the parameter keeps its initialised value.
+    if !applied.missing.is_empty() || !applied.errors.is_empty() {
         return Err(TrainError::Weights(format!(
-            "s2 warm-start incomplete ({} missing): {} is not a full generator checkpoint",
+            "s2 warm-start incomplete ({} missing, {} failed to apply): {} is not \
+             a full generator checkpoint",
             applied.missing.len(),
+            applied.errors.len(),
             s2.display()
         )));
     }
@@ -141,10 +146,12 @@ pub fn run<AB: AutodiffBackend>(
                 _ => disc.load_pytorch(p, Some("weight")),
             }
             .map_err(|e| weights("s2 discriminator", e))?;
-            if !res.missing.is_empty() {
+            if !res.missing.is_empty() || !res.errors.is_empty() {
                 return Err(TrainError::Weights(format!(
-                    "discriminator warm-start incomplete: {} missing from {}",
+                    "discriminator warm-start incomplete: {} missing, {} failed \
+                     to apply from {}",
                     res.missing.len(),
+                    res.errors.len(),
                     p.display()
                 )));
             }

@@ -52,9 +52,10 @@ touched one of them.
 > `ref_enc` — the prompt tokens and the speaker vector — come from the same
 > checkpoint as the decoder, so re-exporting only `s2` after a fine-tune leaves a
 > bundle whose front end and decoder are different models. It loads, runs and
-> sounds wrong, and nothing downstream can tell. Passing `--s2` with `--only` but
-> without `reference` is refused for that reason; `--s1` affects only the two
-> `s1` graphs and needs no such care.
+> sounds wrong, and nothing downstream can tell. Passing `--s2` with an `--only`
+> that names one of the two and not the other is refused for that reason, in
+> either direction; `--s1` affects only the two `s1` graphs and needs no such
+> care.
 
 A fine-tuned export round-trips exactly. Against the Burn path at a fixed seed
 with the caller-drawn noise held identical, a whole bundle exported from a
@@ -66,7 +67,6 @@ output is phase-sensitive, and two runs of the same model can differ enormously 
 that metric while sounding identical. An earlier note here reported this branch as
 broken on exactly that mistake — the comparison had a tuned `s2.onnx` decoding
 against a base `reference.onnx`.
-> Until it is fixed, deploy a fine-tune on Burn (`--backend tch`), not on ONNX.
 
 Four graphs, because the pipeline has four points where control returns to the
 host — sampling a token and deciding when to stop are the two that matter.

@@ -497,8 +497,10 @@ the one real trap here.** It carries the quantiser and `ref_enc` — the prompt
 tokens and the speaker vector — which live in the same file as the decoder. So
 `--only s2 --s2 tuned.safetensors` writes a bundle whose decoder is the fine-tune
 and whose front end is whatever was in the output directory. It loads, runs, and
-sounds wrong, and nothing downstream can detect it. `export_gptsovits.py` now
-refuses that combination and says to add `--only reference`.
+sounds wrong, and nothing downstream can detect it — and `--only reference --s2
+tuned.safetensors` is the same bundle mirrored, a tuned front end feeding a base
+decoder. `export_gptsovits.py` now refuses `--s2` with any `--only` that names
+one of the two and not the other.
 
 **This is what an earlier entry here reported as a bug in the Burn-`.safetensors`
 branch. That report was wrong and is retracted.** The branch is faithful; the
