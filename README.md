@@ -1,4 +1,4 @@
-# voice — a Python-free speech toolkit in Rust
+# voice — a speech toolkit in Rust
 
 Recognition, synthesis and voice conversion, each one a Unix filter, so they
 compose in a pipe:
@@ -8,21 +8,15 @@ voice -(stt)-> text -(translate)-> text -(tts)-> voice -(rvc)-> voice
 ```
 
 Every engine reads raw mono `f32le` PCM or plain text on **stdin** and writes the
-same on **stdout**, with logs on stderr — so any subset is a valid pipeline, and
-anything else that speaks text or PCM drops into the middle of one.
+same on **stdout**, with logs on stderr — so any subset is a valid pipeline.
 
-**No Python.** Not to run it, not to install it, not to develop it. Models are
-ported to [Burn](https://burn.dev) and load their original Hugging Face weights
-directly; training is native Rust too. One exception stays on purpose: the
-`.safetensors → ONNX` exporter under [`export/`](export/README.md), which is a
-maintainer's tool that nothing you run, install or train invokes. The reasoning
-is in [CLAUDE.md](CLAUDE.md).
+**No Python.** Models are ported to [Burn](https://burn.dev) and load their original Hugging Face 
+weights directly; training is native Rust too. One exception stays on purpose: the `.safetensors → ONNX` 
+exporter under [`export/`](export/README.md).
 
 ## One binary per engine, plus one that has them all
 
-**Running a binary with no subcommand *is* the filter.** Subcommands are for
-everything that is not streaming — training, preprocessing, batch files, shell
-completions — and every engine spells them the same way.
+**Running a binary with no subcommand *is* the filter.**
 
 | | the bare invocation | subcommands |
 |---|---|---|
@@ -30,11 +24,6 @@ completions — and every engine spells them the same way.
 | **`stt`** | PCM in → text out | `completions` |
 | **`tts`** | text in → PCM out | `train`, `completions` |
 | **`voice`** | — | `voice rvc …`, `voice stt …`, `voice tts …`, all three unchanged |
-
-Each engine stands alone and pulls in only what it uses — installing `stt` costs
-you none of the RVC stack. `voice` is an *integration*: it depends on `rvc-cli`,
-`stt-cli` and `tts-cli` as libraries, so a flag cannot exist on one spelling and
-not the other, and `voice tts train` is the same code as `tts train`.
 
 ## Install
 
@@ -44,8 +33,7 @@ cargo build --release              # all four binaries
 cargo build --release -p stt-cli   # or just one
 ```
 
-ONNX Runtime, LibTorch and ffmpeg are found the same way by all four binaries,
-as are `--backend`, `--device` and the model cache. That is written once:
+ONNX Runtime, LibTorch and ffmpeg are found the same way by all four binaries:
 
 **→ [`docs/setup.md`](docs/setup.md)**
 
@@ -61,12 +49,9 @@ as are `--backend`, `--device` and the model cache. That is written once:
 Each engine's README has the rest — every flag, which weights are fetched and
 from where, and its fine-tuning loop.
 
-**`--backend` is a run-time choice on every engine, and ONNX Runtime is a
-first-class target rather than a legacy one**: all three engines run under ONNX
+**`--backend` is a run-time choice on every engine**: all three engines run under ONNX
 Runtime or under native Burn on LibTorch, CubeCL/CUDA or WebGPU, in one binary,
-with one set of spellings. Fine-tuning is always Burn — ONNX Runtime has no
-training path at all, which is why [`export/`](export/README.md) exists to carry
-a trained model back out to it.
+with one set of spellings. Fine-tuning is always Burn.
 
 ## Documentation
 
@@ -79,7 +64,6 @@ READMEs and [`docs/setup.md`](docs/setup.md):
 | [`docs/gptsovits-architecture.typ`](docs/gptsovits-architecture.typ) | GPT-SoVITS v2 — cnhubert, the semantic quantiser, `s1` (text → tokens) and `s2` (tokens → waveform) |
 | [`docs/whisper-architecture.typ`](docs/whisper-architecture.typ) | Whisper large-v3-turbo — the log-mel front-end, the encoder/decoder stack, KV-cached greedy decoding |
 | [`docs/training.md`](docs/training.md) | every training loop in the toolkit: the shared objective, `train-kit`, warm-start, devices |
-| [CLAUDE.md](CLAUDE.md) | why each decision was made and which trap it avoids — read before changing anything |
 
 The architecture papers are written for *reviewing and maintaining a port*
 rather than for driving the CLI. The convention is a [Typst](https://typst.app)

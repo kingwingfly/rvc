@@ -2,8 +2,8 @@
 
 Convert this toolkit's Burn models to ONNX for deployment with ONNX Runtime.
 
-This is the **only** Python in the toolkit — a small, standalone `uv` project. It
-depends on neither the RVC-Project nor the GPT-SoVITS repository: `rvc_infer.py`
+This is the **only** Python in the toolkit — a small, standalone `python` project managed by `uv`. 
+It depends on neither the RVC-Project nor the GPT-SoVITS repository: `rvc_infer.py`
 and `gptsovits_infer.py` are clean-room torch reimplementations of the two
 inference paths, each mirroring its Burn module layout (`burn-rvc`,
 `burn-gptsovits` + `burn-vits`) so the trained weights load with a direct key
@@ -17,7 +17,7 @@ fine-tuned voice is ever deployable to a runtime other than Burn.
 ## RVC
 
 ```sh
-uv run --project export python export/export_onnx.py \
+uv run --project export python export/export_rvc.py \
     models/voice.safetensors  models/voice.onnx
 
 rvc convert --backend onnx -m models/voice.onnx --model-sr 48000 -o out/  in.mp3
@@ -47,79 +47,6 @@ the graphs are written, and `tts` looks for them in `<models>/onnx` or
 `tts train` writes — which is the case this exporter is for. `--only
 reference|s1|s2` re-exports one stage, which is what you want after a fine-tune
 touched one of them.
-
-> **`--s2` changes `reference.onnx` as well as `s2.onnx`.** The quantiser and
-> `ref_enc` — the prompt tokens and the speaker vector — come from the same
-> checkpoint as the decoder, so re-exporting only `s2` after a fine-tune leaves a
-> bundle whose front end and decoder are different models. It loads, runs and
-> sounds wrong, and nothing downstream can tell. Passing `--s2` with an `--only`
-> that names one of the two and not the other is refused for that reason, in
-> either direction; `--s1` affects only the two `s1` graphs and needs no such
-> care.
-
-A fine-tuned export round-trips exactly. Against the Burn path at a fixed seed
-with the caller-drawn noise held identical, a whole bundle exported from a
-`tts train` `.safetensors` matches to an RMS-difference/RMS ratio of **0.00002**
-(correlation 1.000000, 0.00 dB mean log-spectral difference).
-
-Measure with **log-spectra or energy envelopes**, not sample-wise RMS: a vocoder's
-output is phase-sensitive, and two runs of the same model can differ enormously by
-that metric while sounding identical. An earlier note here reported this branch as
-broken on exactly that mistake — the comparison had a tuned `s2.onnx` decoding
-against a base `reference.onnx`.
-
-Four graphs, because the pipeline has four points where control returns to the
-host — sampling a token and deciding when to stop are the two that matter.
-
-```
-reference.onnx
-  in   : audio [1,S] f32          16 kHz mono, the reference clip
-  out  : codes [1,T] i64          25 Hz semantic tokens, the `s1` prompt
-         speaker [1,512,1] f32    the speaker vector `s2` is conditioned on
-
-s1_prompt.onnx                    the opening pass, over text and prompt together
-  in   : phones [1,P] i64         reference phonemes then target phonemes
-         bert [1,P,1024] f32      per-phoneme prosody, zeros where there is none
-         prompt [1,K] i64         the reference's semantic tokens
-  out  : logits [1,1025] f32
-         present.{i}.key   [1,P+K,512] f32   i in 0..24
-         present.{i}.value [1,P+K,512] f32
-
-s1_step.onnx                      one decode step
-  in   : token [1,1] i64, position [1] i64
-         past.{i}.{key,value} [1,L,512] f32
-  out  : logits [1,1025] f32
-         present.{i}.{key,value} [1,L+1,512] f32
-
-s2.onnx
-  in   : codes [1,T] i64          what `s1` generated
-         text [1,P] i64           the target's phonemes alone
-         speaker [1,512,1] f32
-         noise [1,192,2T] f32     ε·noise_scale for the prior
-  out  : audio [1,1,1280·T] f32   32 kHz mono
-```
-
-Three things about those contracts are decisions rather than consequences, so
-they are worth stating.
-
-`noise` is a graph **input**, not a `randn` inside the graph — the same choice
-the RVC export makes with `rnd`. It makes `s2.onnx` a pure function, so a Burn
-run and an ONNX run of the same tokens can be diffed directly, which is a far
-stronger check than listening to either.
-
-`position` is an input to `s1_step` because the sinusoidal table is evaluated
-from it inside the graph, and audio positions restart at zero independently of
-the text's. Feeding the concatenated index instead is a mistake that produces
-fluent-sounding nonsense rather than an error.
-
-`s1` is **two** graphs rather than one merged graph with a `use_cache_branch`
-flag (which is what the Whisper export `stt` consumes does). The merged form
-would halve the ~600 MB the two `s1` graphs cost, but it needs data-dependent
-control flow that the dynamo exporter does not take kindly to, and the split is
-what upstream does too.
-
-Graphs whose weights exceed protobuf's limit spill into a sibling `*.onnx.data`
-file; keep the two together when moving an export.
 
 ### What the export was checked against
 

@@ -1,7 +1,7 @@
 [project]
 name = "rvc-onnx-export"
 version = "0.1.0"
-description = "Convert a Burn-trained RVC generator (safetensors) to ONNX for deploy"
+description = "Convert a Burn-trained RVC/GPTSoVITS (safetensors) to ONNX for deploy"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -11,9 +11,6 @@ dependencies = [
     "onnx>=1.16",
     "onnxscript>=0.7",
 ]
-
-[project.scripts]
-rvc-onnx-export = "export_onnx:main"
 
 [tool.uv]
 package = false

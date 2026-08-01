@@ -2,8 +2,7 @@
 
 All four binaries find their dependencies the same way, take the same
 `--backend` and `--device` spellings, and cache downloaded models in the same
-place. That is written here once; each engine's README links to this page rather
-than repeating it.
+place.
 
 - [Requirements](#requirements)
 - [ffmpeg](#ffmpeg)
@@ -21,21 +20,16 @@ than repeating it.
 | **ONNX Runtime** | any `--backend onnx` path, plus `rvc`'s feature extraction and `tts`'s prosody encoder | dlopened on first use from `ORT_DYLIB_PATH` |
 | **LibTorch 2.9.0** | optional — only `--backend tch` | linked at build time; found automatically at run time |
 
-**Neither machine-learning runtime is bundled or downloaded.** You point at your
-own, which is deliberate: a runtime that a distribution already ships should not
-be duplicated per binary, and pinning one would make the choice of deployment
-target ours rather than yours.
+**Neither machine-learning runtime is bundled or downloaded.**
 
 ## ffmpeg
 
 The **8.1** development libraries, from your package manager. They are linked,
-not dlopened, so they must be present at build time. The `ffmpeg` binary itself
-is only needed for the realtime examples, where it is what captures from a
-microphone and plays to speakers on either end of a pipe.
+not dlopened, so they must be present at build time.
 
 ## ONNX Runtime
 
-Loaded **dynamically on first use**, so this is a *run-time* variable and one
+Loaded **dynamically**, so this is a *run-time* variable and one
 binary works against any 1.24-compatible build, CPU or CUDA. A run that never
 touches ONNX Runtime never looks for it.
 
@@ -63,21 +57,6 @@ wget https://download.pytorch.org/libtorch/cu126/libtorch-shared-with-deps-2.9.0
 unzip libtorch-shared-with-deps-2.9.0+cu126.zip     # -> ./libtorch
 export LIBTORCH=$PWD/libtorch
 ```
-
-At run time each binary finds LibTorch by itself — **`LD_LIBRARY_PATH` is never
-needed.** Every `*-cli` crate's `build.rs` bakes `$LIBTORCH/lib` into its
-executable as a `RUNPATH`; the loader then searches, in order:
-
-1. the `LIBTORCH` (or `LIBTORCH_LIB`) the binary was built against, if that
-   directory still exists,
-2. `libtorch/` in the current working directory,
-3. `libtorch/` next to the binary, then `../libtorch/` for a `bin/` layout,
-4. whatever `ld.so.cache` already knows about.
-
-So keeping a `./libtorch` in your project directory works even after the binary
-moves. Without the `RUNPATH` a missing `libtorch.so` aborts inside `ld.so`
-*before `main` runs* — on every invocation, including ones that never touch a
-GPU, such as `completions`.
 
 `LD_LIBRARY_PATH` **is** needed for `cargo test`: cargo runs each test binary
 with its own package directory as the working directory, so the relative search
@@ -161,24 +140,15 @@ they go to a **cache**, resolved in this order:
 2. `RVC_CACHE_DIR` / `STT_CACHE_DIR` / `TTS_CACHE_DIR`, per engine,
 3. `VOICE_CACHE_DIR`, for all of them at once,
 4. `voice` under the XDG cache root — `$XDG_CACHE_HOME` when that names an
-   absolute path, otherwise `~/.cache`.
+   absolute path, otherwise `~/.cache/voice`.
 
-So a machine that sets none of them caches in **`~/.cache/voice`**. The last
-step is a cache *root* joined with `voice`, never the home directory joined with
-it: nothing here can produce `~/voice`, and a relative `XDG_CACHE_HOME` is
-ignored rather than resolved against wherever you happened to be standing.
+So a machine that sets none of them caches in **`~/.cache/voice`**.
 
-The resolved path is the printed default of `--cache-dir`, so `-h` always tells
-you where a given machine will put them. **A shared asset never lands in an
+`-h` always tells you where a given machine will put them. **A shared asset never lands in an
 output directory**, so pointing two runs at two output folders does not fetch
 Whisper twice.
 
-**Training warm-start bases** — RVC's `f0G48k.pth`/`f0D48k.pth` and
-GPT-SoVITS's `s2D*.pth` — go to `pretrained/` *inside the run's output
-directory* instead, because they belong to that experiment: they are read once
-by one training run, and keeping them beside the checkpoints they produced is
-what makes a run reproducible after the fact. `--no-pretrained` and `--resume`
-fetch nothing.
+**Training warm-start bases** — 
 
 There is no `--work-dir`: the working directory is the current directory, as it
 is for any other Unix tool.

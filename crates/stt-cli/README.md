@@ -101,7 +101,7 @@ because mirrors of converted weights move and disappear.
 
 ```fish
 for f in corpus/*.wav
-  ffmpeg -v quiet -i $f -f f32le -ar 16000 -ac 1 - | stt > (string replace .wav .txt $f)
+  ffmpeg -v quiet -i $f -f f32le -ar 16000 -ac 1 - | stt > (path change-extension txt $f)
 end
 ```
 
@@ -122,7 +122,7 @@ ffmpeg -v quiet -i take.mp3 -f f32le -ar 16000 -ac 1 - | stt --format jsonl
 
 ```sh
 ffmpeg -v quiet -i asmr.mp3 -f f32le -ar 16000 -ac 1 - \
-  | stt --silence-db -50 --min-silence 0.8 --language zh --format jsonl
+  | stt --silence-db=-50 --min-silence 0.8 --language zh --format jsonl
 ```
 
 **Recognise, then re-synthesise in another voice.** Every stage is a filter, so
