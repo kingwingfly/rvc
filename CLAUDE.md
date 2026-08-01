@@ -228,8 +228,9 @@ load "fine" and be silently scrambled. `burn-kit`'s round-trip test pins it.
 
 Requires **ffmpeg 8.1** dev libraries (and the `ffmpeg` binary for the realtime
 filter examples, which is what captures and plays PCM at either end of the pipe).
-A system package needs no configuration; `FFMPEG_DIR` names your own build and
-is then found at run time exactly as `LIBTORCH` is, and
+A system package needs no configuration; `FFMPEG_DIR` names your own build at
+**build time**, exactly as `LIBTORCH` does and with the same run-time search
+afterwards, and
 `crates/audio-kit/build.rs` refuses a build that has an unpacked `./ffmpeg` at
 the project root without naming it — `ffmpeg-sys-next` would not look there, and
 its pkg-config failure never mentions the directory sitting in front of you.
@@ -344,15 +345,26 @@ including ones that touch neither.
 **The call is per-executable; the search order is not.** An rpath is a property
 of one linked binary, so each `build.rs` still has to emit its own, but the four
 of them were byte-identical copies of the same 40 lines, and ffmpeg would have
-made that eight. The order now lives once in `rpath-kit`, a **build-dependency**
-with no runtime code: for each of `libtorch` and `ffmpeg`, the directory the
-build was pointed at (`LIBTORCH`/`LIBTORCH_LIB`, `FFMPEG_DIR`), then
-`<name>/lib` relative to the **working directory**, then `$ORIGIN/<name>/lib`
-and `$ORIGIN/../<name>/lib` relative to the **binary**, then whatever
-`ld.so.cache` knows. Dropping a self-contained tree beside a binary therefore
-works with no environment at all, and a distribution's own package keeps working
-untouched. `ffmpeg-sys-next` and `torch-sys` emit only a *link* search path,
-which the loader never reads — that is why this is not free.
+made that eighty. The order now lives once in `rpath-kit`, a **build-dependency**
+with no runtime code: for each of `libtorch` and `ffmpeg`, `<name>/lib` relative
+to the **working directory**, then `$ORIGIN/<name>/lib` and
+`$ORIGIN/../<name>/lib` relative to the **binary**, then whatever `ld.so.cache`
+knows. Dropping a self-contained tree beside a binary therefore works with no
+environment at all, and a distribution's own package keeps working untouched.
+`ffmpeg-sys-next` and `torch-sys` emit only a *link* search path, which the
+loader never reads — that is why this is not free.
+
+**Every entry is relative, and that is the rule to keep.** `LIBTORCH` and
+`FFMPEG_DIR` say where to *link* against and nothing more; the build machine's
+absolute paths used to be baked in front of the relative ones, which meant `ldd`
+on a user's machine reported the maintainer's directory layout, and a build-time
+environment decided a run-time answer. It also cannot be what a user wants:
+these libraries are linked, so `ld.so` resolves them before `main` and no
+variable of ours could be read in time. **The run-time variable is
+`LD_LIBRARY_PATH`**, which glibc consults *before* `DT_RUNPATH` — so it
+overrides all of this already and is the documented escape hatch. The cost of
+dropping the absolute entry is that running a binary from a directory holding
+neither `./libtorch` nor `./ffmpeg` needs it; `cargo test` already did.
 
 The LibTorch entries are gated on the `tch` feature; the ffmpeg ones never are,
 because every engine decodes audio. A binary that references no ffmpeg symbol

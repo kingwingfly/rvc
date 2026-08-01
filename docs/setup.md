@@ -9,6 +9,7 @@ than repeating it.
 - [ffmpeg](#ffmpeg)
 - [ONNX Runtime](#onnx-runtime)
 - [LibTorch](#libtorch)
+- [Finding the libraries at run time](#finding-the-libraries-at-run-time)
 - [Building](#building)
 - [Backends and devices](#backends-and-devices)
 - [Where models are stored](#where-models-are-stored)
@@ -33,31 +34,17 @@ not dlopened, so they must be present at build time. The `ffmpeg` binary itself
 is only needed for the realtime examples, where it is what captures from a
 microphone and plays to speakers on either end of a pipe.
 
-A package manager is the easy path and needs nothing else. If you would rather
-use your own build — a newer ffmpeg than your distribution ships, or a
-self-contained tree to deploy beside the binaries — point at it the way you
-point at LibTorch:
+A package manager is the easy path and needs nothing else. To build against your
+own instead — a newer ffmpeg than your distribution ships, or a self-contained
+tree to deploy beside the binaries — name it the way you name LibTorch:
 
 ```sh
 export FFMPEG_DIR=$PWD/ffmpeg      # expects ffmpeg/lib and ffmpeg/include
 ```
 
-At run time each binary then finds it by itself, searching in the same order
-LibTorch is searched:
-
-1. the `FFMPEG_DIR` it was built against, if that directory still exists,
-2. `ffmpeg/` in the current working directory,
-3. `ffmpeg/` next to the binary, then `../ffmpeg/` for a `bin/` layout,
-4. whatever `ld.so.cache` already knows about — a distribution's own package,
-   which is why none of this is needed when you have one.
-
-**`LD_LIBRARY_PATH` is never needed for either library.** Both search paths are
-compiled into the executable as a `RUNPATH`, by `rpath-kit` from each `*-cli`
-crate's `build.rs`.
-
-An unpacked `./ffmpeg` at the project root that you have *not* named in
-`FFMPEG_DIR` fails the build with a message saying so, rather than falling
-through to a pkg-config error that never mentions it.
+That is a build-time variable, like `LIBTORCH`. An unpacked `./ffmpeg` at the
+project root that you have *not* named in it fails the build saying so, rather
+than falling through to a pkg-config error that never mentions it.
 
 ## ONNX Runtime
 
@@ -90,25 +77,28 @@ unzip libtorch-shared-with-deps-2.9.0+cu126.zip     # -> ./libtorch
 export LIBTORCH=$PWD/libtorch
 ```
 
-At run time each binary finds LibTorch by itself — **`LD_LIBRARY_PATH` is never
-needed.** Every `*-cli` crate's `build.rs` bakes `$LIBTORCH/lib` into its
-executable as a `RUNPATH` (through `rpath-kit`, which does the same for ffmpeg);
-the loader then searches, in order:
+`LIBTORCH` is a **build-time** variable and nothing more. It is not recorded in
+the binary: the compiled-in search path is relative, so `ldd` on one machine
+never reports another machine's directories. See
+[Finding the libraries at run time](#finding-the-libraries-at-run-time).
 
-1. the `LIBTORCH` (or `LIBTORCH_LIB`) the binary was built against, if that
-   directory still exists,
-2. `libtorch/` in the current working directory,
-3. `libtorch/` next to the binary, then `../libtorch/` for a `bin/` layout,
-4. whatever `ld.so.cache` already knows about.
+## Finding the libraries at run time
 
-So keeping a `./libtorch` in your project directory works even after the binary
-moves. Without the `RUNPATH` a missing `libtorch.so` aborts inside `ld.so`
-*before `main` runs* — on every invocation, including ones that never touch a
-GPU, such as `completions`.
+ffmpeg and LibTorch are linked, so `ld.so` resolves them before `main` runs and
+no variable of ours could be consulted in time. Each binary carries a relative
+`RUNPATH` instead (`rpath-kit`, from each `*-cli` crate's `build.rs`), and the
+loader searches:
 
-`LD_LIBRARY_PATH` **is** needed for `cargo test`: cargo runs each test binary
-with its own package directory as the working directory, so the relative search
-path baked into the installed binaries does not apply.
+1. `$LD_LIBRARY_PATH`, as it does for any program,
+2. `ffmpeg/lib` and `libtorch/lib` in the **working directory**,
+3. the same two next to the binary, then one level up for a `bin/` layout,
+4. `ld.so.cache` — the system packages, which is what most machines use.
+
+So a `./libtorch` in your project directory keeps working, a self-contained tree
+ships beside the binary with no environment at all, and a machine with distribution
+packages needs nothing. **No absolute path from the build machine is baked in**,
+which is why running from anywhere else — `cargo test`, or an installed binary
+with the libraries somewhere unusual — wants `LD_LIBRARY_PATH`:
 
 ```sh
 LD_LIBRARY_PATH=$PWD/libtorch/lib cargo test --workspace
