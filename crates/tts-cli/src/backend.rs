@@ -26,6 +26,13 @@ pub struct ModelPaths<'a> {
     pub hubert: &'a Path,
     pub s1: &'a Path,
     pub s2: &'a Path,
+    /// Whether `--s1` or `--s2` pointed at fine-tuned weights.
+    ///
+    /// Only ONNX Runtime cares, and it cares a lot: a graph carries the weights
+    /// it was exported with, so `--s2 mine.safetensors` beside an export of the
+    /// *base* model is a silent no-op — the clone comes out sounding like the
+    /// reference clip and nothing says why.
+    pub tuned: bool,
 }
 
 /// Load the models onto the chosen backend.
@@ -81,10 +88,21 @@ pub fn load(
             "WebGPU"
         ),
         #[cfg(feature = "onnx")]
-        Backend::Onnx => Box::new(
-            tts_core::OnnxEngine::load(paths.dir)
-                .context("failed to load GPT-SoVITS on ONNX Runtime")?,
-        ),
+        Backend::Onnx => {
+            if paths.tuned {
+                tracing::warn!(
+                    "fine-tuned weights were given, but ONNX Runtime reads them from the \
+                     export rather than from --s1/--s2: re-export with \
+                     `export/export_gptsovits.py --s1/--s2 <weights>` (note that --s2 \
+                     also changes reference.onnx), or use a Burn backend to load them \
+                     directly"
+                );
+            }
+            Box::new(
+                tts_core::OnnxEngine::load(paths.dir)
+                    .context("failed to load GPT-SoVITS on ONNX Runtime")?,
+            )
+        }
         Backend::Auto => unreachable!("resolved above"),
         // Only reachable on a `--no-default-features` build.
         #[allow(unreachable_patterns)]

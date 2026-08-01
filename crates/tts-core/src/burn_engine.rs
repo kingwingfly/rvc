@@ -24,6 +24,25 @@ pub struct BurnEngine<B: Backend> {
     device: B::Device,
 }
 
+/// Reject a load that left parameters at their initialised values.
+///
+/// `missing` is what matters — a checkpoint carrying tensors the model has no
+/// slot for is merely a superset (a fine-tuned `s2` holds `enc_q`, which only
+/// training reads), but a *model parameter* with no tensor behind it is random
+/// weight the model will happily run.
+fn covered(what: &str, result: &burn_kit::ApplyResult) -> Result<()> {
+    if result.applied.is_empty() || !result.missing.is_empty() {
+        return Err(TtsError::Weights(format!(
+            "{what}: {} of {} parameters had no weights in the checkpoint \
+             (applied {}) — the file's tensor names do not match the model",
+            result.missing.len(),
+            result.missing.len() + result.applied.len(),
+            result.applied.len(),
+        )));
+    }
+    Ok(())
+}
+
 impl<B: Backend> BurnEngine<B> {
     /// Load from a `chinese-hubert-base/pytorch_model.bin`, an `s1*.ckpt` and an
     /// `s2G*.pth`.
@@ -40,11 +59,19 @@ impl<B: Backend> BurnEngine<B> {
             .load_pytorch(hubert)
             .map_err(|e| weights("cnhubert", e))?;
 
+        // Both loaders allow a partial apply, so that a coverage report can be
+        // inspected rather than a single mismatch aborting the load. That makes
+        // an empty apply a *success* unless somebody looks: a `.safetensors`
+        // whose names no longer match the module tree would leave every
+        // parameter at its freshly-initialised value and synthesise noise. Which
+        // is exactly the shape of failure worth refusing, so check the report.
         let mut t2s = T2s::<B>::new(&T2sConfig::default(), device);
-        t2s.load_weights(s1).map_err(|e| weights("s1", e))?;
+        let applied = t2s.load_weights(s1).map_err(|e| weights("s1", e))?;
+        covered("s1", &applied)?;
 
         let mut sovits = SovitsPartial::<B>::new(&SovitsConfig::default(), device);
-        sovits.load_weights(s2).map_err(|e| weights("s2", e))?;
+        let applied = sovits.load_weights(s2).map_err(|e| weights("s2", e))?;
+        covered("s2", &applied)?;
 
         Ok(Self {
             hubert: model,

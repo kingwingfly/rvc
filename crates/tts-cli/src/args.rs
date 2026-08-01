@@ -23,8 +23,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tts_core::{OUTPUT_SR, SampleOptions, SynthOptions};
 
 use crate::backend::{ModelPaths, load};
-pub use cli_kit::Backend;
 use crate::train::TrainArgs;
+pub use cli_kit::Backend;
 
 /// The whole of the `tts` command tree, defined once and worn two ways: the
 /// `tts` binary flattens it at its top level, `voice` nests it under a `tts`
@@ -220,6 +220,7 @@ pub async fn synthesize(args: TtsArgs) -> Result<()> {
                 hubert: &paths.hubert,
                 s1: &paths.s1,
                 s2: &paths.s2,
+                tuned: args.s1.is_some() || args.s2.is_some(),
             },
             prosody,
             args.backend,

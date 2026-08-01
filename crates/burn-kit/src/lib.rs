@@ -15,6 +15,14 @@ pub mod device;
 #[cfg(feature = "store")]
 pub mod store;
 
+/// What a load applied, missed and left over — re-exported because it is the
+/// return type of [`store`]'s loaders, and a caller that has to name it should
+/// not need a direct `burn-store` dependency to do so. Inspecting it is the
+/// point: the loaders allow a partial apply, so an empty one is a success until
+/// somebody checks.
+#[cfg(feature = "store")]
+pub use burn_store::ApplyResult;
+
 #[cfg(feature = "cuda")]
 pub use device::cuda_device;
 #[cfg(feature = "tch")]
