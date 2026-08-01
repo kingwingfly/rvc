@@ -99,11 +99,13 @@ because mirrors of converted weights move and disappear.
 **Transcribe a directory, one transcript beside each take.** This is also how a
 `tts train` corpus gets its `<stem>.txt` files.
 
-```fish
-for f in corpus/*.wav
-  ffmpeg -v quiet -i $f -f f32le -ar 16000 -ac 1 - | stt > (path change-extension txt $f)
-end
+```sh
+fd -e wav . corpus -j 1 -x sh -c \
+  'ffmpeg -v quiet -i "$1" -f f32le -ar 16000 -ac 1 - | stt > "$2"' _ {} {.}.txt
 ```
+
+**`-j 1` is load-bearing**: without it a second `stt` loads a second copy of the
+model onto the same GPU.
 
 **Subtitles and manifests — `--format jsonl`.** Adds the segment's position in
 the recording and the language the model used. `start` and `end` are the

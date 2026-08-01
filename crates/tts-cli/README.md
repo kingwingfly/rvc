@@ -116,10 +116,9 @@ a warning). **`stt` is how the transcripts get written** — read them before
 training: a wrong transcript is the corpus-wide version of a wrong reference one.
 
 ```sh
-# fish. `stt` reads f32le mono 16 kHz on stdin, so ffmpeg decodes into it.
-for f in corpus/*.wav
-  ffmpeg -v quiet -i $f -f f32le -ar 16000 -ac 1 - | stt > (path change-extension txt $f)
-end
+# `stt` reads f32le mono 16 kHz on stdin, so ffmpeg decodes into it.
+fd -e wav . corpus -j 1 -x sh -c \
+  'ffmpeg -v quiet -i "$1" -f f32le -ar 16000 -ac 1 - | stt > "$2"' _ {} {.}.txt
 
 tts train corpus/ -o models/mine --stage both --epochs 10
 tts -r clip.wav -t "<transcript>" \
