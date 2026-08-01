@@ -171,9 +171,10 @@ cache — `--cache-dir`, else `TTS_CACHE_DIR`, else `VOICE_CACHE_DIR`, else
 names an absolute path. So the usual answer is `~/.cache/voice`, and `-h` prints
 whichever it resolves to on this machine. `--models` and `--prosody` name a
 directory instead and download
-nothing. **The `s2` discriminator base** (`s2D*.pth`) is read only by training and
-belongs to one run rather than to the machine, so it lands in
-`<out-dir>/pretrained/`. Everything else is written under the directory you
+nothing. **The `s2` discriminator base** (`s2D*.pth`) is fetched only by a
+fine-tune, but it is as reusable as the rest, so it lands in
+`<cache-dir>/pretrained/` and is downloaded once. An output directory holds only
+what the run produced; everything else is written under the directory you
 invoked from, the training log `./train.log` included.
 
 ## Limits

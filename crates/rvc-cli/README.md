@@ -172,10 +172,11 @@ shared across every run, so they live in a cache — `--cache-dir`, else
 which is `~/.cache` unless `$XDG_CACHE_HOME` names an absolute path. So the
 usual answer is `~/.cache/voice`, and `-h` prints whichever it resolves to on
 this machine. **Warm-start
-bases** belong to one training run rather than to the machine, so they land in
-`<out-dir>/pretrained/`, beside the model they produced. Everything else is
-written under the directory you invoked from, the training log `./train.log`
-included.
+bases** are shared the same way — the same published file whatever voice you are
+training — so they land in `<cache-dir>/pretrained/`, flat under their upstream
+names so you can drop in a copy you already have. An output directory holds only
+what the run produced; everything else is written under the directory you
+invoked from, the training log `./train.log` included.
 
 ## Limits
 

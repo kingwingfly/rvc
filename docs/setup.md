@@ -174,11 +174,15 @@ output directory**, so pointing two runs at two output folders does not fetch
 Whisper twice.
 
 **Training warm-start bases** — RVC's `f0G48k.pth`/`f0D48k.pth` and
-GPT-SoVITS's `s2D*.pth` — go to `pretrained/` *inside the run's output
-directory* instead, because they belong to that experiment: they are read once
-by one training run, and keeping them beside the checkpoints they produced is
-what makes a run reproducible after the fact. `--no-pretrained` and `--resume`
-fetch nothing.
+GPT-SoVITS's `s2D*.pth` — are shared in the same way, so they go to
+`pretrained/` inside that cache. They are the published upstream files, the same
+for every voice you train, and downloading them once is the point. Unlike the
+rest of the cache they are stored flat under their upstream names, so you can
+drop in a copy you already have. They are fetched only when a fine-tune wants
+one; `--no-pretrained` and `--resume` fetch nothing.
+
+**An output directory only ever holds what a run produced** — its checkpoints,
+its `checkpoint/` best family — never a download.
 
 There is no `--work-dir`: the working directory is the current directory, as it
 is for any other Unix tool.

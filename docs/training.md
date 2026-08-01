@@ -201,10 +201,11 @@ Warm-start is also the reason the Burn modules stay weight-compatible with the
 original `state_dict` layouts. Changing a module's *field* names moves parameter
 paths and breaks it; renaming a type or moving a file does not.
 
-**Where the bases land:** `pretrained/` inside the run's **output directory**,
-not the shared asset cache — they belong to one experiment, and keeping them
-beside the checkpoints they produced is what makes a run reproducible after the
-fact. `--no-pretrained` fetches nothing at all, and neither does RVC's
+**Where the bases land:** `pretrained/` inside the **asset cache**, alongside
+every other download. A base is the published upstream file and is the same for
+every voice trained on the machine, so it is fetched once and reused; an output
+directory holds only what a run produced. `--no-pretrained` fetches nothing at
+all, and neither does RVC's
 `--resume`: it continues from weights that already exist, so a base would be
 loaded and immediately overwritten. See
 [where models are stored](setup.md#where-models-are-stored).

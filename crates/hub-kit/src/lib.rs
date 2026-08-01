@@ -152,16 +152,18 @@ pub async fn fetch(model: &ModelRef, cache_dir: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Where a training run keeps the warm-start bases it starts from: `pretrained/`
-/// beside the run's output, derived from the `-o` stem's directory.
+/// Where the warm-start bases a training run starts from live: `pretrained/`
+/// inside the asset cache.
 ///
-/// Not the cache, because a base is not a frozen asset every command reads — it
-/// is training input, wanted only by whoever is training, and it belongs with
-/// the run's other files rather than in a directory the user never looks at.
-pub fn pretrained_dir(out: &Path) -> PathBuf {
-    out.parent()
-        .unwrap_or_else(|| Path::new(""))
-        .join("pretrained")
+/// In the cache and not beside the run, because a base is **read-only input
+/// shared by every run on the machine**, exactly like an inference asset. It is
+/// the published upstream file, byte for byte, whatever it is warm-starting;
+/// putting a copy in each output directory would fetch the same 200 MB again
+/// for every voice trained. A subdirectory rather than the cache root only
+/// because these are stored flat under their upstream names — see
+/// [`fetch_pretrained`].
+pub fn pretrained_dir(cache: &Path) -> PathBuf {
+    cache.join("pretrained")
 }
 
 /// RVC's pretrained generator base (`f0G48k.pth`, 76 MB).
@@ -189,9 +191,9 @@ pub fn default_gptsovits_s2d() -> ModelRef {
 /// Download a warm-start base into `dir` under its upstream file name, reusing
 /// the copy already there.
 ///
-/// Flat, unlike [`fetch`]'s cache tree: a run's `pretrained/` is meant to be
-/// read by eye and hand-populated by anyone who already has the weights. The
-/// upstream names are distinct across engines, so one directory serves them all.
+/// Flat, unlike [`fetch`]'s cache tree: `pretrained/` is meant to be read by eye
+/// and hand-populated by anyone who already has the weights. The upstream names
+/// are distinct across engines, so one directory serves them all.
 pub async fn fetch_pretrained(model: &ModelRef, dir: &Path) -> Result<PathBuf> {
     let name = model.file.rsplit('/').next().unwrap_or(&model.file);
     let dest = dir.join(name);
@@ -326,9 +328,9 @@ pub const DEFAULT_GPTSOVITS: (&str, &str) = ("lj1995", "GPT-SoVITS");
 
 /// Files the synthesis path needs from it. The `s2` discriminator that
 /// fine-tuning warm-starts from is deliberately *not* here: inference never
-/// opens one, so it is a warm-start base like RVC's and goes to the run's own
-/// `pretrained/` via [`fetch_pretrained`] — a synthesis-only user should not
-/// carry 94 MB of adversary in their cache.
+/// opens one, so it is fetched separately by [`fetch_pretrained`], only when a
+/// fine-tune asks for it. Both end up in the same cache; what this split buys is
+/// that a synthesis-only user never downloads 94 MB of adversary at all.
 const GPTSOVITS_FILES: [&str; 4] = [
     "chinese-hubert-base/config.json",
     "chinese-hubert-base/pytorch_model.bin",

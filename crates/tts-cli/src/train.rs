@@ -76,7 +76,8 @@ pub struct TrainArgs {
     #[arg(long)]
     pub prosody: Option<PathBuf>,
     /// `s2` discriminator base to warm-start from [default:
-    /// `<-o's directory>/pretrained/s2D2333k.pth`, downloaded on first use].
+    /// `<cache-dir>/pretrained/s2D2333k.pth`, downloaded on first use and
+    /// reused by every run].
     /// Only `--stage s2` and `--stage both` read one.
     #[arg(long, conflicts_with = "no_pretrained")]
     pub pretrained_d: Option<PathBuf>,
@@ -240,11 +241,9 @@ pub async fn run(args: TrainArgs) -> Result<()> {
     };
     let paths = hub_kit::gptsovits_paths(&dir)?;
 
-    // `s1` and `s2G` are inference weights and stay in the cache; the
-    // discriminator is training-only, so it lands in `pretrained/` beside the
-    // run's output. An explicit path wins, a copy already sitting in the model
-    // directory is used as-is rather than downloaded again, and
-    // `--no-pretrained` (or a run that never reaches `s2`) fetches nothing.
+    // An explicit path wins, a copy already sitting in the model directory is
+    // used as-is rather than downloaded again, and `--no-pretrained` (or a run
+    // that never reaches `s2`) fetches nothing.
     let s2d = match (&args.pretrained_d, args.stage.wants_s2() && !args.no_pretrained) {
         (Some(p), _) => Some(p.clone()),
         (None, false) => None,
@@ -253,7 +252,7 @@ pub async fn run(args: TrainArgs) -> Result<()> {
             None => Some(
                 hub_kit::fetch_pretrained(
                     &hub_kit::default_gptsovits_s2d(),
-                    &hub_kit::pretrained_dir(&args.out),
+                    &hub_kit::pretrained_dir(&args.cache_dir),
                 )
                 .await
                 .context("failed to fetch the s2 discriminator base (override with --pretrained-d, or pass --no-pretrained to train it from scratch)")?,

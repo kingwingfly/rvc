@@ -75,13 +75,11 @@ pub async fn run(args: TrainArgs) -> Result<()> {
         }
     };
 
-    // The bases are training input, not a frozen asset, so they land in
-    // `pretrained/` beside the run's output rather than in the shared cache.
     // Both short-circuits matter: `--no-pretrained` wants no warm start, and
     // `--resume` continues from weights that already exist — a base would be
     // loaded and immediately overwritten. Neither may cost a download.
     let auto_pretrained = !args.no_pretrained && args.resume.is_none();
-    let base_dir = hub_kit::pretrained_dir(&args.out);
+    let base_dir = hub_kit::pretrained_dir(cache);
     let pretrained_g = match &args.pretrained_g {
         Some(p) => Some(p.clone()),
         None if auto_pretrained => Some(
