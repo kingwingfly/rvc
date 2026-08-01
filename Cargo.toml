@@ -81,8 +81,8 @@ rustfft = "6"
 
 # Inference
 # load-dynamic: dlopen onnxruntime at runtime via ORT_DYLIB_PATH (never bundled).
-# api-24 matches the ONNX Runtime 1.24 API rc.12 targets; cuda EP registered at runtime.
-ort = { version = "=2.0.0-rc.12", default-features = false, features = [
+# api-24 matches the ONNX Runtime 1.24 API rc.13 targets; cuda EP registered at runtime.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = [
     "load-dynamic",
     "std",
     "ndarray",

@@ -78,7 +78,7 @@ impl OnnxProsody {
     /// a stock `optimum` export gives `last_hidden_state`, which is a different
     /// representation and would sound wrong rather than fail.
     pub fn load(dir: &Path, hidden: usize) -> Result<Self> {
-        use ort::execution_providers::{CPUExecutionProvider, CUDAExecutionProvider};
+        use ort::execution_providers::{CPU, CUDA};
 
         let model = dir.join("model.onnx");
         if !model.exists() {
@@ -91,10 +91,7 @@ impl OnnxProsody {
         }
         let session = ort::session::Session::builder()
             .map_err(onnx)?
-            .with_execution_providers([
-                CUDAExecutionProvider::default().build(),
-                CPUExecutionProvider::default().build(),
-            ])
+            .with_execution_providers([CUDA::default().build(), CPU::default().build()])
             .map_err(|e| TtsError::Weights(e.to_string()))?
             .commit_from_file(&model)
             .map_err(onnx)?;

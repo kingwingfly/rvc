@@ -221,14 +221,11 @@ fn ids(values: &[u32]) -> Result<Tensor<i64>> {
 /// because engines do not depend on each other, and a third copy is the moment
 /// to consider a kit crate rather than the moment to reach across.
 fn session(path: &Path) -> Result<Session> {
-    use ort::execution_providers::{CPUExecutionProvider, CUDAExecutionProvider};
+    use ort::execution_providers::{CPU, CUDA};
 
     Session::builder()
         .map_err(onnx)?
-        .with_execution_providers([
-            CUDAExecutionProvider::default().build(),
-            CPUExecutionProvider::default().build(),
-        ])
+        .with_execution_providers([CUDA::default().build(), CPU::default().build()])
         .map_err(|e| TtsError::Weights(e.to_string()))?
         .commit_from_file(path)
         .map_err(|e| TtsError::Weights(format!("{}: {e}", path.display())))

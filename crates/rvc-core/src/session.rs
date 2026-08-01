@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use ort::execution_providers::{CPUExecutionProvider, CUDAExecutionProvider};
+use ort::execution_providers::{CPU, CUDA};
 use ort::session::Session;
 use ort::value::Tensor;
 
@@ -24,10 +24,7 @@ pub fn build_session(path: impl AsRef<Path>) -> Result<Session> {
     // `with_execution_providers` returns `Error<SessionBuilder>` (carries a
     // recovery payload); collapse it to the plain `ort::Error` our `?` expects.
     let mut builder = Session::builder()?
-        .with_execution_providers([
-            CUDAExecutionProvider::default().build(),
-            CPUExecutionProvider::default().build(),
-        ])
+        .with_execution_providers([CUDA::default().build(), CPU::default().build()])
         .map_err(ort::Error::from)?;
     let session = builder.commit_from_file(path)?;
     Ok(session)

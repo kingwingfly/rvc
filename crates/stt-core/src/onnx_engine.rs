@@ -224,14 +224,11 @@ impl Engine for OnnxEngine {
 /// depend on each other; if a third one needs it, that is the moment to lift it
 /// into a kit crate rather than now.
 fn build_session(path: &Path) -> Result<Session> {
-    use ort::execution_providers::{CPUExecutionProvider, CUDAExecutionProvider};
+    use ort::execution_providers::{CPU, CUDA};
 
     Session::builder()
         .map_err(onnx)?
-        .with_execution_providers([
-            CUDAExecutionProvider::default().build(),
-            CPUExecutionProvider::default().build(),
-        ])
+        .with_execution_providers([CUDA::default().build(), CPU::default().build()])
         .map_err(|e| SttError::Weights(e.to_string()))?
         .commit_from_file(path)
         .map_err(onnx)
