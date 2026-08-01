@@ -100,6 +100,7 @@ Three tiers, and the names say which is which.
 | `cli-kit` | logging, shell completions, `--backend` and `--device` parsing |
 | `train-kit` | checkpoints, weight EMA, gradient accumulation, the live dashboard — generic over the module being trained |
 | `text-kit` | grapheme-to-phoneme for TTS: language splitting, Mandarin and English g2p, GPT-SoVITS's phoneme table. No model, no tensors |
+| `rpath-kit` | build-time only: where each binary looks for ffmpeg and LibTorch, so running one needs no environment |
 
 **Networks**, named after the model, holding no app dependencies:
 

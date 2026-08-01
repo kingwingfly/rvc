@@ -30,3 +30,6 @@ cli-kit.workspace = true
 tokio = { workspace = true }
 clap.workspace = true
 anyhow.workspace = true
+
+[build-dependencies]
+rpath-kit.workspace = true

@@ -37,3 +37,6 @@ futures.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
+
+[build-dependencies]
+rpath-kit.workspace = true

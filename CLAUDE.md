@@ -103,7 +103,8 @@ Three tiers, and the name says which tier a crate is in:
 - **`*-kit`** — shared plumbing with no model and no engine knowledge, safe for
   anything to depend on: `burn-kit` (devices, checkpoints), `audio-kit` (ffmpeg
   I/O, the slicer), `hub-kit` (downloads and the cache), `cli-kit` (logging,
-  completions, `--backend`/`--device`).
+  completions, `--backend`/`--device`), `rpath-kit` (a build-dependency: where a
+  binary looks for the libraries it links).
 - **`burn-*`** — one network each, named after the **model** (`burn-rvc` reads
   like `burn_dinov3`), holding no app dependencies and naming no compute backend.
 - **`<engine>-core` / `<engine>-cli`** — one engine each, all the same shape:
@@ -227,6 +228,11 @@ load "fine" and be silently scrambled. `burn-kit`'s round-trip test pins it.
 
 Requires **ffmpeg 8.1** dev libraries (and the `ffmpeg` binary for the realtime
 filter examples, which is what captures and plays PCM at either end of the pipe).
+A system package needs no configuration; `FFMPEG_DIR` names your own build and
+is then found at run time exactly as `LIBTORCH` is, and
+`crates/audio-kit/build.rs` refuses a build that has an unpacked `./ffmpeg` at
+the project root without naming it — `ffmpeg-sys-next` would not look there, and
+its pkg-config failure never mentions the directory sitting in front of you.
 ContentVec + RMVPE ONNX assets auto-download from Hugging Face (the `models`
 subcommand prefetches them). Only 48 kHz is supported today.
 
@@ -289,6 +295,7 @@ Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper
 | `tts-cli` | lib **and** the `tts` binary |
 | `cli-kit` | logging, shell completions, and the shared `--backend`/`--device`/`--cache-dir` flags — one enum and one alias set for all four binaries, so the spellings cannot drift apart again |
 | `train-kit` | training scaffolding with no model knowledge: `Checkpoint`, `ema_update`, `accumulate`, `materialize`, `Dashboard`. Generic over the module trained, so a GAN and a cross-entropy loop share it |
+| `rpath-kit` | a **build-dependency**, not a runtime one: where each binary's `build.rs` gets the loader search order for the two linked libraries, ffmpeg and LibTorch |
 | `text-kit` | grapheme-to-phoneme: script-based language splitting, Mandarin g2p (jieba + pinyin + opencpop + tone sandhi), and GPT-SoVITS's 732-symbol table. English g2p is an embedded CMUdict over upstream's deterministic cascade; Mandarin polyphones come from `pypinyin`'s own 47k phrase dictionary. Pure Rust, no ML, no backend — so it is fully testable without weights |
 | `voice-cli` | the `voice` binary: `rvc-cli`, `stt-cli` and `tts-cli` nested as `voice rvc …`, `voice stt` and `voice tts` |
 
@@ -329,9 +336,28 @@ one binary, run-time choice. — and `crates/rvc-core/build.rs`
 refuses a `tch` build with no `LIBTORCH`, because `burn-tch` hardcodes
 `tch/download-libtorch` and cargo features are additive, so the silent fallback
 would otherwise be a multi-GB download of a **CPU-only** LibTorch.
-`crates/{rvc,stt,voice}-cli/build.rs` bake `$LIBTORCH/lib` into the binary as a
-`RUNPATH`; without it a missing `libtorch.so` aborts in `ld.so` before `main`, on
-every subcommand. They are deliberate duplicates — an rpath is per-executable.
+Every `*-cli` crate's `build.rs` bakes the linked libraries' search paths into
+its binary as a `RUNPATH`; without it a missing `libtorch.so` — or
+`libavcodec.so` — aborts in `ld.so` before `main`, on every subcommand,
+including ones that touch neither.
+
+**The call is per-executable; the search order is not.** An rpath is a property
+of one linked binary, so each `build.rs` still has to emit its own, but the four
+of them were byte-identical copies of the same 40 lines, and ffmpeg would have
+made that eight. The order now lives once in `rpath-kit`, a **build-dependency**
+with no runtime code: for each of `libtorch` and `ffmpeg`, the directory the
+build was pointed at (`LIBTORCH`/`LIBTORCH_LIB`, `FFMPEG_DIR`), then
+`<name>/lib` relative to the **working directory**, then `$ORIGIN/<name>/lib`
+and `$ORIGIN/../<name>/lib` relative to the **binary**, then whatever
+`ld.so.cache` knows. Dropping a self-contained tree beside a binary therefore
+works with no environment at all, and a distribution's own package keeps working
+untouched. `ffmpeg-sys-next` and `torch-sys` emit only a *link* search path,
+which the loader never reads — that is why this is not free.
+
+The LibTorch entries are gated on the `tch` feature; the ffmpeg ones never are,
+because every engine decodes audio. A binary that references no ffmpeg symbol
+still gets them and simply has no `NEEDED` entry to resolve — `stt` is exactly
+that today, since it reads PCM and never decodes a container.
 
 ### Which runtime a model gets, and why
 The target is that **the user picks the backend — for inference and for

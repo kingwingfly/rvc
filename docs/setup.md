@@ -17,7 +17,7 @@ than repeating it.
 
 | | needed by | how it is found |
 |---|---|---|
-| **ffmpeg 8.1** | everyone — decode, resample and PCM I/O | system libraries, linked at build time |
+| **ffmpeg 8.1** | everyone — decode, resample and PCM I/O | linked at build time; found automatically at run time |
 | **ONNX Runtime** | any `--backend onnx` path, plus `rvc`'s feature extraction and `tts`'s prosody encoder | dlopened on first use from `ORT_DYLIB_PATH` |
 | **LibTorch 2.9.0** | optional — only `--backend tch` | linked at build time; found automatically at run time |
 
@@ -32,6 +32,32 @@ The **8.1** development libraries, from your package manager. They are linked,
 not dlopened, so they must be present at build time. The `ffmpeg` binary itself
 is only needed for the realtime examples, where it is what captures from a
 microphone and plays to speakers on either end of a pipe.
+
+A package manager is the easy path and needs nothing else. If you would rather
+use your own build — a newer ffmpeg than your distribution ships, or a
+self-contained tree to deploy beside the binaries — point at it the way you
+point at LibTorch:
+
+```sh
+export FFMPEG_DIR=$PWD/ffmpeg      # expects ffmpeg/lib and ffmpeg/include
+```
+
+At run time each binary then finds it by itself, searching in the same order
+LibTorch is searched:
+
+1. the `FFMPEG_DIR` it was built against, if that directory still exists,
+2. `ffmpeg/` in the current working directory,
+3. `ffmpeg/` next to the binary, then `../ffmpeg/` for a `bin/` layout,
+4. whatever `ld.so.cache` already knows about — a distribution's own package,
+   which is why none of this is needed when you have one.
+
+**`LD_LIBRARY_PATH` is never needed for either library.** Both search paths are
+compiled into the executable as a `RUNPATH`, by `rpath-kit` from each `*-cli`
+crate's `build.rs`.
+
+An unpacked `./ffmpeg` at the project root that you have *not* named in
+`FFMPEG_DIR` fails the build with a message saying so, rather than falling
+through to a pkg-config error that never mentions it.
 
 ## ONNX Runtime
 
@@ -66,7 +92,8 @@ export LIBTORCH=$PWD/libtorch
 
 At run time each binary finds LibTorch by itself — **`LD_LIBRARY_PATH` is never
 needed.** Every `*-cli` crate's `build.rs` bakes `$LIBTORCH/lib` into its
-executable as a `RUNPATH`; the loader then searches, in order:
+executable as a `RUNPATH` (through `rpath-kit`, which does the same for ffmpeg);
+the loader then searches, in order:
 
 1. the `LIBTORCH` (or `LIBTORCH_LIB`) the binary was built against, if that
    directory still exists,

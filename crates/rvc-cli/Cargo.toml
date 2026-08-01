@@ -44,3 +44,6 @@ clap_complete.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[build-dependencies]
+rpath-kit.workspace = true
