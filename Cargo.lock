@@ -6095,6 +6095,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rpath-kit"
+version = "0.1.0"
+
+[[package]]
 name = "rstest"
 version = "0.26.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6272,6 +6276,7 @@ dependencies = [
  "cli-kit",
  "futures",
  "hub-kit",
+ "rpath-kit",
  "rvc-core",
  "rvc-train",
  "tokio",
@@ -6815,6 +6820,7 @@ dependencies = [
  "cli-kit",
  "futures",
  "hub-kit",
+ "rpath-kit",
  "stt-core",
  "tokio",
  "tracing",
@@ -7712,6 +7718,7 @@ dependencies = [
  "cli-kit",
  "futures",
  "hub-kit",
+ "rpath-kit",
  "text-kit",
  "tokio",
  "tracing",
@@ -7998,6 +8005,7 @@ dependencies = [
  "anyhow",
  "clap",
  "cli-kit",
+ "rpath-kit",
  "rvc-cli",
  "stt-cli",
  "tokio",

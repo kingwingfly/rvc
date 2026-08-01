@@ -8,6 +8,7 @@ place.
 - [ffmpeg](#ffmpeg)
 - [ONNX Runtime](#onnx-runtime)
 - [LibTorch](#libtorch)
+- [Finding the libraries at run time](#finding-the-libraries-at-run-time)
 - [Building](#building)
 - [Backends and devices](#backends-and-devices)
 - [Where models are stored](#where-models-are-stored)
@@ -16,7 +17,7 @@ place.
 
 | | needed by | how it is found |
 |---|---|---|
-| **ffmpeg 8.1** | everyone — decode, resample and PCM I/O | system libraries, linked at build time |
+| **ffmpeg 8.1** | everyone — decode, resample and PCM I/O | linked at build time; found automatically at run time |
 | **ONNX Runtime** | any `--backend onnx` path, plus `rvc`'s feature extraction and `tts`'s prosody encoder | dlopened on first use from `ORT_DYLIB_PATH` |
 | **LibTorch 2.9.0** | optional — only `--backend tch` | linked at build time; found automatically at run time |
 
@@ -26,6 +27,15 @@ place.
 
 The **8.1** development libraries, from your package manager. They are linked,
 not dlopened, so they must be present at build time.
+
+To build against your own instead, name it the way you name LibTorch:
+
+```sh
+export FFMPEG_DIR=$PWD/ffmpeg      # expects ffmpeg/lib and ffmpeg/include
+```
+
+An unpacked `./ffmpeg` at the project root that you have *not* named in it fails
+the build saying so.
 
 ## ONNX Runtime
 
@@ -58,9 +68,23 @@ unzip libtorch-shared-with-deps-2.9.0+cu126.zip     # -> ./libtorch
 export LIBTORCH=$PWD/libtorch
 ```
 
-`LD_LIBRARY_PATH` **is** needed for `cargo test`: cargo runs each test binary
-with its own package directory as the working directory, so the relative search
-path baked into the installed binaries does not apply.
+`LIBTORCH` is a **build-time** variable and nothing more — see
+[Finding the libraries at run time](#finding-the-libraries-at-run-time).
+
+## Finding the libraries at run time
+
+ffmpeg and LibTorch are linked, so `ld.so` resolves them before `main` runs; no
+variable of ours could be read in time. Each binary carries a relative `RUNPATH`
+instead, and the loader searches:
+
+1. `$LD_LIBRARY_PATH`,
+2. `ffmpeg/lib` and `libtorch/lib` in the working directory,
+3. the same two next to the binary, then one level up for a `bin/` layout,
+4. `ld.so.cache` — the system packages.
+
+**No path from the build machine is baked in**, so `ldd` never reports another
+machine's directories — and running from a directory holding neither wants
+`LD_LIBRARY_PATH`, `cargo test` included:
 
 ```sh
 LD_LIBRARY_PATH=$PWD/libtorch/lib cargo test --workspace
