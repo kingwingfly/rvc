@@ -49,7 +49,7 @@ synthesis are siblings. Anything two of them need moves to a neutral crate first
 ### The shape every CLI has
 **Running a binary with no subcommand is the stdin→stdout filter.** Subcommands
 are for everything that is not streaming: `rvc convert|train|preprocess|models|completions`,
-`tts train|completions`, `stt completions`. `stt` and `tts` were already this
+`tts train|preprocess|completions`, `stt completions`. `stt` and `tts` were already this
 shape; `rvc` reached it by promoting `rvc serve` to the bare invocation.
 
 That is a deliberate promotion rather than a deletion. Streaming is the *primary*
@@ -116,8 +116,9 @@ Three tiers, and the name says which tier a crate is in:
 - **`*-kit`** — shared plumbing with no model and no engine knowledge, safe for
   anything to depend on: `burn-kit` (devices, checkpoints), `audio-kit` (ffmpeg
   I/O, the slicer), `hub-kit` (downloads and the cache), `cli-kit` (logging,
-  completions, `--backend`/`--device`), `rpath-kit` (a build-dependency: where a
-  binary looks for the libraries it links).
+  completions, `--backend`/`--device`), `preprocess-kit` (the corpus slicer as a
+  subcommand), `rpath-kit` (a build-dependency: where a binary looks for the
+  libraries it links).
 - **`burn-*`** — one network each, named after the **model** (`burn-rvc` reads
   like `burn_dinov3`), holding no app dependencies and naming no compute backend.
 - **`<engine>-core` / `<engine>-cli`** — one engine each, all the same shape:
@@ -308,6 +309,7 @@ Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper
 | `tts-train` | fine-tuning GPT-SoVITS. `s1` is plain next-token cross-entropy over `T2s::forward_prompt_all` — one model, one optimizer, one loss, so unlike `rvc-train` the number means something on its own. `s2` is the other half: an adversarial VITS loop over `burn-vits`'s shared discriminators, inheriting `rvc-train`'s loss family (mel-L1 ×45, KL ×1, feature matching ×2, LSGAN) rather than inventing one, with GPT-SoVITS's five discriminator periods `[2,3,5,7,11]` against RVC's eight. Verified on 13 clips: mel falls 26.6 → 18.2 over two epochs on GPU and on CPU alike. `--stage s1|s2|both` prepares the corpus exactly once — preparation is the expensive half — and each stage writes its own checkpoint family. A corpus is `<stem>.wav` + `<stem>.txt` pairs, and `stt` is how the transcripts get written |
 | `tts-cli` | lib **and** the `tts` binary |
 | `cli-kit` | logging, shell completions, and the shared `--backend`/`--device`/`--cache-dir` flags — one enum and one alias set for all four binaries, so the spellings cannot drift apart again |
+| `preprocess-kit` | the `preprocess` subcommand `rvc` and `tts` both expose: decode, slice on silence, write `<stem>_<NNN>.wav`. One definition, so the flags and the slicing cannot differ between the two engines |
 | `train-kit` | training scaffolding with no model knowledge: `Checkpoint`, `ema_update`, `accumulate`, `materialize`, `Dashboard`. Generic over the module trained, so a GAN and a cross-entropy loop share it |
 | `rpath-kit` | a **build-dependency**, not a runtime one: where each binary's `build.rs` gets the loader search order for the two linked libraries, ffmpeg and LibTorch |
 | `text-kit` | grapheme-to-phoneme: script-based language splitting, Mandarin g2p (jieba + pinyin + opencpop + tone sandhi), and GPT-SoVITS's 732-symbol table. English g2p is an embedded CMUdict over upstream's deterministic cascade; Mandarin polyphones come from `pypinyin`'s own 47k phrase dictionary. Pure Rust, no ML, no backend — so it is fully testable without weights |

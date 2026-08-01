@@ -1,19 +1,92 @@
-//! `rvc preprocess` — slice a corpus into clean per-sentence training clips.
+//! The `preprocess` subcommand: slice a corpus into clean per-sentence clips.
 //!
-//! Removes *between-sentence dead-air only* (never quiet-but-present ASMR
-//! content) so downstream `rvc train` draws its random windows from voiced
-//! sentences instead of dead air. Directories in the input are expanded to
-//! their audio files; each file is sliced and its segments written as
-//! `<stem>_<NNN>.wav` at `--model-sr`.
+//! Removes *between-sentence dead-air only*, never quiet-but-present content, so
+//! a training run draws its windows from voiced sentences instead of from
+//! silence. Directories in the input are expanded to their audio files; each
+//! file is sliced and its segments written as `<stem>_<NNN>.wav`.
+//!
+//! Shared rather than owned by an engine: slicing a corpus is decode, find the
+//! gaps, write WAVs, and knows nothing about what will be trained on the result.
+//! `rvc` needs it so random windows do not land in dead air; `tts` needs it so a
+//! clip is one utterance with one transcript, which is what makes
+//! `preprocess` → `stt` → `train` a corpus.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use audio_kit::{DecodeOptions, SliceOptions, decode_paths, slice, write_wav_file};
+use clap::Args;
 use futures::{StreamExt, stream};
 
-use crate::args::PreprocessArgs;
+#[derive(Debug, Args)]
+pub struct PreprocessArgs {
+    /// Input audio files and/or directories (directories are expanded to their
+    /// audio files: mp3, wav, flac, m4a, ogg, opus, aac, wma).
+    #[arg(required = true)]
+    pub input: Vec<PathBuf>,
+    /// Directory to write the sliced `<stem>_<NNN>.wav` clips into.
+    #[arg(short = 'o', long, default_value = "dataset")]
+    pub output_dir: PathBuf,
+    /// Sample rate of the written clips. Training re-decodes them at whatever
+    /// rate it needs, so this only decides what is on disk; matching the rate
+    /// you will train at avoids a resample.
+    #[arg(long, alias = "model-sr", default_value_t = 48000)]
+    pub sr: u32,
+    /// Energy floor in dBFS: audio quieter than this counts as between-sentence
+    /// dead-air. ASMR users can lower it (e.g. -50) to keep the very softest
+    /// passages — energy is used only to find silent gaps, never to gate quiet
+    /// content.
+    #[arg(long, default_value_t = -40.0)]
+    pub silence_db: f32,
+    /// Minimum silent-gap length (seconds) that counts as a sentence boundary.
+    /// Shorter pauses stay inside the clip, so complete sentences are never
+    /// split.
+    #[arg(long, default_value_t = 0.3)]
+    pub min_silence: f32,
+    /// Drop any clip shorter than this (seconds).
+    #[arg(long, default_value_t = 1.0)]
+    pub min_clip: f32,
+    /// Hard cap on clip length (seconds); 0 means never split a long sentence.
+    #[arg(long, default_value_t = 0.0)]
+    pub max_clip: f32,
+    /// Edge-pad each clip by up to this many seconds of bordering quiet so
+    /// onsets and soft breathy tails are not clipped.
+    #[arg(long, default_value_t = 0.15)]
+    pub pad: f32,
+    /// Peak-normalize each written clip to ~0.95 full-scale.
+    #[arg(long)]
+    pub normalize: bool,
+}
+
+impl PreprocessArgs {
+    /// Reject a slicer configuration that would silently produce no clips.
+    pub fn verify(&self) -> Result<()> {
+        anyhow::ensure!(self.sr > 0, "--sr must be positive");
+        anyhow::ensure!(
+            self.silence_db <= 0.0,
+            "--silence-db is dBFS, so it must be at most 0 (full scale); {} would \
+             treat every sample as silence",
+            self.silence_db
+        );
+        anyhow::ensure!(
+            self.min_silence > 0.0,
+            "--min-silence must be positive: a zero-length gap is every sample boundary"
+        );
+        anyhow::ensure!(self.min_clip >= 0.0, "--min-clip must not be negative");
+        anyhow::ensure!(self.pad >= 0.0, "--pad must not be negative");
+        // `0` is the documented "never split" sentinel, so it is the one value
+        // allowed below `--min-clip`.
+        anyhow::ensure!(
+            self.max_clip == 0.0 || self.max_clip >= self.min_clip,
+            "--max-clip ({}) is below --min-clip ({}), so every clip would be cut \
+             to a length that is then discarded (use 0 to never split)",
+            self.max_clip,
+            self.min_clip
+        );
+        Ok(())
+    }
+}
 
 /// Audio extensions we expand directories into (case-insensitive).
 const AUDIO_EXTS: &[&str] = &["mp3", "wav", "flac", "m4a", "ogg", "opus", "aac", "wma"];
@@ -37,7 +110,7 @@ pub async fn run(args: PreprocessArgs) -> Result<()> {
         anyhow::bail!("no audio files found in the given input paths");
     }
 
-    let sr = args.model_sr;
+    let sr = args.sr;
     let mut total_clips = 0usize;
     let mut total_in_secs = 0.0f64;
     let mut total_kept_secs = 0.0f64;

@@ -220,8 +220,9 @@ gaps, never to gate quiet-but-present sound, so breathy and whispered passages
 survive. `--silence-db` lowers the floor, `--min-silence` sets how long a gap
 must last to be a cut, and neither ever splits a sentence.
 
-**GPT-SoVITS**: a corpus is `<stem>.wav` + `<stem>.txt` pairs, and `stt` is how
-the transcripts get written. Preparation runs cnhubert and the quantiser over
+**GPT-SoVITS**: a corpus is `<stem>.wav` + `<stem>.txt` pairs. `tts preprocess`
+— the same slicer, from the same crate — cuts raw recordings into per-sentence
+clips, and `stt` writes the transcript beside each. Preparation runs cnhubert and the quantiser over
 each clip to produce the 25 Hz semantic tokens both stages agree on, and it is
 the expensive half of a fine-tune — which is why `--stage s1|s2|both` prepares
 exactly once and each stage then writes its own checkpoint family.

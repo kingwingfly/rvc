@@ -6,6 +6,7 @@ members = [
     "crates/hub-kit",
     "crates/stt-core",
     "crates/cli-kit",
+    "crates/preprocess-kit",
     "crates/stt-cli",
     "crates/tts-core",
     "crates/tts-train",
@@ -49,6 +50,7 @@ burn-gptsovits = { path = "crates/burn-gptsovits" }
 burn-whisper = { path = "crates/burn-whisper" }
 stt-core = { path = "crates/stt-core" }
 cli-kit = { path = "crates/cli-kit" }
+preprocess-kit = { path = "crates/preprocess-kit" }
 train-kit = { path = "crates/train-kit" }
 # A build-dependency, not a runtime one: it only prints link arguments.
 rpath-kit = { path = "crates/rpath-kit" }

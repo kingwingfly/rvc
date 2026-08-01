@@ -5358,6 +5358,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "preprocess-kit"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "audio-kit",
+ "clap",
+ "futures",
+ "tokio",
+]
+
+[[package]]
 name = "presser"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6276,6 +6287,7 @@ dependencies = [
  "cli-kit",
  "futures",
  "hub-kit",
+ "preprocess-kit",
  "rpath-kit",
  "rvc-core",
  "rvc-train",
@@ -7718,6 +7730,7 @@ dependencies = [
  "cli-kit",
  "futures",
  "hub-kit",
+ "preprocess-kit",
  "rpath-kit",
  "text-kit",
  "tokio",

@@ -22,7 +22,7 @@ exporter under [`export/`](export/README.md).
 |---|---|---|
 | **`rvc`** | PCM in → retimbred PCM out | `convert`, `train`, `preprocess`, `models`, `completions` |
 | **`stt`** | PCM in → text out | `completions` |
-| **`tts`** | text in → PCM out | `train`, `completions` |
+| **`tts`** | text in → PCM out | `train`, `preprocess`, `completions` |
 | **`voice`** | — | `voice rvc …`, `voice stt …`, `voice tts …`, all three unchanged |
 
 ## Install
@@ -82,6 +82,7 @@ Three tiers, and the names say which is which.
 | `audio-kit` | ffmpeg decode/resample, WAV/raw-PCM I/O, the sentence slicer — all `futures::Stream<f32>` |
 | `hub-kit` | model downloads from Hugging Face, and where they are cached |
 | `cli-kit` | logging, shell completions, `--backend` and `--device` parsing |
+| `preprocess-kit` | the `preprocess` subcommand: slice recordings into clean per-sentence clips |
 | `train-kit` | checkpoints, weight EMA, gradient accumulation, the live dashboard — generic over the module being trained |
 | `text-kit` | grapheme-to-phoneme for TTS: language splitting, Mandarin and English g2p, GPT-SoVITS's phoneme table. No model, no tensors |
 | `rpath-kit` | build-time only: where each binary looks for ffmpeg and LibTorch, so running one needs no environment |

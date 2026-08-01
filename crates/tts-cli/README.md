@@ -17,6 +17,7 @@ Build it with `cargo build --release -p tts-cli`. Every command below is also
 |---|---|
 | `tts -r <clip> -t <transcript>` | **the bare invocation is the filter** — one line of text per utterance on stdin, f32le mono PCM on stdout |
 | `tts train <corpus>` | fine-tune `s1`, `s2` or both on a voice |
+| `tts preprocess <files…>` | slice recordings into clean per-sentence clips, ready for `stt` |
 | `tts completions <shell>` | completion script for bash, zsh, fish, powershell or elvish |
 
 Logs go to stderr, so stdout is only ever samples. Blank input lines are skipped.
@@ -100,10 +101,14 @@ either deploys without the other.
 
 A corpus is `<stem>.wav` beside `<stem>.txt` in one directory (`.mp3`, `.flac`,
 `.m4a`, `.ogg` and `.opus` are read too; audio with no transcript is skipped with
-a warning). **`stt` is how the transcripts get written** — read them before
-training: a wrong transcript is the corpus-wide version of a wrong reference one.
+a warning). Build one from raw recordings in two steps — `preprocess` cuts them
+into per-sentence clips, `stt` writes a transcript beside each. **Read the
+transcripts before training**: a wrong one is the corpus-wide version of a wrong
+reference text.
 
 ```sh
+tts preprocess raw/*.mp3 -o corpus/ --sr 32000
+
 # `stt` reads f32le mono 16 kHz on stdin, so ffmpeg decodes into it.
 fd -e wav . corpus -j 1 -x sh -c \
   'ffmpeg -v quiet -i "$1" -f f32le -ar 16000 -ac 1 - | stt > "$2"' _ {} {.}.txt

@@ -32,6 +32,7 @@ text-kit.workspace = true
 audio-kit.workspace = true
 hub-kit.workspace = true
 cli-kit.workspace = true
+preprocess-kit.workspace = true
 burn-kit.workspace = true
 burn = { workspace = true }
 tokio = { workspace = true }

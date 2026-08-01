@@ -28,6 +28,7 @@ pub async fn run<C: CommandFactory>(cli: TtsCli) -> Result<()> {
         // everything else is a subcommand beside it.
         None => args::synthesize(cli.synth).await,
         Some(TtsCommand::Train(a)) => train::run(*a).await,
+        Some(TtsCommand::Preprocess(a)) => preprocess_kit::run(a).await,
         Some(TtsCommand::Completions(a)) => cli_kit::completions(a, C::command()),
     }
 }
