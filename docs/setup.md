@@ -172,7 +172,13 @@ So a machine that sets none of them caches in **`~/.cache/voice`**.
 output directory**, so pointing two runs at two output folders does not fetch
 Whisper twice.
 
-**Training warm-start bases** — 
+**Training warm-start bases** — RVC's `f0G48k.pth`/`f0D48k.pth` and
+GPT-SoVITS's `s2D*.pth` — are shared in the same way, so they go to
+`pretrained/` inside that cache, flat under their upstream names so you can drop
+in a copy you already have. They are fetched only when a fine-tune wants one;
+`--no-pretrained` and `--resume` fetch nothing.
+
+**An output directory only ever holds what a run produced.**
 
 There is no `--work-dir`: the working directory is the current directory, as it
 is for any other Unix tool.

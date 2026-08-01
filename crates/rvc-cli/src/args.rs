@@ -397,12 +397,12 @@ pub struct TrainArgs {
     )]
     pub resume: Option<PathBuf>,
     /// Pretrained generator base to warm-start from [default:
-    /// `<-o's directory>/pretrained/f0G48k.pth`, downloaded from HF
-    /// `lj1995/VoiceConversionWebUI` on first use].
+    /// `<cache-dir>/pretrained/f0G48k.pth`, downloaded from HF
+    /// `lj1995/VoiceConversionWebUI` on first use and reused by every run].
     #[arg(long, conflicts_with = "no_pretrained")]
     pub pretrained_g: Option<PathBuf>,
     /// Pretrained discriminator base to warm-start from [default:
-    /// `<-o's directory>/pretrained/f0D48k.pth`, downloaded on first use].
+    /// `<cache-dir>/pretrained/f0D48k.pth`, downloaded on first use].
     #[arg(long, conflicts_with = "no_pretrained")]
     pub pretrained_d: Option<PathBuf>,
     /// Train from scratch: no warm-start, and no download of the bases. Poor on

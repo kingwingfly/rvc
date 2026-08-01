@@ -78,19 +78,32 @@ Split by **who reads the file**, because the two kinds have opposite lifetimes:
   cache, never beside the user's own folders — and a relative `XDG_CACHE_HOME`
   is ignored, since a CWD-relative cache is the exact failure this split exists
   to prevent.
-- **Training warm-start bases** (`f0G48k.pth`, `f0D48k.pth`, `s2D*.pth`) belong
-  to one experiment, so they go to `pretrained/` inside that run's **output
-  directory** — beside the checkpoints they produced, which is what makes a run
-  reproducible after the fact. `--no-pretrained` and `--resume` fetch nothing.
+- **Training warm-start bases** (`f0G48k.pth`, `f0D48k.pth`, `s2D*.pth`) go to
+  `pretrained/` **inside that same cache**, stored flat under their upstream
+  names rather than in the Hub's tree, so the directory can be read by eye and
+  hand-populated by anyone who already has the weights. They are fetched only
+  when a fine-tune asks for one, so a user who never trains never downloads
+  them; `--no-pretrained` and `--resume` fetch nothing either.
 
-**Nothing is ever downloaded into an output directory it was not asked to write
-to.** That is the rule the split exists to make checkable; before it there was no
-rule, only a per-engine convention, and the conventions had already diverged —
-the cache was `$RVC_CACHE_DIR` / `~/.cache/rvc` no matter which binary asked, and
-`s2D2333k.pth`, which only a training run ever opens, sat in it beside the
-inference weights. `--work-dir` was a third notion of "where things go" on top of
-the cache and the output directory; it is gone, and the working directory is the
-current directory, like any other Unix tool.
+**Nothing downloaded is ever written into an output directory.** An output
+directory holds what a run *produced* — its checkpoint family, its `checkpoint/`
+best family, its `.best.json` — and nothing else.
+
+**This is a correction of an earlier split, so do not restore it.** The bases
+used to go to `pretrained/` beside the run's output, on the reasoning that they
+"belong to one experiment". They do not: a base is the published upstream file,
+byte for byte, identical for every voice ever trained on the machine — the same
+kind of read-only shared input as ContentVec or Whisper. The old rule made
+training *n* voices download the same 219 MB *n* times, and it made the split
+turn on "who reads it" (inference vs training) when the property that actually
+matters is **whether the file is reusable**. It is, so it is cached.
+
+The reason there is a rule at all is that before it there was none, only a
+per-engine convention, and the conventions had already diverged — the cache was
+`$RVC_CACHE_DIR` / `~/.cache/rvc` no matter which binary asked. `--work-dir` was
+a third notion of "where things go" on top of the cache and the output
+directory; it is gone, and the working directory is the current directory, like
+any other Unix tool.
 
 Training also **refuses to overwrite an existing output `.safetensors` unless
 `-y` is passed.** A voice is hours of GPU time and the corpus that produced it
