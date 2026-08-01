@@ -99,11 +99,20 @@ because mirrors of converted weights move and disappear.
 **Transcribe a directory, one transcript beside each take.** This is also how a
 `tts train` corpus gets its `<stem>.txt` files.
 
-```fish
-for f in corpus/*.wav
-  ffmpeg -v quiet -i $f -f f32le -ar 16000 -ac 1 - | stt > (string replace .wav .txt $f)
-end
+```sh
+fd -Ie wav . corpus -j 1 -x sh -c \
+  'ffmpeg -v quiet -i "$1" -f f32le -ar 16000 -ac 1 - | stt > "$2"' _ {} {.}.txt
 ```
+
+[`fd`](https://github.com/sharkdp/fd) substitutes `{}` for each file it finds and
+`{.}` for the same path without its extension, so the transcript lands beside its
+take. **`-j 1` is load-bearing**: `fd` runs its command in parallel by default,
+and a second `stt` would load a second copy of the model onto the same GPU. `-I`
+searches even where a `.gitignore` excludes the corpus, and `sh -c` is there
+because `-x` execs directly, with no shell to build the pipe. Passing the two
+paths as arguments rather than pasting them into the script keeps a filename with
+a space or a quote in it from breaking the command. Add `-e mp3 -e flac` for
+whatever else the corpus holds.
 
 **Subtitles and manifests — `--format jsonl`.** Adds the segment's position in
 the recording and the language the model used. `start` and `end` are the
