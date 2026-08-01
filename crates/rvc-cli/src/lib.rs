@@ -35,12 +35,14 @@ pub async fn run<C: CommandFactory>(cli: RvcCli) -> Result<()> {
 /// Initialise tracing for a voice-conversion command.
 ///
 /// Everything goes to stderr, except `train` with its dashboard up: that one
-/// gets `./train.log` — the working directory, so a run never scatters files
-/// into wherever `-o` points. `cli_kit` owns the rest of the decision.
+/// gets `train.log` beside the weights the run writes, since the log is part of
+/// what the run produced and belongs with the rest of it rather than in
+/// whichever directory the run happened to be started from. `cli_kit` owns the
+/// rest of the decision.
 pub fn init_logging(train: Option<&TrainArgs>) {
     cli_kit::init_logging(
         train
             .filter(|a| !a.no_tui)
-            .map(|_| std::path::PathBuf::from("train.log")),
+            .map(|a| cli_kit::log_beside(&a.out)),
     );
 }

@@ -87,7 +87,13 @@ Split by **who reads the file**, because the two kinds have opposite lifetimes:
 
 **Nothing downloaded is ever written into an output directory.** An output
 directory holds what a run *produced* — its checkpoint family, its `checkpoint/`
-best family, its `.best.json` — and nothing else.
+best family, its `.best.json`, and the dashboard's `train.log` — and nothing
+else. The log used to go to the *current* directory on the reasoning that only
+weights belong beside `-o`; it belongs with them, because it is the record of
+the run that wrote them, and leaving it in whichever directory the user happened
+to stand in meant two runs appended to one file. `-o` names a stem, so the
+directory is its parent (`cli_kit::log_beside`) — that is one function rather
+than two, so `rvc` and `tts` cannot drift.
 
 **This is a correction of an earlier split, so do not restore it.** The bases
 used to go to `pretrained/` beside the run's output, on the reasoning that they

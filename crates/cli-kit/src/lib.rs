@@ -47,6 +47,17 @@ pub fn init_logging(log_file: Option<PathBuf>) {
     }
 }
 
+/// Where a training run's log goes, given its `-o`.
+///
+/// `-o` names a *stem* (`models/voice` -> `models/voice.safetensors`), so the
+/// output directory is its parent — `models/train.log`, beside the checkpoint
+/// family and the `checkpoint/` best family. A stem with no directory part
+/// (`-o voice`) writes its weights into the current directory, and the log
+/// follows them there.
+pub fn log_beside(out: &Path) -> PathBuf {
+    out.parent().unwrap_or(Path::new("")).join("train.log")
+}
+
 /// Install the subscriber, returning whether `log_file` was the one it got.
 fn init_tracing(log_file: Option<&Path>) -> bool {
     use tracing_subscriber::EnvFilter;
@@ -141,4 +152,24 @@ pub fn stop_on_ctrl_c() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
 /// to stderr scribbles over its own display.
 pub fn use_tui(no_tui: bool) -> bool {
     !no_tui && std::io::IsTerminal::is_terminal(&std::io::stdout())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_goes_beside_the_weights() {
+        assert_eq!(
+            log_beside(Path::new("models/voice")),
+            Path::new("models/train.log")
+        );
+        // `-o` may be given with the suffix it writes; the parent is the same.
+        assert_eq!(
+            log_beside(Path::new("out/run1/voice.safetensors")),
+            Path::new("out/run1/train.log")
+        );
+        // A bare stem writes its weights into the current directory.
+        assert_eq!(log_beside(Path::new("voice")), Path::new("train.log"));
+    }
 }

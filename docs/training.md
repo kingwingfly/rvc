@@ -161,8 +161,9 @@ NVML for the GPU, so used/total, utilisation and power). Pressing **`q`** flips
 the shared `Interrupter` and the loop stops and saves. Off a TTY, or with
 `--no-tui`, it logs to stderr and **Ctrl-C** does the same through a SIGINT flag
 threaded into the loop. The same call emits the throttled `step/total … eta`
-line either way: with a TUI up the CLI has routed `tracing` to `./train.log`, so
-the log records the run's curves instead of scribbling over the display.
+line either way: with a TUI up the CLI has routed `tracing` to `train.log` in the
+output directory, so the log records the run's curves instead of scribbling over
+the display.
 
 **`distinct`**, **`Rng`**, **`human`**, **`scalar`** — the small shared pieces:
 rejecting a `--device` list that names one device twice (`auto,gpu:0` are two
@@ -259,7 +260,10 @@ prepared or a model is loaded — the point is not to discover it after an hour.
 `--resume` is itself the statement that overwriting is intended.
 
 There is no `--work-dir`: the working directory is the current directory, as it
-is for any other Unix tool, so the training log is `./train.log`.
+is for any other Unix tool. The one file a run writes that is not weights is its
+log, and that goes with the weights — `-o models/voice` puts the dashboard's
+`tracing` output in `models/train.log`, next to the checkpoint family it
+describes.
 
 ## Backends and devices
 

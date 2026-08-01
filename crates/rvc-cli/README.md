@@ -143,8 +143,9 @@ uv run --project export python export/export_rvc.py models/voice.safetensors mod
 ContentVec, RMVPE and the warm-start bases all go to the shared cache —
 `--cache-dir` or `$RVC_CACHE_DIR`, resolved as
 [`docs/setup.md`](../../docs/setup.md#where-models-are-stored) describes and
-printed by `-h`. An output directory holds only what the run produced; the
-training log is `./train.log` in the directory you invoked from.
+printed by `-h`. An output directory holds only what the run produced — which
+includes its log: `-o models/voice` under the dashboard writes
+`models/train.log`.
 
 ## Limits
 

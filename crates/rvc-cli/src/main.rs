@@ -9,8 +9,8 @@
 //! whichever matches what you need.
 //!
 //! Logs go to **stderr** so the filter's stdout carries only PCM — except during
-//! `train` with the TUI dashboard, where they go to `./train.log` so they don't
-//! corrupt the display.
+//! `train` with the TUI dashboard, where they go to `train.log` beside the
+//! weights so they don't corrupt the display.
 
 use anyhow::Result;
 use clap::Parser;

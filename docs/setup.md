@@ -178,7 +178,8 @@ GPT-SoVITS's `s2D*.pth` — are shared in the same way, so they go to
 in a copy you already have. They are fetched only when a fine-tune wants one;
 `--no-pretrained` and `--resume` fetch nothing.
 
-**An output directory only ever holds what a run produced.**
+**An output directory only ever holds what a run produced** — its weights, its
+`checkpoint/` best family, and the dashboard's `train.log`.
 
 There is no `--work-dir`: the working directory is the current directory, as it
 is for any other Unix tool.
