@@ -49,28 +49,19 @@ works; you get the transcript when the stream closes.
 
 ## Flags
 
-| flag | default | what it does |
-|---|---|---|
-| `-m`, `--model <DIR>` | — | a local model directory, skipping the downloader entirely |
-| `--repo <OWNER/NAME>` | `openai/whisper-large-v3-turbo` | which Hugging Face repo to fetch. Needs `model.safetensors`, `config.json`, `generation_config.json`, `tokenizer.json` |
-| `--cache-dir <DIR>` | `~/.cache/voice` | where downloaded weights land — see [Where files land](#where-files-land) |
-| `--format text\|jsonl` | `text` | one line per segment, or one JSON object per line |
-| `-l`, `--language <ISO>` | detected | force `en`, `zh`, `ja`, … Worth setting on short or breathy clips, where detection is least sure |
-| `--translate` | off | Whisper's own task token: X → English, and no other direction |
-| `--backend` | `auto` | see below |
-| `--device` | `auto` | `cpu`, `gpu`, `gpu:N`, `mps`, `vulkan` (`cuda`/`cuda:N` spell `gpu`/`gpu:N`) |
-| `--silence-db` | `-40` | energy floor in dBFS. **Lower** it (`-50`) when soft speech is being cut into fragments; raise it when room noise glues everything together |
-| `--min-silence` | `0.5` | how long a quiet gap must last to be a segment boundary. Raise it if single sentences are being split |
-| `--min-clip` | `0.2` | drop segments shorter than this — usually a cough or a door |
-| `--max-clip` | `30.0` | hard cap on segment length. **Must be in `(0, 30]`**: one segment has to fit one 30 s encoder window, and more is rejected up front rather than silently truncated |
-| `--max-tokens` | `224` | cap on tokens per segment, which bounds a hallucination loop. Hitting it logs a warning rather than passing the cut-off text off as a finished sentence — silent truncation looks like a perfectly well-formed transcript that simply stops mid-sentence |
-| `--chunk` | `16000` | samples per `read` from stdin. Plumbing, not latency |
+`stt --help` lists every flag with its default. What is worth knowing beyond
+that is **segmentation**, because Whisper handed a long quiet stretch invents
+fluent sentences to fill it and nothing in the output says so. The slicer
+([`audio-kit`](../audio-kit/src/slice.rs), shared with `rvc preprocess`) cuts
+only where audio is both below `--silence-db` *and* quiet for longer than
+`--min-silence`, so soft breathy tails stay inside their segment. Lower the floor
+(`--silence-db=-50`) when soft speech is being cut into fragments; raise
+`--min-silence` when single sentences are being split.
 
-Segmentation matters more than the other knobs, because **Whisper handed a long
-quiet stretch invents fluent sentences to fill it** and nothing in the output
-says so. The slicer ([`audio-kit`](../audio-kit/src/slice.rs), shared with
-`rvc preprocess`) cuts only where audio is both below the floor *and* quiet for
-longer than `--min-silence`, so soft breathy tails stay inside their segment.
+`--max-clip` **must be in `(0, 30]`** — one segment has to fit one 30 s encoder
+window — and is rejected up front rather than silently truncated. Hitting
+`--max-tokens` logs a warning for the same reason: a cut-off transcript looks
+perfectly well-formed and simply stops mid-sentence.
 
 Every model dimension and every control-token id is read from the repo's own
 JSON, so another size or a fine-tune costs no code. `RUST_LOG` sets the log
@@ -155,14 +146,10 @@ does not resume a partial blob, so the next run would otherwise start over.
 
 ## Where files land
 
-Whisper is inference-only here, so its weights are a machine-wide asset rather
-than part of any one run: they go to a cache — `--cache-dir`, else
-`STT_CACHE_DIR`, else `VOICE_CACHE_DIR`, else `voice` under the XDG cache root,
-which is `~/.cache` unless `$XDG_CACHE_HOME` names an absolute path. So the
-usual answer is `~/.cache/voice`, and `-h` prints whichever it resolves to on
-this machine. **Nothing is ever
-downloaded into the directory you redirected output to.** Transcripts go where
-you point stdout, and nothing else is written.
+Whisper's weights go to the shared cache — `--cache-dir` or `$STT_CACHE_DIR`,
+resolved as [`docs/setup.md`](../../docs/setup.md#where-models-are-stored)
+describes and printed by `-h`. Transcripts go where you point stdout, and
+nothing else is written.
 
 ## Status and limits
 

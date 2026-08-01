@@ -599,7 +599,7 @@ difference of 7.9e-03** on RMS 5.2e-02 (correlation 0.99998), and `s1_prompt`
 over a whole prompt agrees with `s1_prompt` + `s1_step` to 6.7e-06.
 
 ```sh
-uv run --project export python export/export_onnx.py models/voice.safetensors models/voice.onnx
+uv run --project export python export/export_rvc.py models/voice.safetensors models/voice.onnx
 ```
 
 Exported graph contract (matches `rvc-core`):

@@ -56,20 +56,8 @@ A duration that does not match the text length is the tell.
 
 ## Flags
 
-| flag | default | |
-|---|---|---|
-| `-r`, `--reference` / `-t`, `--reference-text` | *required* | the clip and what it says, as above |
-| `-m`, `--models` | auto-downloaded | directory holding cnhubert, `s1*.ckpt` and `s2G*.pth` |
-| `--s1`, `--s2` | base weights | fine-tuned weights, each overridable on its own |
-| `--prosody` | auto-downloaded | directory holding the ONNX prosody encoder |
-| `--cache-dir` | see [Where files land](#where-files-land) | where downloads land |
-| `-l`, `--language` | `zh` | `zh`, `en` or `ja` |
-| `--sr` | `32000` | output sample rate |
-| `--top-k` | `15` | sample from the `k` highest-scoring tokens; lower is steadier |
-| `--temperature` | `1.0` | below 1 sharpens the distribution, above 1 flattens it |
-| `--repetition-penalty` | `1.35` | pushes down tokens already generated |
-| `--seed` | `0` | a synthesis is reproducible from its seed |
-| `--max-tokens` | `1500` | cap per line; at 25 tokens per second that is a minute |
+`tts --help` and `tts train --help` list every flag with its default. Two are
+worth knowing before you hit them:
 
 **The repetition penalty is load-bearing, not a refinement.** Without it a run of
 the same token becomes self-reinforcing and the utterance never ends, until
@@ -130,23 +118,10 @@ cnhubert, quantiser and prosody BERT is the expensive half — then trains what 
 asked for, so expect an idle-looking pause at the start proportional to the
 corpus rather than to the epochs.
 
-| flag | default | |
-|---|---|---|
-| `-o`, `--out` | `models/voice` | stem; each stage appends `.s1` / `.s2` |
-| `-y` | off | overwrite an existing output instead of refusing |
-| `--stage` | `both` | `s1`, `s2` or `both` |
-| `-l`, `--language` | `zh` | language of the transcripts |
-| `-e`, `--epochs` | `10` | passes over the corpus |
-| `-b`, `--batch-size` | `1` | clips per step — accumulated, not padded, so raising it costs time rather than VRAM |
-| `--lr` / `--s2-lr` | `1e-5` / `1e-4` | per-stage learning rates: cross-entropy on a large transformer wants a smaller one than a warm-started GAN |
-| `--lr-final` | `0.1` | end-of-run LR as a fraction of the start; decays exponentially |
-| `--ema-frac` | `0.1` | EMA window as a fraction of the run; `0` saves the raw weights |
-| `--max-tokens` | `1500` | **skip** clips longer than this, never truncate — a cut-off clip teaches an early stop |
-| `--segment-frames` | `32` | latent frames `s2` renders per step; trades VRAM against little else |
-| `--d-lr-ratio`, `--d-interval` | `1.0`, `1` | hold off an `s2` discriminator that is winning |
-| `--no-save-best` | off | stop keeping a best-so-far `s2` checkpoint |
-| `--backend`, `--device` | `auto` | as above, except that `onnx` is rejected — ONNX Runtime cannot train. `--device` takes a comma-separated list for data-parallel training, the first being the master |
-| `--no-tui` | off | disable the dashboard and log to stderr |
+`--max-tokens` **skips** a clip longer than it rather than truncating one: a
+cut-off clip teaches the model to stop early. `-b` accumulates rather than pads,
+so raising it costs time rather than VRAM, and `--backend onnx` is rejected here
+because ONNX Runtime cannot train.
 
 Each stage writes `<stem>.<s1|s2>.safetensors` — the weight **EMA**, markedly
 steadier on a small corpus and the one to deploy — beside a `.raw.safetensors`
@@ -160,8 +135,6 @@ a TTY (or with `--no-tui`) logging is on stderr, and Ctrl-C stops and saves.
 
 How the two loops work — `s2` is the same VITS GAN `rvc` trains with, `s1` is
 not — is [`docs/training.md`](../../docs/training.md).
-
-## Where files land
 
 ## Limits
 

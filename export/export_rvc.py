@@ -1,7 +1,7 @@
 """Convert a Burn-trained RVC generator (safetensors) to ONNX.
 
 Usage:
-    uv run --project export python export_onnx.py voice.safetensors voice.onnx
+    uv run --project export python export_rvc.py voice.safetensors voice.onnx
 
 The exported graph matches the `rvc-core` inference contract:
     inputs : phone [1,T,768] f32, phone_lengths [1] i64, pitch [1,T] i64,
@@ -114,7 +114,7 @@ def export_model(model: Synthesizer, dst: str) -> None:
 
 def main() -> None:
     if len(sys.argv) != 3:
-        raise SystemExit("usage: export_onnx.py <in.safetensors> <out.onnx>")
+        raise SystemExit("usage: export_rvc.py <in.safetensors> <out.onnx>")
     src, dst = sys.argv[1], sys.argv[2]
 
     st = load_file(src)

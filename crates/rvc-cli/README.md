@@ -23,48 +23,22 @@ Build it with `cargo build --release -p rvc-cli`. Every command below is also
 
 ## Flags
 
-Inference — the bare filter and `convert` take the same set:
+`rvc --help`, and `rvc <subcommand> --help`, list every flag with its default and
+what it does. Three are worth more than a line:
 
-| flag | default | |
-|---|---|---|
-| `-m`, `--model` | *required* | trained generator: `.safetensors` (Burn) or `.onnx` |
-| `--model-sr` | `48000` | generator output rate; only 48 kHz is supported today |
-| `-t`, `--transpose` | `0` | pitch shift in semitones, for a source and target in different ranges |
-| `--backend` | `auto` | see [Backends](#backends) |
-| `--device` | `auto` | `cpu`, `gpu`, `gpu:N`, `mps`, `vulkan` (`cuda`/`cuda:N` are accepted spellings of `gpu`) |
-| `--speaker-id` | `0` | single-speaker models only have 0 |
-| `--denoise` | off | conservative de-hiss: removes a steady noise floor and leaves breaths, which sit above it. Tune with `--denoise-strength` / `--denoise-patch` / `--denoise-research`; costs ~21 ms of latency |
-| `--content`, `--rmvpe`, `--cache-dir` | auto-downloaded | the ContentVec / RMVPE assets and where they live — see [Where files land](#where-files-land) |
-| `-o`, `--output-dir` | `.` | `convert` only; writes `<stem>_<model>.wav` |
-| `--chunk` | `1600` | filter only: samples per stdin read, so it trades latency against overhead |
+**`--denoise`** is a conservative de-hiss: it removes a steady noise floor and
+leaves breaths, which sit above it. `--denoise-strength`, `--denoise-patch` and
+`--denoise-research` tune it; it costs ~21 ms of latency.
 
-`train`:
+**`-y` is required to overwrite an existing training output.** A voice is hours
+of GPU time and the corpus that made it may be gone, so it is never clobbered
+silently.
 
-| flag | default | |
-|---|---|---|
-| `-o`, `--out` | `models/voice` | writes `<out>.safetensors` (EMA), `<out>.raw.safetensors` and `<out>.disc.safetensors` |
-| `-y` | off | **required to overwrite an existing output** — a trained voice is expensive and is never clobbered silently |
-| `-e`, `--epochs` / `-b`, `--batch-size` | `5` / `4` | batch size is **per device**; lower it if a 6 GB card runs out of memory |
-| `--lr` / `--lr-final` | `1e-4` / `0.1` | the LR decays exponentially to `lr × lr-final` over the run, because a constant one bounces around the minimum. `--lr-final 1.0` disables |
-| `--ema-frac` | `0.1` | the saved model is an EMA over this fraction of the run, averaging out adversarial oscillation. `0` saves only the raw weights |
-| `--grad-accum` | `1` | micro-batches per optimizer step: a steadier gradient at no extra VRAM, ~N× slower per epoch |
-| `--d-lr-ratio` / `--d-interval` | `1.0` / `1` | rein in an over-eager discriminator when the output has buzzy high-frequency static |
-| `--snr-weight` | `0.0` | bias sampling toward cleaner clips by `snr^alpha`, on noise-floor SNR rather than loudness so soft passages are not penalised |
-| `--resume` | | continue from a generator `.safetensors`, discriminator sidecar included. Conflicts with `--pretrained-g` |
-| `--pretrained-g`, `--pretrained-d` | auto-downloaded | warm-start bases; `--no-pretrained` starts from scratch and fetches nothing |
-| `--no-save-best` / `--no-tui` | off | stop snapshotting the lowest-`mel` weights / log to stderr instead of the dashboard |
-| `--device` | `auto` | comma-separated (alias `--devices`) for data-parallel training; the first is the master |
-
-`preprocess`: `-o` (`dataset`), `--model-sr` (`48000`), `--silence-db` (`-40`),
-`--min-silence` (`0.3`), `--min-clip` (`1.0`), `--max-clip` (`0` = never split a
-long sentence), `--pad` (`0.15`), `--normalize`.
-
-The two that matter are `--silence-db`, the energy floor — **lower** it (e.g.
-`-50`) to keep the very softest passages, raise it to strip harder — and
-`--min-silence`, how long a quiet gap must last to count as a sentence boundary,
-so a shorter internal pause never splits a sentence. `--pad` keeps bordering
-quiet at each edge so onsets and soft tails are not clipped. The output folder is
-inspectable: listen to a few clips before committing a training run to them.
+**`--silence-db` and `--min-silence`** are what you reach for in `preprocess`.
+The first is the energy floor — lower it (e.g. `-50`) to keep the very softest
+passages, raise it to strip harder. The second is how long a quiet gap must last
+to count as a sentence boundary, so a shorter internal pause never splits a
+sentence. Listen to a few output clips before committing a training run to them.
 
 ## Backends
 
@@ -104,8 +78,8 @@ rvc train clips/*.wav -o models/voice --backend tch
 rvc train clips/*.wav -o models/voice --resume models/voice.safetensors -y
 ```
 
-Warm-start bases (`f0G48k.pth`, `f0D48k.pth`) download beside the run unless
-`--no-pretrained` or `--resume` is given; on a small corpus they are what makes
+Warm-start bases (`f0G48k.pth`, `f0D48k.pth`) are fetched to the shared cache
+unless `--no-pretrained` or `--resume` is given; on a small corpus they are what makes
 the result usable. On a TTY a dashboard plots `g`/`d`/`mel` and the learning rate
 and `q` stops early **and saves**; off a TTY it logs to stderr and Ctrl-C does
 the same. Watch `mel` for quality — `g`/`d` are adversarial and only need to stay
@@ -161,22 +135,16 @@ result wherever you passed the `.safetensors`, and `--backend auto` picks ORT
 from the extension. Graph contract: [`export/README.md`](../../export/README.md).
 
 ```sh
-uv run --project export python export/export_onnx.py models/voice.safetensors models/voice.onnx
+uv run --project export python export/export_rvc.py models/voice.safetensors models/voice.onnx
 ```
 
 ## Where files land
 
-Assets split by who reads them. **Inference assets** (ContentVec, RMVPE) are
-shared across every run, so they live in a cache — `--cache-dir`, else
-`RVC_CACHE_DIR`, else `VOICE_CACHE_DIR`, else `voice` under the XDG cache root,
-which is `~/.cache` unless `$XDG_CACHE_HOME` names an absolute path. So the
-usual answer is `~/.cache/voice`, and `-h` prints whichever it resolves to on
-this machine. **Warm-start
-bases** are shared the same way — the same published file whatever voice you are
-training — so they land in `<cache-dir>/pretrained/`, flat under their upstream
-names so you can drop in a copy you already have. An output directory holds only
-what the run produced; everything else is written under the directory you
-invoked from, the training log `./train.log` included.
+ContentVec, RMVPE and the warm-start bases all go to the shared cache —
+`--cache-dir` or `$RVC_CACHE_DIR`, resolved as
+[`docs/setup.md`](../../docs/setup.md#where-models-are-stored) describes and
+printed by `-h`. An output directory holds only what the run produced; the
+training log is `./train.log` in the directory you invoked from.
 
 ## Limits
 
