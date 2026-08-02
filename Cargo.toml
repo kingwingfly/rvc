@@ -16,6 +16,7 @@ members = [
     "crates/burn-vits",
     "crates/burn-gptsovits",
     "crates/burn-whisper",
+    "crates/burn-seedvc",
     "crates/text-kit",
     "crates/train-kit",
     "crates/rpath-kit",
@@ -27,7 +28,12 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "MIT OR Apache-2.0"
+# GPL-3.0 because `burn-seedvc` is a port of Seed-VC, which is GPL-3.0, and a
+# derivative work carries the licence forward to everything that links it.
+# `-only` rather than `-or-later`: upstream ships the bare GPL-3.0 text with no
+# "or any later version" statement, and -only is the reading that is valid
+# either way.
+license = "GPL-3.0-only"
 repository = "https://github.com/kingwingfly/asmr"
 rust-version = "1.85"
 
@@ -48,6 +54,7 @@ burn-kit = { path = "crates/burn-kit" }
 burn-vits = { path = "crates/burn-vits" }
 burn-gptsovits = { path = "crates/burn-gptsovits" }
 burn-whisper = { path = "crates/burn-whisper" }
+burn-seedvc = { path = "crates/burn-seedvc" }
 stt-core = { path = "crates/stt-core" }
 cli-kit = { path = "crates/cli-kit" }
 preprocess-kit = { path = "crates/preprocess-kit" }

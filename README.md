@@ -115,3 +115,18 @@ integration, which is why the shared crates are `*-kit` rather than `voice-*`.
 `cargo clippy --workspace` is kept clean and `cargo fmt` is enforced. Read
 [CLAUDE.md](CLAUDE.md) first — it holds the constraints that are easy to break
 silently, weight compatibility and backend genericity among them.
+
+## Licence
+
+Copyright (C) 2026 王翼翔.
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License, version 3, as published by the Free
+Software Foundation. It is distributed in the hope that it will be useful, but
+**without any warranty** — without even the implied warranty of merchantability
+or fitness for a particular purpose. See [LICENSE](LICENSE) for the full text.
+
+Releases up to and including the MIT-licensed ones stay MIT for whoever holds a
+copy of them; the change applies going forward. The move to copyleft is what
+porting [Seed-VC](https://github.com/Plachtaa/seed-vc) requires — it is GPL-3.0,
+and a port carries that forward to everything linking it.

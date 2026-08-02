@@ -1,0 +1,25 @@
+[package]
+name = "burn-seedvc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "The Seed-VC network in Burn: CAMPPlus timbre, the U-ViT diffusion transformer, flow matching and BigVGAN"
+
+[features]
+# Extra compute backends for the examples (the weight-coverage harnesses that
+# stand in for unit tests). Off by default so the crate's normal build stays
+# backend-free.
+cuda = ["burn/cuda"]
+tch = ["burn/tch"]
+
+[dependencies]
+burn = { version = "0.21", default-features = false, features = ["std"] }
+burn-vits.workspace = true
+burn-whisper.workspace = true
+burn-store.workspace = true
+burn-kit = { workspace = true, features = ["store"] }
+
+[dev-dependencies]
+burn-ndarray = "0.21"

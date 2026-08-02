@@ -968,6 +968,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "burn-seedvc"
+version = "0.1.0"
+dependencies = [
+ "burn",
+ "burn-kit",
+ "burn-ndarray",
+ "burn-store",
+ "burn-vits",
+ "burn-whisper",
+]
+
+[[package]]
 name = "burn-std"
 version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
