@@ -11,6 +11,22 @@
 //! account for. As a module lands, its arm goes in `report` below and its
 //! prefix moves from "not yet ported" to a real applied/missing/unused triple.
 //!
+//! Measured against
+//! `DiT_seed_v2_uvit_whisper_small_wavenet_bigvgan_pruned.pth` (440 MB), the
+//! whole of which is **302 tensors / 110,035,232 parameters**:
+//!
+//! | prefix | tensors | module |
+//! |---|---|---|
+//! | `net.cfm.module.estimator.*` | 255 | [`dit`] and [`wavenet`] |
+//! | `net.length_regulator.module.*` | 22 | [`length_regulator`] |
+//! | `net.style_encoder.module.*` | 18 | [`campplus`] |
+//! | `net.vq.module.quantizers.*` | 7 | [`vq`] |
+//!
+//! Two of the six networks are **not in this file at all** — the content encoder
+//! is `openai/whisper-small` and the vocoder is
+//! `nvidia/bigvgan_v2_22khz_80band_256x`, each from its own release. Hunting for
+//! their tensors here is a way to lose an afternoon.
+//!
 //! Usage: `cargo run -p burn-seedvc --example load -- [--backend ndarray|cuda|tch] <ckpt.pth>`
 
 #[path = "common/mod.rs"]

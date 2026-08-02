@@ -26,17 +26,30 @@ pub struct SeedVcConfig {
     pub hop_length: usize,
 
     /// Width of the frozen content encoder's output — `whisper-small`'s `d_model`.
+    /// This is the length regulator's *input*.
     pub content_dim: usize,
-    /// Channels the length regulator projects content into, which is also the
-    /// transformer's working width.
+    /// Channels the length regulator projects content into, and the width the
+    /// transformer consumes it at. Upstream spells this twice —
+    /// `length_regulator.channels` and `DiT.content_dim` — and they must agree.
     pub hidden_dim: usize,
-    /// Entries in the length regulator's codebook.
+    /// `length_regulator.content_codebook_size`. **Allocated but not used on
+    /// this preset**: `is_discrete: false`, so content stays continuous and the
+    /// codebook is never indexed. It is here because the checkpoint carries the
+    /// tensor and a port that silently drops it reports a false `unused`.
     pub codebook_size: usize,
+    /// Per-stage resampling factors, `[1, 1, 1, 1]` here — i.e. the regulator
+    /// changes width but **not** rate on this preset.
+    pub sampling_ratios: [usize; 4],
+
+    /// CAMPPlus embedding width — the whole speaker specification.
+    pub style_dim: usize,
 
     /// Diffusion-transformer depth.
     pub depth: usize,
     /// Attention heads per block.
     pub heads: usize,
+    /// Longest sequence the transformer's positional scheme admits.
+    pub block_size: usize,
 
     /// WaveNet final block: depth, kernel and dilation.
     pub wavenet_layers: usize,
@@ -56,9 +69,13 @@ impl SeedVcConfig {
             content_dim: 768,
             hidden_dim: 512,
             codebook_size: 2048,
+            sampling_ratios: [1, 1, 1, 1],
+
+            style_dim: 192,
 
             depth: 13,
             heads: 8,
+            block_size: 8192,
 
             wavenet_layers: 8,
             wavenet_kernel: 5,
@@ -81,6 +98,12 @@ pub const CONTENT_SR: u32 = 16_000;
 /// The vocoder's own Hugging Face repo, which ships separately from Seed-VC's
 /// checkpoint and is used unmodified.
 pub const BIGVGAN_REPO: &str = "nvidia/bigvgan_v2_22khz_80band_256x";
+
+/// The timbre encoder's weights, **also a separate file** —
+/// `campplus_cn_common.bin`, not part of the Seed-VC checkpoint. Two of the
+/// three networks here come from somebody else's release, which is worth
+/// knowing before hunting for their tensors in the wrong file.
+pub const CAMPPLUS_FILE: &str = "campplus_cn_common.bin";
 
 #[cfg(test)]
 mod tests {

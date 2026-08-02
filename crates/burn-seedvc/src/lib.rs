@@ -39,6 +39,7 @@ mod content;
 mod dit;
 mod flow;
 mod length_regulator;
+mod vq;
 mod wavenet;
 
 pub use config::SeedVcConfig;
