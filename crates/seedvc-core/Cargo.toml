@@ -19,7 +19,10 @@ wgpu = ["burn/wgpu", "burn-kit/wgpu", "burn-seedvc/wgpu"]
 burn = { version = "0.21", default-features = false, features = ["std"] }
 burn-seedvc.workspace = true
 burn-vits.workspace = true
-burn-kit.workspace = true
+# `store` for `ApplyResult`: every checkpoint here loads partially by design, so
+# the coverage report is what stands between a renamed tensor and a model that
+# runs on freshly-initialised weights.
+burn-kit = { workspace = true, features = ["store"] }
 audio-kit.workspace = true
 cli-kit.workspace = true
 anyhow.workspace = true
@@ -30,3 +33,6 @@ tracing.workspace = true
 
 [dev-dependencies]
 burn-ndarray = "0.21"
+# `examples/coverage` parses `--backend` through `cli_kit::Backend`'s own
+# `ValueEnum`, so its aliases cannot drift from the binaries'.
+clap.workspace = true

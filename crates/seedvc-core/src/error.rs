@@ -12,6 +12,13 @@ pub enum Error {
     /// The reference clip is unusable — too short to specify a speaker.
     #[error("{0}")]
     Reference(String),
+    /// A conversion was asked for that the model's fixed windows cannot express:
+    /// a chunk past the content encoder's 30 s, a conditioning window past the
+    /// transformer's `block_size`, or a noise buffer of the wrong width. Every
+    /// one of them is a chunking decision, so the message names the arithmetic
+    /// rather than the symptom.
+    #[error("{0}")]
+    Input(String),
     #[error(transparent)]
     Audio(#[from] audio_kit::AudioError),
     #[error(transparent)]
