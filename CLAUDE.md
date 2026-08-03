@@ -50,9 +50,12 @@ synthesis are siblings. Anything two of them need moves to a neutral crate first
 **Running a binary with no subcommand is the stdin→stdout filter.** Subcommands
 are for everything that is not streaming:
 `rvc convert|train|preprocess|download|completions`,
-`tts train|preprocess|download|completions`, `stt download|completions`. `stt`
-and `tts` were already this shape; `rvc` reached it by promoting `rvc serve` to
-the bare invocation.
+`tts convert|train|preprocess|download|completions`,
+`stt convert|download|completions`. `stt` and `tts` were already this shape;
+`rvc` reached it by promoting `rvc serve` to the bare invocation. **`convert` is
+the batch counterpart of the bare invocation on all three** — same engine, files
+instead of a pipe — which is why it is spelled identically everywhere rather than
+`transcribe`, `synthesize` and `convert`.
 
 That is a deliberate promotion rather than a deletion. Streaming is the *primary*
 mode of a Unix filter — it is the thing the whole `futures::Stream` pipeline
@@ -223,7 +226,8 @@ cargo run -p burn-gptsovits --example keys -- --group <any checkpoint>   # what 
 ```
 
 Porting references are cloned under `/.reference` (gitignored) and **read, never
-run** — `openai/whisper`, and RVC-Project tag `2.2.231006` for `burn-rvc`.
+run** — `openai/whisper`, and RVC-Project for `burn-rvc`, which is pinned to
+`2.3.260718` and audited against `2.2.231006` (see **What the 2.3 audit found**).
 
 ### Two runtimes for one model (`stt-core`)
 `Engine` (`engine.rs`) is the whole boundary between the decode loop and a
@@ -258,6 +262,17 @@ in Burn's layout and gets transposed a second time. Reading our own checkpoint
 back through the PyTorch path is what `load_burn_safetensors_into` exists to
 prevent. Rectangular weights fail loudly on `ShapeMismatch`; a square one would
 load "fine" and be silently scrambled. `burn-kit`'s round-trip test pins it.
+
+**tokio's `BufWriter` bypasses its own buffer for any single write at or above
+capacity (8 KiB)**, so a filter that writes large chunks and forgets to flush
+*looks* like it streams: at realistic sample rates most of each chunk goes
+straight out, and only the sub-8-KiB tail is stranded. That is why `tts`'s
+missing per-utterance flush went unnoticed, and it is why **a latency test has to
+use chunks smaller than the buffer to see the defect at all**. Measured on a
+three-line script: at `--sr 16000` the before/after difference sat inside
+run-to-run variance, while at `--sr 1600`, where a whole utterance fits the
+buffer, it was unambiguous — two lines released in one lump before, one release
+per utterance after, with byte totals identical either way.
 
 Requires **ffmpeg 8.1** dev libraries (and the `ffmpeg` binary for the realtime
 filter examples, which is what captures and plays PCM at either end of the pipe).
@@ -401,9 +416,11 @@ dropping the absolute entry is that running a binary from a directory holding
 neither `./libtorch` nor `./ffmpeg` needs it; `cargo test` already did.
 
 The LibTorch entries are gated on the `tch` feature; the ffmpeg ones never are,
-because every engine decodes audio. A binary that references no ffmpeg symbol
-still gets them and simply has no `NEEDED` entry to resolve — `stt` is exactly
-that today, since it reads PCM and never decodes a container.
+because every engine decodes audio. **A binary that happens not to decode pays
+nothing for them** — it references no ffmpeg symbol, so it has no `NEEDED` entry
+to resolve and the search path is simply never consulted. That is what lets the rule stay "always emit them" rather than
+tracking which engine currently decodes: `stt` used to read PCM and never open a
+container, and gaining `convert` made it link ffmpeg with no build change at all.
 
 ### Which runtime a model gets, and why
 The target is that **the user picks the backend — for inference and for
@@ -559,11 +576,72 @@ a path; renaming a *type* or moving a *file* does not.
 The Burn modules are kept **weight-compatible with RVC's PyTorch `state_dict`** so
 they can warm-start from the public pretrained bases (`f0G48k.pth`/`f0D48k.pth`, HF
 `lj1995/VoiceConversionWebUI`) — essential on a small (~1 h) corpus. The loader
-(`crates/burn-rvc/src/store.rs`) remaps RVC's flat `attn_layers`/`norm_layers_*` lists
-and the flow's even coupling indices onto the module tree and upcasts fp16→fp32.
-Changing the module layout breaks warm-start and the ONNX exporter — keep names/
-structure in step with the reference (RVC-Project tag `2.2.231006`,
-`infer/lib/infer_pack/{models,attentions,modules}.py`).
+(`Synthesizer::load_pytorch`, `crates/burn-rvc/src/synthesizer.rs`, on top of
+`burn-kit`'s generic `load_pytorch_into`) remaps RVC's flat
+`attn_layers`/`norm_layers_*` lists and the flow's even coupling indices onto the
+module tree and upcasts fp16→fp32. Changing the module layout breaks warm-start
+and the ONNX exporter — keep names/structure in step with the reference
+(RVC-Project tag `2.3.260718`, `infer/module/{models,attentions,modules}.py`,
+which 2.2 spelled `infer/lib/infer_pack/`).
+
+### What the 2.3 audit found
+**There is no RVC v3.** Upstream's latest is `2.3.260718` (21 July 2026), whose
+notes say "Base model unchanged"; the v3 promise has sat unshipped since
+`2.1.230814`. So the question is never "port v3", it is "did 2.3's *fixes* reach
+the maths we implement". The whole of `models.py`, `attentions.py`, `modules.py`,
+`commons.py`, `transforms.py`, `configs/v2/48k.json`, `rmvpe.py`, `losses.py`,
+`mel_processing.py` and the inference pipeline were diffed against 2.2. **The
+answer for inference is no, and the port is unchanged** — this section exists so
+nobody has to re-derive that.
+
+What 2.3 actually did to the network is **nothing**: the file moved from
+`infer/lib/infer_pack/` to `infer/module/`, `TextEncoder256`/`TextEncoder768`
+collapsed into one `TextEncoder(in_channels, …)`, `SynthesizerTrnMs768NSFsid`
+became a subclass of the 256 variant, and every TorchScript annotation and
+`__prepare_scriptable__` hook was deleted. **None of that moves a `state_dict`
+key**, which is why our 560/0/0 and 165/0/0 still hold. `SineGen` and
+`SourceModuleHnNSF` differ only by black reformatting, the noise scale is still
+`0.66666`, `MultiPeriodDiscriminatorV2`'s periods are still `[2,3,5,7,11,17,23,37]`,
+and `losses.py` is byte-identical. `infer` gained `skip_head`/`return_length`/
+`return_length2` and the two generators gained `n_res`, but all default to `None`
+and the batch path through them is what 2.2 computed.
+
+Three changes *are* real, and each was deliberately not adopted:
+
+- **F0 is now interpolated across unvoiced frames** — `uv = f0 == 0; f0[uv] =
+  np.interp(…)` in both `infer/vc/pipeline.py::get_f0` and
+  `train/dataset/extract_f0.py`, applied before the key shift so it moves both
+  `pitchf` and the coarse pitch. Consequence: `SineGen._f02uv` never sees a zero,
+  so the unvoiced branch that swaps harmonic excitation for noise-only **stops
+  firing at all** — and that branch is precisely what renders breath and whisper.
+  Adopting it would need a retrain, would invalidate every voice users have
+  already trained, and works against the soft/breathy content this toolkit exists
+  to preserve. `dsp::f0_to_coarse` keeps mapping 0 to bin 1 and `shift_pitch`
+  keeps leaving zeros at zero, which is both internally consistent with our
+  trainer and correct for the 2.2-era bases we warm-start from.
+- **The mel front-end's floor dropped**: `clip_val` 1e-5 → 2e-6 (≈14 dB more
+  range under the old floor) and the linear-spectrogram epsilon 1e-6 → 2e-7.
+  Ours is already *finer* than either release on the linear side (1e-9) and still
+  at 1e-5 on the mel. This is a training-objective knob — it touches no weight and
+  no inference path — but `burn_vits::spectral` is shared with `tts-train`, where
+  GPT-SoVITS upstream still uses 1e-5, so lowering it silently would move two
+  engines' loss scales and invalidate every recorded number. **Worth trying for
+  ASMR, as a measured change with both engines re-baselined, not as a fix.**
+- **The long-file split search was fixed**: 2.2 accumulated *signed* samples
+  (`audio_sum += audio_pad[i : i - window]`) and only then took `np.abs`, so a
+  loud symmetric waveform sums to ≈0 and could be chosen as the quietest cut
+  point; 2.3 sums `np.abs` first. A genuine bug, but it is upstream's
+  chunk-the-long-file heuristic, which we do not have — `rvc-core`'s `Converter`
+  splits on fixed blocks with an overlapping crossfade, and our corpus slicer is
+  `slicer2.py`'s RMS algorithm, which 2.3 did not touch.
+
+Also of note without being ours to copy: 2.3's real-time `infer` no longer runs
+the flow on a bare truncated tail but gives it 24 frames of left context
+(`flow_head = max(head - 24, 0)`) and drops them afterwards. That is upstream's
+answer to the seam artefact our crossfade answers, so it is the place to look
+first if block joins ever become audible. Everything else in the release —
+UVR5→PyMSS separation, FCPE as a pitch option, CUDA graphs, single-GPU without
+DDP, the WebUI rewrite — is packaging and never reaches a tensor we own.
 
 ### The Python boundary (`export/`)
 The only Python: a standalone `uv` project that converts a Burn `.safetensors` to
@@ -648,7 +726,9 @@ trainer drives Burn's `TuiMetricsRendererWrapper` directly (`crates/rvc-train/sr
 On a TTY a live dashboard shows `g`/`d`/`mel` losses; `q` stops early and saves. Off-TTY
 (or `--no-tui`), it logs to stderr and Ctrl-C stops and saves. Losses match RVC exactly
 (mel-L1 ×45, KL ×1, feature-matching ×2, LSGAN); the STFT front-end is n_fft=2048,
-hop=480, 128 Slaney mels, center=False (`crates/rvc-train/src/spectral.rs`). Target GPU
+hop=480, 128 Slaney mels, center=False (`crates/burn-vits/src/spectral.rs`, shared
+with `tts-train` — which is why its 1e-5 mel floor is a two-engine decision, see
+**What the 2.3 audit found**). Target GPU
 is 6 GB (RTX 2060) → small batch. Warm-start from `--pretrained-g/-d` is strongly
 recommended on a small corpus.
 
