@@ -575,15 +575,16 @@ into*.
 == What the scheme costs at run time
 
 The prefix is not free. It occupies frames of the same window the source has to
-fit into, and upstream's context budget is 30 s of mel — $22050 slash 256 times
-30 approx 2584$ frames — so `max_source_window = max_context_window − P`. *A
+fit into, and upstream's context budget is 30 s of mel — `sr // hop_length * 30`,
+which its integer division makes 2580 frames rather than the 2584 the exact rate
+would give — so `max_source_window = max_context_window − P`. *A
 longer reference therefore buys a better speaker specification with shorter
 source chunks*, and upstream truncates the reference at 25 s for that reason as
 much as any other. Long sources are generated chunk by chunk with a 16-frame
 overlap and a crossfade between consecutive waveform chunks; the port's own
 streaming layer is the engine's business rather than the network's.
 
-The transformer's `block_size` of 8192 sits well above the 2584-frame budget, so
+The transformer's `block_size` of 8192 sits well above the 2580-frame budget, so
 it is not the binding constraint — but it *is* asserted in the port, because a
 sequence longer than the trained positional range is the kind of thing that
 produces degraded output rather than an error.
@@ -967,7 +968,7 @@ describes the architecture rather than anything that happens.
     [vocoder upsample], [4·4·2·2·2·2], [product = 256 = the mel hop],
     [vocoder width], [1536], [initial channels, halved at each of the six stages],
     [solver], [30 steps, $w = 0.7$], [upstream's `inference.py` defaults],
-    [context budget], [≈2584 frames], [30 s of mel, *shared* between prompt and source],
+    [context budget], [2580 frames], [30 s of mel, *shared* between prompt and source],
   )
 ])
 
