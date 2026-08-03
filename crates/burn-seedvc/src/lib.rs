@@ -11,8 +11,10 @@
 //!    is what carries *what was said* while dropping most of who said it,
 //! 2. [`length_regulator`] resamples those features to the mel frame rate,
 //! 3. [`campplus`] turns the reference clip into one timbre vector, from its own
-//!    separate checkpoint — [`style_encoder`] looks like the module that does
-//!    this and is a fossil the released inference path never builds,
+//!    separate checkpoint and over the Kaldi filterbank in [`fbank`], which is
+//!    the only front end it has ever been shown — [`style_encoder`] looks like
+//!    the module that does this and is a fossil the released inference path
+//!    never builds,
 //! 4. [`dit`] is a diffusion transformer that predicts a mel, conditioned on the
 //!    content stream and that timbre vector, with [`wavenet`] as its final block,
 //! 5. [`flow`] is the sampler that drives the transformer over N steps,
@@ -41,6 +43,7 @@ pub mod bigvgan;
 pub mod campplus;
 pub mod content;
 pub mod dit;
+pub mod fbank;
 pub mod flow;
 pub mod length_regulator;
 pub mod style_encoder;
