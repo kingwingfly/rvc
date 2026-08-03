@@ -258,6 +258,33 @@ impl common::Job for Load {
                 va.iter().all(|x| x.is_finite()),
                 va == va_again,
             );
+
+            // A stronger claim than "the output moves": a *speaker* encoder has
+            // to key on the spectral envelope and ignore what is under it. Two
+            // independent noise draws shaped by the same envelope must land
+            // closer together than either does to a third under a different
+            // envelope — which no amount of weight coverage can tell you, and
+            // which a transposed axis or a softmax over the wrong dimension
+            // would destroy.
+            //
+            // Evidence rather than proof: these are not real filterbanks, so a
+            // narrow margin here would be as likely to be the input distribution
+            // as the port.
+            let bins = Tensor::<B, 1, Int>::arange(0..cfg.feat_dim as i64, device).float();
+            let shape = [1, 1, cfg.feat_dim];
+            let rising = bins.clone().div_scalar(40.0).add_scalar(1.0).reshape(shape);
+            let falling = bins.div_scalar(-40.0).add_scalar(3.0).reshape(shape);
+            let noise = || Tensor::<B, 3>::random([1, 240, cfg.feat_dim], normal, device);
+            let same_a = embed(noise() * rising.clone());
+            let same_b = embed(noise() * rising);
+            let other = embed(noise() * falling);
+            let cos = |x: &[f32], y: &[f32]| dot(x, y) / (dot(x, x) * dot(y, y)).sqrt();
+            println!(
+                "  envelope: cos(same envelope, different noise)={:.4} vs cos(different \
+                 envelope)={:.4}",
+                cos(&same_a, &same_b),
+                cos(&same_a, &other),
+            );
         } else {
             println!(
                 "\ncampplus_cn_common.bin\n  not checked — pass it as a second argument. It is \
