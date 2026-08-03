@@ -1,0 +1,49 @@
+[package]
+name = "seedvc-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "seedvc — CLI for zero-shot Seed-VC voice conversion"
+
+# A library as well as a binary: the `voice` tool hosts these same subcommands
+# under `voice seedvc …`, and does it by depending on this crate rather than by
+# copying a single argument definition.
+[lib]
+name = "seedvc_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "seedvc"
+path = "src/main.rs"
+
+[features]
+# One binary, every compute backend; `--backend` picks at run time. There is no
+# `onnx` here and there will not be one until something exports Seed-VC.
+#
+# The `tch` feature is load-bearing beyond what it links: `rpath_kit::emit()`
+# reads *this* crate's `CARGO_FEATURE_TCH` to decide whether to bake the LibTorch
+# search path into the binary. Without it the rpath is missing and the binary
+# fails in `ld.so` before `main`, on every subcommand.
+default = ["cuda", "tch", "wgpu"]
+cuda = ["seedvc-core/cuda", "burn-kit/cuda"]
+tch = ["seedvc-core/tch", "burn-kit/tch"]
+wgpu = ["seedvc-core/wgpu", "burn-kit/wgpu"]
+
+[dependencies]
+audio-kit.workspace = true
+burn-kit.workspace = true
+cli-kit.workspace = true
+hub-kit.workspace = true
+seedvc-core.workspace = true
+tokio = { workspace = true }
+futures.workspace = true
+clap.workspace = true
+clap_complete.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[build-dependencies]
+rpath-kit.workspace = true

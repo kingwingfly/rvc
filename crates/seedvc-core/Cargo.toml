@@ -1,0 +1,32 @@
+[package]
+name = "seedvc-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Zero-shot voice conversion with Seed-VC: reference analysis, flow-matching sampling and vocoding"
+
+[features]
+# One compute backend each, and they compose — a binary can carry all three and
+# choose at run time. No `default`: a consumer that only wants the pipeline types
+# should not drag in a GPU toolchain.
+cuda = ["burn/cuda", "burn-kit/cuda", "burn-seedvc/cuda"]
+tch = ["burn/tch", "burn-kit/tch", "burn-seedvc/tch"]
+wgpu = ["burn/wgpu", "burn-kit/wgpu", "burn-seedvc/wgpu"]
+
+[dependencies]
+burn = { version = "0.21", default-features = false, features = ["std"] }
+burn-seedvc.workspace = true
+burn-vits.workspace = true
+burn-kit.workspace = true
+audio-kit.workspace = true
+cli-kit.workspace = true
+anyhow.workspace = true
+futures.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }
+tracing.workspace = true
+
+[dev-dependencies]
+burn-ndarray = "0.21"

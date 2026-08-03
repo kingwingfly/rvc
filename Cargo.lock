@@ -6436,6 +6436,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "seedvc-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "audio-kit",
+ "burn-kit",
+ "clap",
+ "clap_complete",
+ "cli-kit",
+ "futures",
+ "hub-kit",
+ "rpath-kit",
+ "seedvc-core",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "seedvc-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "audio-kit",
+ "burn",
+ "burn-kit",
+ "burn-ndarray",
+ "burn-seedvc",
+ "burn-vits",
+ "cli-kit",
+ "futures",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"

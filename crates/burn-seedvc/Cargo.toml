@@ -9,10 +9,15 @@ description = "The Seed-VC network in Burn: CAMPPlus timbre, the U-ViT diffusion
 
 [features]
 # Extra compute backends for the examples (the weight-coverage harnesses that
-# stand in for unit tests). Off by default so the crate's normal build stays
-# backend-free.
+# stand in for unit tests) and for whatever the engine crate is built with. Off
+# by default so the crate's normal build stays backend-free.
+#
+# All three, matching every other `*-core`/`*-cli` in the workspace: this crate
+# carried only `cuda` and `tch` while it had no consumer, which would have made
+# `seedvc --backend wgpu` quietly impossible.
 cuda = ["burn/cuda"]
 tch = ["burn/tch"]
+wgpu = ["burn/wgpu"]
 
 [dependencies]
 burn = { version = "0.21", default-features = false, features = ["std"] }

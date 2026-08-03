@@ -17,6 +17,8 @@ members = [
     "crates/burn-gptsovits",
     "crates/burn-whisper",
     "crates/burn-seedvc",
+    "crates/seedvc-core",
+    "crates/seedvc-cli",
     "crates/text-kit",
     "crates/train-kit",
     "crates/rpath-kit",
@@ -55,6 +57,11 @@ burn-vits = { path = "crates/burn-vits" }
 burn-gptsovits = { path = "crates/burn-gptsovits" }
 burn-whisper = { path = "crates/burn-whisper" }
 burn-seedvc = { path = "crates/burn-seedvc" }
+seedvc-core = { path = "crates/seedvc-core" }
+# `default-features = false` for the same reason as the other `*-cli` crates:
+# cargo forbids a member overriding an inherited default, so `voice-cli`
+# re-declares the backend features and forwards them itself.
+seedvc-cli = { path = "crates/seedvc-cli", default-features = false }
 stt-core = { path = "crates/stt-core" }
 cli-kit = { path = "crates/cli-kit" }
 preprocess-kit = { path = "crates/preprocess-kit" }

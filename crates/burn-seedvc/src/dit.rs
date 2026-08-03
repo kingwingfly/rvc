@@ -692,6 +692,27 @@ impl<B: Backend> Dit<B> {
     }
 }
 
+/// What lets [`crate::flow::Sampler`] drive this transformer.
+///
+/// Pure forwarding, with `x_lens` dropped — the only thing upstream derives from
+/// it is the key-padding mask this port does not model, and it is all ones for
+/// the one batch shape inference ever builds (the guidance pair is the same clip
+/// twice). **A padded batched trainer would have to reinstate it here**, not in
+/// the sampler, which is why the argument stays on the trait.
+impl<B: Backend> crate::flow::Estimator<B> for Dit<B> {
+    fn velocity(
+        &self,
+        x: Tensor<B, 3>,
+        prompt_x: Tensor<B, 3>,
+        _x_lens: Tensor<B, 1, Int>,
+        t: Tensor<B, 1>,
+        style: Tensor<B, 2>,
+        cond: Tensor<B, 3>,
+    ) -> Tensor<B, 3> {
+        self.forward(x, prompt_x, t, style, cond)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
