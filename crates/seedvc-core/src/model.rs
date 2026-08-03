@@ -201,7 +201,10 @@ fn covered(what: &'static str, result: &burn_kit::ApplyResult) -> Result<()> {
             ),
         });
     }
-    tracing::debug!(
+    // At `info` rather than `debug` because this is the only place the numbers
+    // exist: `examples/coverage` reads them off the log rather than duplicating
+    // the five loads, so the check and the thing checked cannot drift.
+    tracing::info!(
         "{what}: applied {}, missing 0, unused {}",
         result.applied.len(),
         result.unused.len()
@@ -222,7 +225,11 @@ impl<B: Backend> BurnModel<B> {
         };
 
         let mut dit = Dit::<B>::new(&cfg, device);
-        covered("the transformer", &dit.load_pytorch(paths.dit).map_err(|e| load("the transformer", e))?)?;
+        covered(
+            "the transformer",
+            &dit.load_pytorch(paths.dit)
+                .map_err(|e| load("the transformer", e))?,
+        )?;
 
         let mut regulator = InterpolateRegulator::<B>::new(&cfg, device);
         covered(
@@ -394,10 +401,7 @@ impl<B: Backend> Model for BurnModel<B> {
         // for is a continuation rather than an imitation.
         let cond = Tensor::cat(
             vec![
-                self.floats(
-                    &reference.cond,
-                    [1, reference.frames, self.cfg.hidden_dim],
-                ),
+                self.floats(&reference.cond, [1, reference.frames, self.cfg.hidden_dim]),
                 cond,
             ],
             1,
@@ -425,12 +429,10 @@ impl<B: Backend> Model for BurnModel<B> {
 /// a backend whose float is not `f32` — worth a sentence rather than an `unwrap`,
 /// because the `wgpu` backend is exactly where that would first show up.
 fn vector<B: Backend, const D: usize>(what: &'static str, t: Tensor<B, D>) -> Result<Vec<f32>> {
-    t.into_data()
-        .to_vec()
-        .map_err(|e| Error::Load {
-            what,
-            why: format!("was not f32: {e:?}"),
-        })
+    t.into_data().to_vec().map_err(|e| Error::Load {
+        what,
+        why: format!("was not f32: {e:?}"),
+    })
 }
 
 // --- CAMPPlus's front end ----------------------------------------------------
@@ -648,22 +650,48 @@ mod tests {
         }
     }
 
-    /// Kaldi's triangles: each rises to exactly 1 at its centre, is zero outside
-    /// its own two neighbours' centres, and — unlike librosa's — is **not** scaled
-    /// by its bandwidth, so every row's peak is the same.
+    /// Kaldi's triangles rise towards 1 at their centre and are scaled by
+    /// **nothing** — librosa's Slaney normalisation would divide each band by its
+    /// own width, which is the difference that loads perfectly and shifts every
+    /// embedding.
+    ///
+    /// So the claim is that no tap exceeds 1 and the wide bands reach it. The low
+    /// bands do not, and that is Kaldi's behaviour rather than a defect: at 20 Hz
+    /// a band is narrower than the 31.25 Hz bin spacing, so no bin lands on the
+    /// apex — band 0 peaks at 0.50. A normalised bank would instead have peaks
+    /// spread over two orders of magnitude.
     #[test]
     fn the_filterbank_is_unnormalised_triangles() {
         let bank = kaldi_mel_bank();
         let bins = FBANK_FFT / 2;
         assert_eq!(bank.len(), FBANK_BINS * bins);
+
+        let peak = |b: usize| {
+            bank[b * bins..][..bins]
+                .iter()
+                .copied()
+                .fold(0.0f32, f32::max)
+        };
         for b in 0..FBANK_BINS {
-            let row = &bank[b * bins..][..bins];
-            let peak = row.iter().copied().fold(0.0f32, f32::max);
             assert!(
-                (0.8..=1.0).contains(&peak),
-                "band {b} peaks at {peak}; a normalised bank would fall away with width"
+                (0.0..=1.0).contains(&peak(b)),
+                "band {b} peaks at {}, outside an unnormalised triangle",
+                peak(b)
             );
-            assert!(row.iter().all(|w| *w >= 0.0), "band {b} has a negative tap");
+            assert!(
+                bank[b * bins..][..bins].iter().all(|w| *w >= 0.0),
+                "band {b} has a negative tap"
+            );
+        }
+        // The tallest tap all but reaches the apex — 0.99, since no bin lands on
+        // one exactly — which is what pins the scale and rules out any
+        // normalisation: Slaney's would put every peak near 0.04.
+        let highest = (0..FBANK_BINS).map(peak).fold(0.0f32, f32::max);
+        assert!(highest > 0.98, "the tallest tap is {highest}");
+        // And from half way up, where a band spans at least two bins either side
+        // of its centre, the apex can only be missed by a fraction of a bin.
+        for b in FBANK_BINS / 2..FBANK_BINS {
+            assert!(peak(b) > 0.75, "band {b} peaks at {}", peak(b));
         }
         // The first bin is DC, which is below `low_freq` and so belongs to no band.
         assert!(bank.iter().step_by(bins).all(|w| *w == 0.0));

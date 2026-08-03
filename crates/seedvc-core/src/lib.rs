@@ -34,11 +34,11 @@ pub mod reference;
 pub mod stream;
 
 pub use backend::load;
-pub use error::{Error, Result};
-pub use model::{BurnModel, CONTENT_SR, Model, ModelPaths, Reference};
 /// The sampler's knobs — Euler steps and the classifier-free guidance scale.
 ///
 /// Re-exported because they are user flags that reach [`Model::convert`]
 /// unchanged, and a caller should not need `burn-seedvc` in its manifest to name
 /// two numbers.
 pub use burn_seedvc::flow::Sampler;
+pub use error::{Error, Result};
+pub use model::{BurnModel, CONTENT_SR, Model, ModelPaths, Reference};

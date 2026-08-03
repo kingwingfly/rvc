@@ -6465,6 +6465,7 @@ dependencies = [
  "burn-ndarray",
  "burn-seedvc",
  "burn-vits",
+ "clap",
  "cli-kit",
  "futures",
  "thiserror 2.0.19",

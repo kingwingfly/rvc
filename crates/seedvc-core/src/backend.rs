@@ -21,11 +21,28 @@ use crate::model::{Model, ModelPaths};
 /// Naming a backend this build has no code for is an error with a reason; only
 /// `auto` substitutes, and it resolves by hardware alone because there is no
 /// artefact on disk that could decide it.
-pub fn load(paths: &ModelPaths<'_>, backend: Backend, device: DeviceSpec) -> Result<Box<dyn Model>> {
+pub fn load(
+    paths: &ModelPaths<'_>,
+    backend: Backend,
+    device: DeviceSpec,
+) -> Result<Box<dyn Model>> {
     // `false`, and not because the export is merely absent: there is no ONNX
     // export of Seed-VC anywhere, so nothing on disk could ever resolve `auto`
     // to ONNX Runtime. The same argument training passes for the same reason.
     let backend = backend.resolve(false);
+    // Refused before anything is announced, let alone read. Not "unsupported
+    // yet" and not a build-time absence — which is why this is not one of the
+    // `#[cfg]`ed arms below: no exporter for Seed-VC exists, and Burn imports
+    // ONNX graphs without being able to emit one, so no `--features` and no
+    // rebuild would make it work. `export/` is where that would change.
+    if backend == Backend::Onnx {
+        return Err(Error::Device(
+            "Seed-VC has no ONNX export — `export/` mirrors RVC and GPT-SoVITS only, and Burn \
+             reads ONNX graphs without being able to write one. Run it on a Burn backend \
+             (`--backend auto|cuda|tch|wgpu`)"
+                .into(),
+        ));
+    }
     tracing::info!("loading Seed-VC ({backend}, device {device})");
 
     macro_rules! burn_model {
@@ -49,20 +66,7 @@ pub fn load(paths: &ModelPaths<'_>, backend: Backend, device: DeviceSpec) -> Res
         Backend::Cuda => burn_model!(burn::backend::Cuda, burn_kit::cuda_device(device)?, "cuda"),
         #[cfg(feature = "wgpu")]
         Backend::Wgpu => burn_model!(burn::backend::Wgpu, burn_kit::wgpu_device(device)?, "wgpu"),
-        // Not "unsupported yet" and not a build-time absence, which is why this
-        // arm is unconditional where the others are `#[cfg]`ed: no exporter for
-        // Seed-VC exists, and Burn imports ONNX graphs without being able to emit
-        // one, so no `--features` and no rebuild would make this work. `export/`
-        // is where that would change.
-        Backend::Onnx => {
-            return Err(Error::Device(
-                "Seed-VC has no ONNX export — `export/` mirrors RVC and GPT-SoVITS only, and \
-                 Burn reads ONNX graphs without being able to write one. Run it on a Burn \
-                 backend (`--backend auto|cuda|tch|wgpu`)"
-                    .into(),
-            ));
-        }
-        Backend::Auto => unreachable!("resolved above"),
+        Backend::Auto | Backend::Onnx => unreachable!("resolved and refused above"),
         // Only reachable on a `--no-default-features` build, where the arm that
         // would have handled it was `#[cfg]`ed away.
         #[allow(unreachable_patterns)]
@@ -88,9 +92,13 @@ mod tests {
             bigvgan: missing,
             content: missing,
         };
-        let err = load(&paths, Backend::Onnx, DeviceSpec::Auto)
-            .expect_err("ONNX Runtime cannot run Seed-VC")
-            .to_string();
+        // Matched rather than `expect_err`ed: a boxed trait object is not
+        // `Debug`, and making it one would be a bound on every implementation
+        // for the sake of one test.
+        let err = match load(&paths, Backend::Onnx, DeviceSpec::Auto) {
+            Ok(_) => panic!("ONNX Runtime cannot run Seed-VC, and nothing was there to load"),
+            Err(e) => e.to_string(),
+        };
         assert!(err.contains("no ONNX export"), "{err}");
         assert!(err.contains("--backend auto|cuda|tch|wgpu"), "{err}");
     }

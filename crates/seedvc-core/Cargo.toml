@@ -33,3 +33,6 @@ tracing.workspace = true
 
 [dev-dependencies]
 burn-ndarray = "0.21"
+# `examples/coverage` parses `--backend` through `cli_kit::Backend`'s own
+# `ValueEnum`, so its aliases cannot drift from the binaries'.
+clap.workspace = true
