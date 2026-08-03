@@ -7,12 +7,14 @@
 
 pub mod args;
 pub mod backend;
+pub mod convert;
 
 use anyhow::Result;
 use clap::CommandFactory;
 
 pub use args::{Format, SttArgs, SttCli, SttCommand};
 pub use cli_kit::Backend;
+pub use convert::ConvertArgs;
 
 /// Run one recognition invocation.
 ///
@@ -25,6 +27,7 @@ pub async fn run<C: CommandFactory>(cli: SttCli) -> Result<()> {
         // Transcribing is the whole engine, so it is the bare invocation;
         // everything else is a subcommand beside it.
         None => args::transcribe(cli.transcribe).await,
+        Some(SttCommand::Convert(a)) => convert::run(a).await,
         Some(SttCommand::Download(a)) => args::download(a).await,
         Some(SttCommand::Completions(a)) => cli_kit::completions(a, C::command()),
     }
