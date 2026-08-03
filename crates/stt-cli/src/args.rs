@@ -11,10 +11,13 @@
 //! the detected language, which is what a subtitle file or a TTS training
 //! manifest needs.
 //!
-//! Unlike the voice-conversion filter this is **not** streaming: the whole
-//! input is read before anything is transcribed, because segmentation looks for
-//! silences across the recording and Whisper's own mel normalisation is per
-//! 30 s window.
+//! Like the voice-conversion filter, this **streams**: stdin is read chunk by
+//! chunk and each line is written and flushed as its segment closes, so a long
+//! recording produces text as it goes instead of after it ends. Nothing is
+//! traded away for that — a segment is only cut once no later sample could move
+//! its boundaries, so the transcript is the one the whole recording would have
+//! given (`audio_kit::Slicer`). Latency to a line is therefore the segment's own
+//! length, plus `--min-silence` to prove it has ended, plus its decode.
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand, ValueEnum};
@@ -186,17 +189,6 @@ pub async fn transcribe(args: SttArgs) -> Result<()> {
     let mut stt =
         tokio::task::block_in_place(|| load_transcriber(&dir, args.backend, args.device))?;
 
-    // Buffered, not streamed: see the module docs.
-    let mut input = Box::pin(audio_kit::read_f32le(tokio::io::stdin(), args.chunk));
-    let mut audio: Vec<f32> = Vec::new();
-    while let Some(chunk) = input.next().await {
-        audio.extend_from_slice(&chunk.context("reading stdin")?);
-    }
-    tracing::info!(
-        "transcribing {:.1} s of audio",
-        audio.len() as f32 / stt_core::SAMPLE_RATE as f32
-    );
-
     let opts = TranscribeOptions {
         slice: audio_kit::SliceOptions {
             silence_db: args.silence_db,
@@ -212,27 +204,48 @@ pub async fn transcribe(args: SttArgs) -> Result<()> {
         },
     };
 
-    let segments = tokio::task::block_in_place(|| stt.transcribe(&audio, &opts))
-        .context("transcription failed")?;
-
+    let mut input = Box::pin(audio_kit::read_f32le(tokio::io::stdin(), args.chunk));
+    let mut slicer = audio_kit::Slicer::new(stt_core::SAMPLE_RATE, &opts.slice);
     let mut out = BufWriter::new(tokio::io::stdout());
-    for s in &segments {
-        let line = match args.format {
-            Format::Text => format!("{}\n", s.text),
-            Format::Jsonl => format!(
-                "{{\"start\":{:.3},\"end\":{:.3},\"language\":\"{}\",\"text\":{}}}\n",
-                s.start,
-                s.end,
-                s.language,
-                json_string(&s.text)
-            ),
+    let mut segments = 0usize;
+
+    let mut eof = false;
+    while !eof {
+        // The slicer hands back a clip only once no later sample could move its
+        // boundaries, so transcribing here costs nothing in accuracy.
+        let clips = match input.next().await {
+            Some(chunk) => slicer.push(&chunk.context("reading stdin")?),
+            None => {
+                eof = true;
+                slicer.finish()
+            }
         };
-        out.write_all(line.as_bytes())
-            .await
-            .context("writing stdout")?;
+        for clip in clips {
+            let start = clip.start as f32 / stt_core::SAMPLE_RATE as f32;
+            let decoded =
+                tokio::task::block_in_place(|| stt.segment(&clip.samples, start, &opts.decode))
+                    .context("transcription failed")?;
+            let Some(s) = decoded else { continue };
+            let line = match args.format {
+                Format::Text => format!("{}\n", s.text),
+                Format::Jsonl => format!(
+                    "{{\"start\":{:.3},\"end\":{:.3},\"language\":\"{}\",\"text\":{}}}\n",
+                    s.start,
+                    s.end,
+                    s.language,
+                    json_string(&s.text)
+                ),
+            };
+            out.write_all(line.as_bytes())
+                .await
+                .context("writing stdout")?;
+            // Flush per line: a downstream reader is the point of a filter, and
+            // it must see a segment as soon as that segment has been decoded.
+            out.flush().await.context("writing stdout")?;
+            segments += 1;
+        }
     }
-    out.flush().await.context("final flush")?;
-    tracing::info!("{} segments", segments.len());
+    tracing::info!("{segments} segments");
     Ok(())
 }
 

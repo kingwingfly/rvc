@@ -42,11 +42,19 @@ ffmpeg -v quiet -i take.mp3 -f f32le -ar 16000 -ac 1 - | stt
 ```
 
 Input is mono **f32le PCM at 16 kHz** — Whisper's analysis rate, and the wire
-format every engine here speaks. **The whole input is read before anything is
-transcribed**, so this is a filter but not a streaming one: segmentation looks
-for silences across the recording, and Whisper's log-mel front-end normalises
-each 30 s window against that window's own peak. Feeding it a live microphone
-works; you get the transcript when the stream closes.
+format every engine here speaks. **Each line is written and flushed as its
+segment closes**, so a four-minute recording starts producing text seconds in
+rather than at the end, and a live microphone is transcribed as you speak.
+
+Nothing is traded away for that. A segment is handed to the decoder only once no
+later sample could move its boundaries — `--min-silence` of continued quiet, or
+twice the edge padding, whichever is longer — so the transcript is the one the
+whole recording would have given; a property test in
+[`audio-kit`](../audio-kit/src/slice.rs) pins the two paths to identical cuts.
+The wait for a line is therefore that segment's own length, plus `--min-silence`
+to prove it ended, plus its decode. The **one** case that differs is speech that
+never pauses for longer than `--max-clip`: it is cut at the quietest frame inside
+that window instead of being balanced across the whole run.
 
 ## Flags
 
