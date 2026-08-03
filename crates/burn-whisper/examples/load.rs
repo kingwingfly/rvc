@@ -9,7 +9,12 @@
 //! It catches a wrong module *layout*. It cannot catch a wrong *formula*; that
 //! is what comparing transcripts against `whisper.cpp` is for.
 //!
-//! Usage: `cargo run -p burn-whisper --example load -- [--backend ndarray|cuda|tch] <model.safetensors>`
+//! `--size` picks which [`WhisperConfig`] preset the checkpoint is measured
+//! against, because the counts are a property of the pair. `whisper-small` is
+//! **479 / 0 / 0** — fewer than turbo's 587 only because it has 12 encoder
+//! layers against 32, and a proportionally larger decoder against turbo's 4.
+//!
+//! Usage: `cargo run -p burn-whisper --example load -- [--backend ndarray|cuda|tch] [--size large-v3-turbo|large-v3|small] <model.safetensors>`
 
 #[path = "common/mod.rs"]
 mod common;
@@ -20,12 +25,12 @@ use burn_whisper::{Whisper, WhisperConfig};
 
 struct Load {
     weights: String,
+    cfg: WhisperConfig,
 }
 
 impl common::Job for Load {
     fn run<B: Backend>(self, device: &B::Device) {
-        let cfg = WhisperConfig::large_v3_turbo();
-        let mut model = Whisper::<B>::new(&cfg, device);
+        let mut model = Whisper::<B>::new(&self.cfg, device);
 
         let res = model
             .load_safetensors(&self.weights)
@@ -91,11 +96,38 @@ impl common::Job for Load {
 }
 
 fn main() {
-    let (backend, args) = common::parse_args();
+    let (backend, mut args) = common::parse_args();
+
+    // Hand-rolled rather than a flag parser: this crate has no app dependencies,
+    // and `--backend` is already pulled out the same way.
+    let mut size = "large-v3-turbo".to_string();
+    if let Some(i) = args.iter().position(|a| a == "--size") {
+        args.remove(i);
+        match args.get(i) {
+            Some(_) => size = args.remove(i),
+            None => {
+                eprintln!("error: --size needs a value");
+                std::process::exit(2);
+            }
+        }
+    }
+    let cfg = match size.as_str() {
+        "large-v3-turbo" => WhisperConfig::large_v3_turbo(),
+        "large-v3" => WhisperConfig::large_v3(),
+        "small" => WhisperConfig::small(),
+        other => {
+            eprintln!("error: unknown size `{other}` (expected large-v3-turbo, large-v3 or small)");
+            std::process::exit(2);
+        }
+    };
+
     let Some(weights) = args.first().cloned() else {
-        eprintln!("usage: load [--backend ndarray|cuda|tch] <model.safetensors>");
+        eprintln!(
+            "usage: load [--backend ndarray|cuda|tch] [--size large-v3-turbo|large-v3|small] <model.safetensors>"
+        );
         std::process::exit(2);
     };
     println!("backend : {backend}");
-    common::run_on(backend, Load { weights });
+    println!("size    : {size}");
+    common::run_on(backend, Load { weights, cfg });
 }
