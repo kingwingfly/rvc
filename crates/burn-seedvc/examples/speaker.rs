@@ -26,6 +26,24 @@
 //!
 //! Two clips are enough to run it and tell you nothing. Give it at least two of
 //! one speaker and one of another, or there is no gap to read.
+//!
+//! # Choosing the clips is most of the work
+//!
+//! **A weak-looking matrix is far more often a weak clip set than a broken
+//! port**, and two ways of building one were tried here and thrown away:
+//!
+//! - **A voice converted through a trained `rvc` model is only a second speaker
+//!   if that model was trained on somebody else's voice.** Converting a corpus
+//!   clip through the voice fine-tuned *on that corpus* is close to an identity,
+//!   so the two halves of the matrix are one speaker and the gap collapses.
+//! - **Do not infer ground truth from a filename.** Two clips whose names differ
+//!   only in a trailing index need not be one person; on the set this was first
+//!   run against they were not, and the "same-speaker" row that looked broken was
+//!   reporting correctly.
+//!
+//! What works is either genuinely different recordings of a speaker you know, or
+//! — as a lower bound that needs no second speaker at all — the two halves of one
+//! recording, which should sit near 0.85.
 
 #[path = "common/mod.rs"]
 mod common;

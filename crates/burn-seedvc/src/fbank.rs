@@ -207,7 +207,7 @@ impl<B: Backend> Fbank<B> {
             // `j` and `j + 1`, so a tap on input `j` picks up `basis[j]` less
             // `0.97 · basis[j + 1]`. The replicate pad at the left edge is why
             // tap 0 keeps only `1 - 0.97` of itself.
-            let mut taps: Vec<f64> = (0..window)
+            let taps: Vec<f64> = (0..window)
                 .map(|j| {
                     let own = if j == 0 { 1.0 - cfg.preemphasis } else { 1.0 };
                     let next = basis.get(j + 1).copied().unwrap_or(0.0);
