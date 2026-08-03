@@ -17,7 +17,7 @@
 //! | [`CamPPlus`] | `campplus_cn_common.bin` (`funasr/campplus`) |
 //! | [`BigVgan`] | `bigvgan_generator.pt` (`nvidia/bigvgan_v2_22khz_80band_256x`) |
 //! | [`ContentEncoder`] | `openai/whisper-small`'s `model.safetensors` |
-//! | [`Spectral`] | nothing — derived from the preset |
+//! | [`Spectral`] and [`Fbank`] | nothing — both derived from the preset |
 //!
 //! [`burn_seedvc::style_encoder`] and [`burn_seedvc::vq`] are **deliberately not
 //! here**. Both are in the checkpoint and neither is in upstream's inference
@@ -37,13 +37,13 @@
 //! [`Model::convert`] takes the source at [`CONTENT_SR`] alone: the source's
 //! waveform is never needed, only what was said in it.
 
-use std::f32::consts::PI;
 use std::path::Path;
 
 use burn::tensor::backend::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
 use burn_seedvc::campplus::{CamPPlus, CamPPlusConfig};
 use burn_seedvc::content::{CONTENT_STRIDE, ContentEncoder, WINDOW_SAMPLES, mel_config};
+use burn_seedvc::fbank::{Fbank, FbankConfig};
 use burn_seedvc::flow::Sampler;
 use burn_seedvc::{BigVgan, BigVganConfig, Dit, InterpolateRegulator, SeedVcConfig};
 use burn_vits::Spectral;
@@ -158,7 +158,12 @@ pub struct BurnModel<B: Backend> {
     dit: Dit<B>,
     campplus: CamPPlus<B>,
     vocoder: BigVgan<B>,
+    /// The mel every module after the content encoder speaks, at 22.05 kHz.
     spectral: Spectral<B>,
+    /// CAMPPlus's own front end, at 16 kHz — a different transform for a
+    /// different consumer, and both are 80 band, so substituting one for the
+    /// other would run and compute something else.
+    fbank: Fbank<B>,
     cfg: SeedVcConfig,
     device: B::Device,
 }
@@ -265,6 +270,7 @@ impl<B: Backend> BurnModel<B> {
 
         Ok(Self {
             spectral: Spectral::new(&mel_config(&cfg), device),
+            fbank: Fbank::new(&FbankConfig::default(), device),
             content,
             regulator,
             dit,
@@ -315,19 +321,26 @@ impl<B: Backend> Model for BurnModel<B> {
             )));
         }
 
-        // CAMPPlus wants frames before bins, which is the opposite of everything
-        // else here and will not fail loudly: both axes are 80 wide.
-        let (fbank, fbank_frames) = kaldi_fbank(content);
-        if fbank_frames == 0 {
+        // `Fbank::forward` asserts on a clip too short to frame, and an assert
+        // would name the transform's invariant rather than the clip that broke it.
+        let window = FbankConfig::default().window();
+        if content.len() < window {
             return Err(Error::Reference(format!(
                 "the reference clip is {} samples at {CONTENT_SR} Hz, shorter than the timbre \
-                 encoder's own 25 ms analysis window",
+                 encoder's own {window}-sample analysis window",
                 content.len(),
             )));
         }
+        // `Fbank` hands back `[batch, frames, bins]` — the axis order CAMPPlus
+        // takes, and the opposite of everything else here — with the per-bin mean
+        // over time **already subtracted**. That subtraction living inside
+        // `forward` rather than at this call site is the whole reason this went
+        // back to `burn-seedvc`: upstream spells it as a separate line, and a
+        // separate line is one that gets dropped, silently, leaving the embedding
+        // carrying the recording's channel alongside the speaker.
         let style = self
             .campplus
-            .forward(self.floats(&fbank, [1, fbank_frames, FBANK_BINS]));
+            .forward(self.fbank.forward(self.audio(content)));
 
         // `Spectral` is `center=False` with `(n_fft - hop)/2` padding, so this is
         // exactly `frames` and lines up with the grid the regulator resamples to.
@@ -442,279 +455,4 @@ fn vector<B: Backend, const D: usize>(what: &'static str, t: Tensor<B, D>) -> Re
         what,
         why: format!("was not f32: {e:?}"),
     })
-}
-
-// --- CAMPPlus's front end ----------------------------------------------------
-//
-// `torchaudio.compliance.kaldi.fbank(wave_16k, num_mel_bins=80, dither=0,
-// sample_frequency=16000)`, which is what upstream feeds the timbre encoder and
-// what its weights were trained against. It lives here rather than in the
-// pipeline for the same reason Whisper's log-mel lives inside
-// `burn_seedvc::content::ContentEncoder`: **the transform is part of the
-// network's interface**, fixed by the checkpoint, not a choice a caller makes.
-//
-// It is *not* the mel anything else in this crate uses, and none of the
-// differences would fail loudly. Kaldi frames with `snip_edges` (no padding at
-// either end), removes each frame's DC offset, pre-emphasises, windows with
-// Povey (`hann^0.85`, non-periodic), pads 400 samples to 512, takes **power**,
-// and runs it through *Kaldi's* triangular filterbank — which is neither Slaney-
-// normalised nor the same shape as librosa's — before a natural log floored at
-// `f32::EPSILON`, which is `torch.finfo(torch.float).eps` exactly.
-//
-// **Untested numerically against torchaudio**, because checking it would need
-// Python. The tests below pin the framing, the window and the filterbank's
-// triangles, and `examples/coverage` runs the whole path into the real CAMPPlus
-// and reports whether two spectral envelopes separate — which catches a front end
-// that has stopped carrying timbre, not one that is subtly mis-scaled.
-
-/// Kaldi's `num_mel_bins`, and CAMPPlus's `feat_dim`.
-const FBANK_BINS: usize = 80;
-/// 25 ms at [`CONTENT_SR`].
-const FBANK_WINDOW: usize = 400;
-/// 10 ms at [`CONTENT_SR`], so the filterbank arrives at 100 Hz.
-const FBANK_SHIFT: usize = 160;
-/// `round_to_power_of_two`: 400 padded up.
-const FBANK_FFT: usize = 512;
-/// Kaldi's `preemphasis_coefficient` default, which upstream does not override.
-const FBANK_PREEMPH: f32 = 0.97;
-/// Kaldi's `low_freq` default. `high_freq` is 0, which it reads as the Nyquist.
-const FBANK_LOW_HZ: f32 = 20.0;
-
-/// `[frames, 80]` row-major, and the frame count.
-fn kaldi_fbank(wave: &[f32]) -> (Vec<f32>, usize) {
-    if wave.len() < FBANK_WINDOW {
-        return (Vec::new(), 0);
-    }
-    // `snip_edges=True`: only whole windows, and no padding at either end.
-    let frames = 1 + (wave.len() - FBANK_WINDOW) / FBANK_SHIFT;
-    let window = povey_window();
-    let bank = kaldi_mel_bank();
-
-    let mut out = vec![0f32; frames * FBANK_BINS];
-    let mut re = vec![0f32; FBANK_FFT];
-    let mut im = vec![0f32; FBANK_FFT];
-    for f in 0..frames {
-        let frame = &wave[f * FBANK_SHIFT..][..FBANK_WINDOW];
-        let mean = frame.iter().sum::<f32>() / FBANK_WINDOW as f32;
-
-        re.fill(0.0);
-        im.fill(0.0);
-        for k in 0..FBANK_WINDOW {
-            // Pre-emphasis after the DC removal, with the first sample its own
-            // predecessor — PyTorch's `pad(mode='replicate')`.
-            let previous = frame[k.saturating_sub(1)] - mean;
-            re[k] = ((frame[k] - mean) - FBANK_PREEMPH * previous) * window[k];
-        }
-        fft(&mut re, &mut im);
-
-        let row = &mut out[f * FBANK_BINS..][..FBANK_BINS];
-        for (b, slot) in row.iter_mut().enumerate() {
-            let weights = &bank[b * (FBANK_FFT / 2)..][..FBANK_FFT / 2];
-            let energy: f32 = weights
-                .iter()
-                .enumerate()
-                .map(|(k, w)| w * (re[k] * re[k] + im[k] * im[k]))
-                .sum();
-            *slot = energy.max(f32::EPSILON).ln();
-        }
-    }
-    (out, frames)
-}
-
-/// Kaldi's Povey window: a non-periodic Hann raised to 0.85.
-fn povey_window() -> Vec<f32> {
-    (0..FBANK_WINDOW)
-        .map(|k| {
-            let hann = 0.5 - 0.5 * (2.0 * PI * k as f32 / (FBANK_WINDOW - 1) as f32).cos();
-            hann.powf(0.85)
-        })
-        .collect()
-}
-
-/// Kaldi's triangular filterbank, `[80, 256]` row-major.
-///
-/// 256 columns rather than 257: Kaldi builds its triangles over
-/// `padded_window_size / 2` bins and pads a zero column for the Nyquist, so the
-/// last bin contributes to nothing. Dropping it instead of padding it is the same
-/// arithmetic with one fewer trap.
-///
-/// The triangles are placed on a **uniform mel grid between the two edge
-/// frequencies** and normalised by nothing at all — librosa's Slaney area
-/// normalisation would scale every band by its own width, which is the difference
-/// that loads perfectly and shifts every embedding.
-fn kaldi_mel_bank() -> Vec<f32> {
-    let mel = |hz: f32| 1127.0 * (1.0 + hz / 700.0).ln();
-    let bin_width = CONTENT_SR as f32 / FBANK_FFT as f32;
-    let (low, high) = (mel(FBANK_LOW_HZ), mel(CONTENT_SR as f32 / 2.0));
-    let delta = (high - low) / (FBANK_BINS + 1) as f32;
-
-    let bins = FBANK_FFT / 2;
-    let mut fb = vec![0f32; FBANK_BINS * bins];
-    for b in 0..FBANK_BINS {
-        let (left, centre, right) = (
-            low + b as f32 * delta,
-            low + (b + 1) as f32 * delta,
-            low + (b + 2) as f32 * delta,
-        );
-        for k in 0..bins {
-            let m = mel(bin_width * k as f32);
-            let up = (m - left) / (centre - left);
-            let down = (right - m) / (right - centre);
-            fb[b * bins + k] = up.min(down).max(0.0);
-        }
-    }
-    fb
-}
-
-/// In-place radix-2 Cooley–Tukey, forward transform.
-///
-/// Written out rather than reached for because the only alternative in the
-/// workspace is `burn_vits::Spectral`'s fused-DFT convolution, which cannot
-/// express this front end: Kaldi's per-frame DC removal and pre-emphasis are
-/// frame-local, so they do not factor out into a filter over the whole waveform.
-fn fft(re: &mut [f32], im: &mut [f32]) {
-    let n = re.len();
-    let mut j = 0;
-    for i in 1..n {
-        let mut bit = n >> 1;
-        while j & bit != 0 {
-            j ^= bit;
-            bit >>= 1;
-        }
-        j |= bit;
-        if i < j {
-            re.swap(i, j);
-            im.swap(i, j);
-        }
-    }
-
-    let mut len = 2;
-    while len <= n {
-        let step = -2.0 * PI / len as f32;
-        for start in (0..n).step_by(len) {
-            for k in 0..len / 2 {
-                let (wr, wi) = ((step * k as f32).cos(), (step * k as f32).sin());
-                let (a, b) = (start + k, start + k + len / 2);
-                let (vr, vi) = (re[b] * wr - im[b] * wi, re[b] * wi + im[b] * wr);
-                let (ur, ui) = (re[a], im[a]);
-                re[a] = ur + vr;
-                im[a] = ui + vi;
-                re[b] = ur - vr;
-                im[b] = ui - vi;
-            }
-        }
-        len <<= 1;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn tone(hz: f32, seconds: f32) -> Vec<f32> {
-        let n = (CONTENT_SR as f32 * seconds) as usize;
-        (0..n)
-            .map(|i| (2.0 * PI * hz * i as f32 / CONTENT_SR as f32).sin() * 0.5)
-            .collect()
-    }
-
-    /// The transform this file exists to reproduce is checked against a reference
-    /// implementation nowhere, so the least that has to hold is that a pure tone
-    /// lands in the band that contains it and nowhere else.
-    #[test]
-    fn a_tone_peaks_in_the_band_that_holds_it() {
-        let (fbank, frames) = kaldi_fbank(&tone(1000.0, 0.5));
-        assert_eq!(frames, 1 + (8000 - FBANK_WINDOW) / FBANK_SHIFT);
-        assert!(fbank.iter().all(|v| v.is_finite()), "fbank is not finite");
-
-        // Which band 1 kHz falls in follows from the mel grid rather than from a
-        // constant, so it is derived the same way the bank is.
-        let mel = |hz: f32| 1127.0 * (1.0 + hz / 700.0f32).ln();
-        let (low, high) = (mel(FBANK_LOW_HZ), mel(CONTENT_SR as f32 / 2.0));
-        let delta = (high - low) / (FBANK_BINS + 1) as f32;
-        let want = ((mel(1000.0) - low) / delta - 1.0).round() as usize;
-
-        // A middle frame, so the tone is steady across the whole window.
-        let row = &fbank[(frames / 2) * FBANK_BINS..][..FBANK_BINS];
-        let peak = row
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-            .unwrap()
-            .0;
-        assert!(
-            peak.abs_diff(want) <= 1,
-            "1 kHz peaked in band {peak}, expected {want}"
-        );
-    }
-
-    /// Framing is `snip_edges`, so the last partial window is dropped and a clip
-    /// shorter than one window yields nothing at all rather than a padded frame.
-    #[test]
-    fn framing_snips_the_edges() {
-        assert_eq!(kaldi_fbank(&tone(440.0, 0.01)).1, 0);
-        for (samples, want) in [(400, 1), (559, 1), (560, 2), (16_000, 98)] {
-            let wave = vec![0.1f32; samples];
-            assert_eq!(kaldi_fbank(&wave).1, want, "{samples} samples");
-        }
-    }
-
-    /// Kaldi's triangles rise towards 1 at their centre and are scaled by
-    /// **nothing** — librosa's Slaney normalisation would divide each band by its
-    /// own width, which is the difference that loads perfectly and shifts every
-    /// embedding.
-    ///
-    /// So the claim is that no tap exceeds 1 and the wide bands reach it. The low
-    /// bands do not, and that is Kaldi's behaviour rather than a defect: at 20 Hz
-    /// a band is narrower than the 31.25 Hz bin spacing, so no bin lands on the
-    /// apex — band 0 peaks at 0.50. A normalised bank would instead have peaks
-    /// spread over two orders of magnitude.
-    #[test]
-    fn the_filterbank_is_unnormalised_triangles() {
-        let bank = kaldi_mel_bank();
-        let bins = FBANK_FFT / 2;
-        assert_eq!(bank.len(), FBANK_BINS * bins);
-
-        let peak = |b: usize| {
-            bank[b * bins..][..bins]
-                .iter()
-                .copied()
-                .fold(0.0f32, f32::max)
-        };
-        for b in 0..FBANK_BINS {
-            assert!(
-                (0.0..=1.0).contains(&peak(b)),
-                "band {b} peaks at {}, outside an unnormalised triangle",
-                peak(b)
-            );
-            assert!(
-                bank[b * bins..][..bins].iter().all(|w| *w >= 0.0),
-                "band {b} has a negative tap"
-            );
-        }
-        // The tallest tap all but reaches the apex — 0.99, since no bin lands on
-        // one exactly — which is what pins the scale and rules out any
-        // normalisation: Slaney's would put every peak near 0.04.
-        let highest = (0..FBANK_BINS).map(peak).fold(0.0f32, f32::max);
-        assert!(highest > 0.98, "the tallest tap is {highest}");
-        // And from half way up, where a band spans at least two bins either side
-        // of its centre, the apex can only be missed by a fraction of a bin.
-        for b in FBANK_BINS / 2..FBANK_BINS {
-            assert!(peak(b) > 0.75, "band {b} peaks at {}", peak(b));
-        }
-        // The first bin is DC, which is below `low_freq` and so belongs to no band.
-        assert!(bank.iter().step_by(bins).all(|w| *w == 0.0));
-    }
-
-    /// A constant transforms to a single non-zero bin, which is the cheapest
-    /// statement that the butterflies and the bit reversal agree.
-    #[test]
-    fn the_transform_puts_a_constant_at_dc() {
-        let mut re = vec![1.0f32; FBANK_FFT];
-        let mut im = vec![0.0f32; FBANK_FFT];
-        fft(&mut re, &mut im);
-        assert!((re[0] - FBANK_FFT as f32).abs() < 1e-3, "{}", re[0]);
-        assert!(re[1..].iter().all(|v| v.abs() < 1e-2));
-        assert!(im.iter().all(|v| v.abs() < 1e-2));
-    }
 }
