@@ -25,9 +25,12 @@
 //! Two of the six networks are **not in this file at all** — the content encoder
 //! is `openai/whisper-small` and the vocoder is
 //! `nvidia/bigvgan_v2_22khz_80band_256x`, each from its own release. Hunting for
-//! their tensors here is a way to lose an afternoon.
+//! their tensors here is a way to lose an afternoon. The vocoder's own
+//! `bigvgan_generator.pt` can be named as a second argument, and then it gets a
+//! coverage block of its own; leaving it off skips that block rather than
+//! failing, so the Seed-VC checkpoint alone is still a complete run.
 //!
-//! Usage: `cargo run -p burn-seedvc --example load -- [--backend ndarray|cuda|tch] <ckpt.pth>`
+//! Usage: `cargo run -p burn-seedvc --example load -- [--backend ndarray|cuda|tch] <ckpt.pth> [bigvgan_generator.pt]`
 
 #[path = "common/mod.rs"]
 mod common;
@@ -37,10 +40,13 @@ use std::collections::BTreeMap;
 use burn::tensor::backend::Backend;
 use burn::tensor::{Distribution, Int, Tensor};
 use burn_seedvc::style_encoder::{StyleEncoder, StyleEncoderConfig};
-use burn_seedvc::{InterpolateRegulator, ResidualVq, SeedVcConfig, VqConfig};
+use burn_seedvc::{
+    BigVgan, BigVganConfig, InterpolateRegulator, ResidualVq, SeedVcConfig, VqConfig,
+};
 
 struct Load {
     checkpoint: String,
+    bigvgan: Option<String>,
 }
 
 /// Applied/missing/unused for one module, in the form every `burn-*` crate's
@@ -204,13 +210,49 @@ impl common::Job for Load {
             .load_pytorch(&self.checkpoint)
             .expect("failed to read checkpoint");
         report("net.vq.module.quantizers.*", &res);
+
+        // The vocoder is the one module whose weights are **not** in the file
+        // above, so it is the one block that can be given a whole checkpoint of
+        // its own. Nothing else lives in `bigvgan_generator.pt`, which is why
+        // `report`'s "belonging to other modules" tally comes out at zero here
+        // and would be a real finding if it did not.
+        let Some(path) = &self.bigvgan else {
+            println!(
+                "\nbigvgan: skipped — pass `nvidia/bigvgan_v2_22khz_80band_256x`'s \
+                 `bigvgan_generator.pt` as a second argument to cover it"
+            );
+            return;
+        };
+        let mut vocoder = BigVgan::<B>::new(&BigVganConfig::v2_22khz_80band_256x(), device);
+        // Taken before the load, because the checkpoint is about to overwrite it.
+        let derived = vocoder.derived_filter();
+        let res = vocoder.load_pytorch(path).expect("failed to load bigvgan");
+        report("bigvgan (its own checkpoint)", &res);
+
+        // The anti-aliasing kernels are a deterministic function of the filter
+        // design, and upstream stores them anyway because `register_buffer` is
+        // persistent. That redundancy is free evidence: the copy the file carries
+        // is an independent answer to the same arithmetic, so the two agreeing
+        // says the Kaiser window, the sinc grid and the normalisation are all
+        // right. A disagreement here is a real defect that no coverage count and
+        // no shape check would show.
+        let loaded = vocoder.derived_filter();
+        let worst = derived
+            .iter()
+            .zip(&loaded)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        println!(
+            "  filter  : derived vs stored, max |Δ| = {worst:.3e} over {} taps",
+            derived.len()
+        );
     }
 }
 
 fn main() {
     let (backend, args) = common::parse_args();
     let Some(checkpoint) = args.first() else {
-        eprintln!("usage: load [--backend ndarray|cuda|tch] <checkpoint>");
+        eprintln!("usage: load [--backend ndarray|cuda|tch] <checkpoint> [bigvgan_generator.pt]");
         std::process::exit(2);
     };
     println!("backend : {backend}");
@@ -218,6 +260,7 @@ fn main() {
         backend,
         Load {
             checkpoint: checkpoint.clone(),
+            bigvgan: args.get(1).cloned(),
         },
     );
 }

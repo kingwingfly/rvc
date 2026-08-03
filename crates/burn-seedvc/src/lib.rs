@@ -35,17 +35,18 @@
 
 pub mod config;
 
-mod bigvgan;
 mod content;
 mod dit;
 mod flow;
 // Public where the unported siblings are private: the weight-coverage example
 // is this crate's only test, and it has to construct the modules it checks.
+pub mod bigvgan;
 pub mod length_regulator;
 pub mod style_encoder;
 pub mod vq;
 mod wavenet;
 
+pub use bigvgan::{BigVgan, BigVganConfig};
 pub use config::SeedVcConfig;
 pub use length_regulator::InterpolateRegulator;
 pub use vq::{ResidualVq, VqConfig};
