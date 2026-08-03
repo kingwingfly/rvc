@@ -300,7 +300,6 @@ impl<B: Backend> Fcm<B> {
 
     /// `[batch, bins, frames]` → `[batch, channels * bins / 8, frames]`.
     fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
-        let [batch, _, frames] = x.dims();
         let x = x.unsqueeze_dim(1);
         let mut out = relu(self.bn1.forward(self.conv1.forward(x)));
         for block in self.layer1.iter().chain(&self.layer2) {
@@ -308,7 +307,11 @@ impl<B: Backend> Fcm<B> {
         }
         let out = relu(self.bn2.forward(self.conv2.forward(out)));
 
-        let [_, channels, bins, _] = out.dims();
+        // Every dimension taken from the output rather than the input: the frame
+        // count is meant to survive untouched, and reading it off the input
+        // would turn a stride that quietly changed it into a reshape that
+        // scrambles the tensor instead of failing.
+        let [batch, channels, bins, frames] = out.dims();
         out.reshape([batch, channels * bins, frames])
     }
 }
