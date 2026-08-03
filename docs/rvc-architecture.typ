@@ -79,6 +79,99 @@
 #v(0.3cm)
 
 // =========================================================================
+= Provenance: which RVC this is
+
+Everything below describes *RVC v2*, mirrored from the reference implementation
+`RVC-Project/Retrieval-based-Voice-Conversion-WebUI` at tag `2.2.231006` — and
+within it `infer/lib/infer_pack/{models,attentions,modules}.py`, where
+`SynthesizerTrnMs768NSFsid` and `MultiPeriodDiscriminatorV2` are defined. The
+Rust modules keep that reference's *field names* and nesting, so a published
+PyTorch `state_dict` maps onto the module tree parameter for parameter. That is a
+standing constraint on the port rather than a convenience: without it there is no
+warm-start (§7), and on a one-hour corpus there is no useful training without
+warm-start.
+
+== "v2" is not a version to be behind on
+
+The name invites the assumption that a v3 exists and this port has not caught up.
+*It does not.* A v3 has been announced in upstream's release notes since
+`2.1.230814` (August 2023) and has never shipped. Upstream's most recent release,
+`2.3.260718` of 21 July 2026, says so in as many words — *base model unchanged* —
+and what it does change sits outside the network entirely:
+
+#block(inset: (x: 10pt))[
+  #set text(size: 9.8pt)
+  - *packaging and WebUI ergonomics* — installation, defaults, the browser front
+    end. None of it reaches the model.
+  - *vocal separation swapped from UVR5 to PyMSS* — a corpus-preparation tool that
+    runs before training ever starts. This toolkit does not use either; its
+    corpus preparation is the sentence-safe slicer of §10.
+  - *FCPE added as a pitch extractor* — an alternative to RMVPE (§4) in the
+    analysis front end, which is *frozen and speaker-independent* and therefore
+    swappable without touching a single trained weight.
+  - *CUDA-graph speed-ups on the real-time path* — an inference-scheduling change.
+]
+
+So the tag pinned above fixes the *source text* being mirrored, not the generation
+of the model: v2 is upstream's current architecture, and a v2 port is level with
+it. If v3 ever lands it will be a new network to port, not a migration.
+
+== The warm-start bases
+
+A "base" is a generator/discriminator pair trained on many speakers, which
+fine-tuning then specialises to one voice (§7). Several exist for *this same
+architecture*, so they differ only in the weights, never in the shapes of §6:
+
+#align(center, block(width: 96%)[
+  #set text(size: 9pt)
+  #set par(justify: false)
+  #table(
+    columns: (auto, auto, 1fr),
+    align: (left, center, left),
+    stroke: 0.4pt + stroke-c,
+    inset: 6pt,
+    fill: (_, row) => if row == 0 { c-loss } else { white },
+    [*base*], [*rates*], [*notes*],
+    [`f0G48k.pth` / `f0D48k.pth`], [32/40/48 kHz],
+      [the stock v2 base, from HF `lj1995/VoiceConversionWebUI`; the 48 kHz pair
+       is what this toolkit fetches (76 MB + 143 MB)],
+    [TITAN-Medium], [32/40/48 kHz],
+      [community, Apache-2.0, ships G *and* D at every rate; trained on 11.15 h of
+       the Expresso corpus],
+    [Ov2Super], [32/40 kHz], [community; no 48 kHz weights published],
+    [RIN_E3], [32/40 kHz], [community; no 48 kHz weights published],
+  )
+])
+
+Because the architecture is identical, swapping a base is a matter of pointing the
+trainer's pretrained generator and discriminator flags at different files — the
+loader remaps and applies them exactly as it does the stock pair.
+
+*TITAN-Medium is the only alternative reachable at 48 kHz, and it is deliberately
+not wired up.* Nothing in the toolkit fetches or selects it, and the reason is
+that it has not been compared against the stock base on this project's own
+corpora; making it a default would ship an untested claim about output quality on
+soft, breathy material, which is the material that matters here. Passing its G/D
+pair by hand is expected to work and *has not been tried* — an honest untested
+path, not a supported one. Ov2Super and RIN_E3 are out of reach for a blunter
+reason: they publish nothing at 48 kHz, and 48 kHz is the only rate this trainer
+accepts.
+
+== Why 48 kHz is the only rate
+
+The trainer rejects any other `--model-sr` outright
+(`crates/rvc-train/src/lib.rs:140-143`). That limit is *not* architectural:
+`SynthesizerConfig::v2_40k()` already exists (`crates/burn-rvc/src/config.rs:67-76`)
+and departs from the 48 kHz configuration in two lines — upsample rates
+$10 · 10 · 2 · 2$ instead of $12 · 10 · 2 · 2$, giving a hop of 400 samples rather
+than 480, with transposed-conv kernels to match. Everything *around* the network
+is what assumes 480: the analysis frame grid, the training STFT front end
+($n_"fft" = 2048$, hop 480), the dataset windowing, and the base weights that
+would have to be fetched at the new rate. Reaching 40 kHz is therefore a plumbing
+job rather than a modelling one — and until someone does it, the two 32/40 kHz
+community bases cannot be used at all.
+
+// =========================================================================
 = What voice conversion actually is
 
 A speech signal braids together several independent things at once: the
@@ -153,7 +246,7 @@ section leans on them. Experienced readers can skip ahead.
     frequency rows have been regrouped into a smaller set of perceptually spaced
     *mel bands* (128 of them here). Because closeness on a mel spectrogram tracks
     "sounds alike," the main training loss is simply an $L_1$ distance between the
-    mel spectrograms of the real and generated audio (§6).
+    mel spectrograms of the real and generated audio (§7).
   / Embeddings: a network cannot consume a raw category ("speaker #3", "pitch bin
     57") directly. An *embedding* is a learned lookup table turning each discrete
     id into a short vector the network can use; because it is learned, similar ids
@@ -169,7 +262,7 @@ section leans on them. Experienced readers can skip ahead.
     the output is. *Gradient descent* nudges every weight a tiny step in the
     direction that most reduces it; repeated over many examples, the network
     learns. The step size is the *learning rate*, and how it is scheduled turns
-    out to matter for stability (§8).
+    out to matter for stability (§9).
 ]
 
 // =========================================================================
@@ -434,7 +527,8 @@ Training is *fine-tuning*: warm-start every module from the public pretrained
 base (`f0G48k.pth` / `f0D48k.pth`), then adapt to one target voice on a small
 corpus. The module layout is deliberately kept weight-compatible with the
 reference PyTorch `state_dict` so this warm-start is possible — essential when
-the corpus is only ~1 hour long.
+the corpus is only ~1 hour long. Other bases exist for the same architecture; §1
+lists them and says why none of them is wired up.
 
 Each step draws a batch of short random windows from the corpus, runs the
 *training forward* (posterior → flow → decode a random 0.36 s segment), and
@@ -555,7 +649,7 @@ generated audio is *detached*, so $D$'s gradient never leaks into $G$. Both the
 $D$ and the $G$ gradients are computed from the *same start-of-step weights*, and
 only *then* are the two optimisers stepped — so within a step $G$ is pushed
 against the discriminator as it stood at the start, not a half-updated one. (With
-gradient accumulation, §8, these gradients are summed over several micro-batches
+gradient accumulation, §9, these gradients are summed over several micro-batches
 before the step.)
 
 #panel(caption: [One training iteration. Both losses are measured against the
@@ -575,8 +669,8 @@ same start-of-step weights; the two optimisers then step together.])[
 
 Both optimisers are AdamW ($beta_1{=}0.8$, $beta_2{=}0.99$), matching the
 reference recipe, with a base learning rate of $10^(-4)$ that is *decayed over the
-run* (§8). What ships is not the raw final weights but a smoothed *exponential
-moving average* of them — also §8.
+run* (§9). What ships is not the raw final weights but a smoothed *exponential
+moving average* of them — also §9.
 
 == Reading the loss curves
 
@@ -588,8 +682,8 @@ they seek an equilibrium. Practical intuition:
   - *`mel_loss` is the one to watch.* It is the honest reconstruction signal and
     *should trend down*. Some *shaking around a plateau* in the back half is
     normal — it is the adversarial equilibrium, and the stabilisation techniques
-    of §8 (LR decay, weight EMA) exist to tame exactly that. But if it *never*
-    descends and the output is silent, suspect a *data* problem (§9), not a
+    of §9 (LR decay, weight EMA) exist to tame exactly that. But if it *never*
+    descends and the output is silent, suspect a *data* problem (§10), not a
     hyperparameter one.
   - *`d_loss` near a small positive constant* (not collapsing to 0) means the
     discriminator is appropriately challenged. A `d_loss` crashing to 0 means
@@ -660,7 +754,7 @@ the clips with a lower noise floor, weighting each by $"SNR"^alpha$. Crucially t
 score is a *signal-to-noise ratio* — a clip's loud-percentile level over its
 noise-floor level — and *not loudness*, so a soft, breathy ASMR take still scores
 high and is never penalised for being quiet. This steers away from hiss while
-keeping the very content the corpus exists to capture. (Contrast §9, which removes
+keeping the very content the corpus exists to capture. (Contrast §10, which removes
 between-sentence *silence*; this weights whole clips by *noise*.)
 
 // =========================================================================
@@ -711,5 +805,6 @@ above exists to keep those two halves cleanly separated.
   Concepts anchored to the `rvc` implementation: `burn-rvc` (network),
   `rvc-core` (feature extraction + DSP + backends), `rvc-train` (adversarial
   training loop). RVC v2, 48 kHz, weight-compatible with the reference
-  `SynthesizerTrnMs768NSFsid` / `MultiPeriodDiscriminatorV2`.
+  `SynthesizerTrnMs768NSFsid` / `MultiPeriodDiscriminatorV2`
+  (RVC-Project, tag `2.2.231006`).
 ])
