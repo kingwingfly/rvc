@@ -37,9 +37,59 @@ use std::collections::BTreeMap;
 use burn::tensor::backend::Backend;
 use burn::tensor::{Distribution, Int, Tensor};
 use burn_seedvc::style_encoder::{StyleEncoder, StyleEncoderConfig};
+use burn_seedvc::{InterpolateRegulator, ResidualVq, SeedVcConfig, VqConfig};
 
 struct Load {
     checkpoint: String,
+}
+
+/// Applied/missing/unused for one module, in the form every `burn-*` crate's
+/// `load` example reports it.
+///
+/// Two things make a raw `unused` count meaningless here, and both are subtracted
+/// rather than hidden:
+///
+/// - **The checkpoint is one file holding every module**, so loading any one of
+///   them leaves the other ~280 tensors unconsumed. Those still carry their
+///   `net.<module>.` prefix, because each loader's remaps strip only its own —
+///   which is exactly what separates "belongs to somebody else" from "belongs
+///   here and did not land".
+/// - A normalisation layer's `weight`/`bias` are consumed under Burn's
+///   `gamma`/`beta` names and the store still counts the original keys as
+///   unconsumed, so they appear here *having been applied*.
+///
+/// **What is left after both is real, and 0 is the only acceptable number.**
+fn report(label: &str, result: &burn_store::ApplyResult) {
+    let mine: Vec<&String> = result
+        .unused
+        .iter()
+        .filter(|k| !k.starts_with("net."))
+        .collect();
+    let (norms, real): (Vec<&String>, Vec<&String>) = mine.iter().copied().partition(|k| {
+        let stem = k.rsplit_once('.').map(|(s, _)| s).unwrap_or(k);
+        (k.ends_with(".weight") || k.ends_with(".bias")) && stem.contains("norm")
+    });
+    println!(
+        "\n{label}\n  applied : {}\n  missing : {}\n  unused  : {} in this subtree ({} norm \
+         gamma/beta, reported but applied; {} genuinely unused) + {} belonging to other \
+         modules\n  errors  : {}",
+        result.applied.len(),
+        result.missing.len(),
+        mine.len(),
+        norms.len(),
+        real.len(),
+        result.unused.len() - mine.len(),
+        result.errors.len(),
+    );
+    for (name, why) in &result.missing {
+        println!("    MISSING {name}  ({why})");
+    }
+    for name in &real {
+        println!("    UNUSED {name}");
+    }
+    for e in &result.errors {
+        println!("    ERROR {e:?}");
+    }
 }
 
 impl common::Job for Load {
@@ -47,11 +97,17 @@ impl common::Job for Load {
         let tensors = burn_kit::store::pytorch_keys(self.checkpoint.as_ref(), None)
             .expect("failed to read checkpoint");
 
-        // Group by the first path component: upstream's module boundaries are
-        // exactly this crate's, so a prefix is one unit's territory.
+        // Group by the *second* path component: upstream's module boundaries are
+        // exactly this crate's, but every key in this checkpoint starts `net.`,
+        // so the first component alone puts all 302 tensors in one bucket and
+        // says nothing.
         let mut by_prefix: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
         for (name, _dtype, shape) in &tensors {
-            let prefix = name.split('.').next().unwrap_or(name);
+            let depth = if name.starts_with("net.") { 2 } else { 1 };
+            let prefix = name
+                .match_indices('.')
+                .nth(depth - 1)
+                .map_or(name.as_str(), |(i, _)| &name[..i]);
             let entry = by_prefix.entry(prefix).or_default();
             entry.0 += 1;
             entry.1 += shape.iter().product::<usize>();
@@ -66,6 +122,10 @@ impl common::Job for Load {
             tensors.len(),
             by_prefix.values().map(|(_, p)| p).sum::<usize>(),
             by_prefix.len()
+        );
+        println!(
+            "\nA prefix with no coverage block below is a piece of the model nobody \
+             has ported yet."
         );
         // Per-module coverage. One block per module as it lands; a prefix that
         // is never claimed is a piece of the model nobody ported.
@@ -127,6 +187,23 @@ impl common::Job for Load {
             va.iter().all(|x| x.is_finite()),
             va == va_again,
         );
+
+        let cfg = SeedVcConfig::uvit_whisper_small_wavenet();
+
+        let mut regulator = InterpolateRegulator::<B>::new(&cfg, device);
+        let res = regulator
+            .load_pytorch(&self.checkpoint)
+            .expect("failed to read checkpoint");
+        report("net.length_regulator.module.*", &res);
+
+        // Reported for completeness rather than because anything runs it:
+        // upstream's `build_model` does not construct this subtree at all, so it
+        // is a residue of the training script. See `burn_seedvc::vq`.
+        let mut vq = ResidualVq::<B>::new(&VqConfig::default(), device);
+        let res = vq
+            .load_pytorch(&self.checkpoint)
+            .expect("failed to read checkpoint");
+        report("net.vq.module.quantizers.*", &res);
     }
 }
 
