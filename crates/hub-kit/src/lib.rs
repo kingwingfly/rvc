@@ -426,10 +426,10 @@ const CAMPPLUS_FILE: &str = "campplus_cn_common.bin";
 /// The vocoder's release, used unmodified.
 pub const DEFAULT_BIGVGAN: (&str, &str) = ("nvidia", "bigvgan_v2_22khz_80band_256x");
 
-/// Its weights and the hyper-parameters they were trained under. The repo also
-/// carries a discriminator and its optimiser state, which nothing here opens —
-/// this vocoder is inference-only, so a conversion never downloads them.
-const BIGVGAN_FILES: [&str; 2] = ["bigvgan_generator.pt", "config.json"];
+/// Its generator, which is the only half a conversion opens. The repo also ships
+/// the discriminator and its optimiser state — half a gigabyte of adversary —
+/// and this vocoder is used frozen, so neither is ever fetched.
+const BIGVGAN_FILE: &str = "bigvgan_generator.pt";
 
 /// The content encoder, and **not** a choice.
 ///
@@ -476,9 +476,10 @@ pub async fn fetch_seedvc(cache_dir: &Path) -> Result<SeedVcPaths> {
     let campplus = fetch(&ModelRef::new(owner, name, CAMPPLUS_FILE), cache_dir).await?;
 
     let (owner, name) = DEFAULT_BIGVGAN;
-    let [bigvgan, bigvgan_config] = BIGVGAN_FILES;
-    let bigvgan = fetch(&ModelRef::new(owner, name, bigvgan), cache_dir).await?;
-    let bigvgan_config = fetch(&ModelRef::new(owner, name, bigvgan_config), cache_dir).await?;
+    let bigvgan = fetch(&ModelRef::new(owner, name, BIGVGAN_FILE), cache_dir).await?;
+    // Its hyper-parameters, and the vocoder cannot be built without them: the
+    // band count and upsampling rates are read from here rather than assumed.
+    let bigvgan_config = fetch(&ModelRef::new(owner, name, "config.json"), cache_dir).await?;
 
     Ok(SeedVcPaths {
         checkpoint,
@@ -519,8 +520,14 @@ pub fn seedvc_paths(dir: &Path) -> Result<SeedVcPaths> {
             .ok_or_else(|| missing(what, dir))
     };
 
-    let bigvgan = find("a bigvgan*.pt vocoder", &|n| {
-        n.contains("bigvgan") && n.ends_with(".pt")
+    // The discriminator is excluded by name rather than trusted to fail on load:
+    // a clone of the vocoder's repo carries `bigvgan_discriminator_optimizer.pt`
+    // beside the generator, and `read_dir` order decides which a bare `.pt`
+    // match would find.
+    let bigvgan = find("bigvgan_generator.pt", &|n| n == BIGVGAN_FILE).or_else(|_| {
+        find("a bigvgan*.pt generator", &|n| {
+            n.contains("bigvgan") && n.ends_with(".pt") && !n.contains("discriminator")
+        })
     })?;
     // Found by what it contains rather than by what it is called: the Hub
     // snapshot, a clone and a hand-made copy name this directory three different
