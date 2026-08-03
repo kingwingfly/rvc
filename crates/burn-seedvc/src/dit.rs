@@ -93,7 +93,7 @@ use burn::nn::conv::{Conv1d, Conv1dConfig};
 use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig};
 use burn::tensor::activation::{silu, softmax};
 use burn::tensor::backend::Backend;
-use burn::tensor::{Int, Tensor, TensorData};
+use burn::tensor::{Distribution, Int, Tensor, TensorData};
 use burn_store::ApplyResult;
 
 use crate::config::SeedVcConfig;
@@ -145,9 +145,18 @@ struct WeightNormLinear<B: Backend> {
 
 impl<B: Backend> WeightNormLinear<B> {
     fn new(d_in: usize, d_out: usize, device: &B::Device) -> Self {
+        // **`weight_v` must not start at zero.** The forward pass divides by its
+        // per-row norm, so a zero direction is `0 · (g / 0)` — `NaN`, in every
+        // output, before a single weight is loaded. Weight norm's own
+        // initialisation sets `g` from a random `v` for exactly this reason, and
+        // it is what `burn_vits::WeightNormConv1d` does; copying the zero-init of
+        // an ordinary bias here is the mistake that is invisible until an
+        // untrained module is run.
+        let v = Tensor::random([d_out, d_in], Distribution::Normal(0.0, 0.02), device);
+        let g = v.clone().powf_scalar(2.0).sum_dim(1).sqrt();
         Self {
-            weight_g: Param::from_tensor(Tensor::ones([d_out, 1], device)),
-            weight_v: Param::from_tensor(Tensor::zeros([d_out, d_in], device)),
+            weight_g: Param::from_tensor(g),
+            weight_v: Param::from_tensor(v),
             bias: Param::from_tensor(Tensor::zeros([d_out], device)),
         }
     }
@@ -293,7 +302,9 @@ impl<B: Backend> Attention<B> {
         // preset has no grouped-query attention (`n_local_heads == n_head`), so
         // it comes to a plain 3 × dim.
         Self {
-            wqkv: LinearConfig::new(dim, 3 * dim).with_bias(false).init(device),
+            wqkv: LinearConfig::new(dim, 3 * dim)
+                .with_bias(false)
+                .init(device),
             wo: LinearConfig::new(dim, dim).with_bias(false).init(device),
             heads,
             head_dim: dim / heads,
@@ -334,8 +345,7 @@ struct FeedForward<B: Backend> {
 
 impl<B: Backend> FeedForward<B> {
     fn new(dim: usize, hidden: usize, device: &B::Device) -> Self {
-        let no_bias =
-            |d_in, d_out| LinearConfig::new(d_in, d_out).with_bias(false).init(device);
+        let no_bias = |d_in, d_out| LinearConfig::new(d_in, d_out).with_bias(false).init(device);
         Self {
             w1: no_bias(dim, hidden),
             w2: no_bias(hidden, dim),
@@ -385,11 +395,13 @@ impl<B: Backend> TransformerBlock<B> {
             Some(skip) => self.skip_in_linear.forward(Tensor::cat(vec![x, skip], 2)),
             None => x,
         };
-        let attended = self
-            .attention
-            .forward(self.attention_norm.forward(x.clone(), c.clone()), cos, sin);
+        let attended =
+            self.attention
+                .forward(self.attention_norm.forward(x.clone(), c.clone()), cos, sin);
         let h = x + attended;
-        let fed = self.feed_forward.forward(self.ffn_norm.forward(h.clone(), c));
+        let fed = self
+            .feed_forward
+            .forward(self.ffn_norm.forward(h.clone(), c));
         h + fed
     }
 }
@@ -600,6 +612,15 @@ impl<B: Backend> Dit<B> {
     /// and `cond` in the second half. That is why there is no `mask_content`
     /// argument — upstream's `forward` has one and its inference path never sets
     /// it.
+    ///
+    /// **Batch entries are independent**, which is what makes that legal: nothing
+    /// here reduces over dimension 0, so stacking the guided and unguided inputs
+    /// into one call of twice the batch cannot blend them. The tests pin it by
+    /// running a row alone and against its pair.
+    ///
+    /// The sampler's trait adds an `x_lens: Tensor<B, 1, Int>` between `prompt_x`
+    /// and `t`; the forwarding impl drops it, because the only thing upstream
+    /// builds from it is the padding mask this port does not model.
     pub fn forward(
         &self,
         x: Tensor<B, 3>,
@@ -674,7 +695,6 @@ impl<B: Backend> Dit<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn::tensor::Distribution;
 
     type B = burn_ndarray::NdArray;
 
@@ -715,40 +735,71 @@ mod tests {
 
     #[test]
     fn the_classifier_free_guidance_pair_is_one_batched_call() {
-        // What the sampler does: two rows through one forward, the second with
-        // its conditioning zeroed. If the batch dimension leaked into the
-        // attention or the timestep code the two rows would agree, which is the
-        // failure that would make guidance a no-op.
+        // The property the sampler depends on: it stacks the conditioned and
+        // unconditional inputs into a single call of twice the batch, so a row's
+        // output must be what that row alone would have produced. Anything that
+        // reduced over the batch — a norm taken across dimension 0, say — would
+        // silently blend the two branches and turn guidance into a smear.
         let cfg = tiny();
         let device = Default::default();
         let dit = Dit::<B>::new(&cfg, &device);
         let frames = 16;
+        let normal = Distribution::Normal(0.0, 1.0);
 
-        let x = Tensor::<B, 3>::random(
-            [2, cfg.n_mels, frames],
-            Distribution::Normal(0.0, 1.0),
-            &device,
-        );
+        let x = Tensor::<B, 3>::random([2, cfg.n_mels, frames], normal, &device);
+        // Row 0 conditioned, row 1 with everything the guidance path zeroes.
         let prompt = Tensor::cat(
             vec![
-                Tensor::ones([1, cfg.n_mels, frames], &device),
+                Tensor::<B, 3>::random([1, cfg.n_mels, frames], normal, &device),
                 Tensor::zeros([1, cfg.n_mels, frames], &device),
             ],
             0,
         );
-        let out = dit.forward(
-            x,
-            prompt,
-            Tensor::from_floats([0.5, 0.5], &device),
-            Tensor::zeros([2, cfg.style_dim], &device),
-            Tensor::zeros([2, frames, cfg.hidden_dim], &device),
+        let style = Tensor::cat(
+            vec![
+                Tensor::<B, 2>::random([1, cfg.style_dim], normal, &device),
+                Tensor::zeros([1, cfg.style_dim], &device),
+            ],
+            0,
         );
+        let cond = Tensor::cat(
+            vec![
+                Tensor::<B, 3>::random([1, frames, cfg.hidden_dim], normal, &device),
+                Tensor::zeros([1, frames, cfg.hidden_dim], &device),
+            ],
+            0,
+        );
+        let t = Tensor::from_floats([0.5, 0.5], &device);
 
-        assert_eq!(out.dims(), [2, cfg.n_mels, frames]);
-        assert!(!out.clone().contains_nan().into_scalar());
-        let rows = out.chunk(2, 0);
-        let diff = (rows[0].clone() - rows[1].clone()).abs().max().into_scalar();
-        assert!(diff > 0.0, "the guided and unguided rows must differ");
+        let paired = dit.forward(
+            x.clone(),
+            prompt.clone(),
+            t.clone(),
+            style.clone(),
+            cond.clone(),
+        );
+        assert_eq!(paired.dims(), [2, cfg.n_mels, frames]);
+        assert!(!paired.clone().contains_nan().into_scalar());
+
+        let row = |i: usize| {
+            dit.forward(
+                x.clone().narrow(0, i, 1),
+                prompt.clone().narrow(0, i, 1),
+                t.clone().narrow(0, i, 1),
+                style.clone().narrow(0, i, 1),
+                cond.clone().narrow(0, i, 1),
+            )
+        };
+        let rows = paired.chunk(2, 0);
+        for (i, batched) in rows.iter().enumerate() {
+            let drift = (batched.clone() - row(i)).abs().max().into_scalar();
+            assert!(drift < 1e-5, "row {i} drifted by {drift} when batched");
+        }
+        let spread = (rows[0].clone() - rows[1].clone())
+            .abs()
+            .max()
+            .into_scalar();
+        assert!(spread > 0.0, "the guided and unguided rows must differ");
     }
 
     #[test]

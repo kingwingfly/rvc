@@ -37,7 +37,7 @@ use std::collections::BTreeMap;
 use burn::tensor::backend::Backend;
 use burn::tensor::{Distribution, Int, Tensor};
 use burn_seedvc::style_encoder::{StyleEncoder, StyleEncoderConfig};
-use burn_seedvc::{InterpolateRegulator, ResidualVq, SeedVcConfig, VqConfig};
+use burn_seedvc::{Dit, InterpolateRegulator, ResidualVq, SeedVcConfig, VqConfig};
 
 struct Load {
     checkpoint: String,
@@ -189,6 +189,36 @@ impl common::Job for Load {
         );
 
         let cfg = SeedVcConfig::uvit_whisper_small_wavenet();
+
+        let mut dit = Dit::<B>::new(&cfg, device);
+        let res = dit
+            .load_pytorch(&self.checkpoint)
+            .expect("failed to read checkpoint");
+        report("net.cfm.module.estimator.* (dit + wavenet)", &res);
+
+        // The same reasoning as the timbre encoder's check below, applied to the
+        // network that has the most ways to load perfectly and compute nonsense:
+        // a wrong rotary convention, a swapped scale/shift or a mask that should
+        // not be there all leave the tensor shapes intact. Two seconds of mel is
+        // enough, and it keeps this harness free of an audio dependency.
+        let frames = cfg.frame_rate() as usize * 2;
+        let velocity = dit.forward(
+            Tensor::<B, 3>::random([1, cfg.n_mels, frames], normal, device),
+            Tensor::zeros([1, cfg.n_mels, frames], device),
+            Tensor::from_floats([0.5], device),
+            Tensor::<B, 2>::random([1, cfg.style_dim], normal, device),
+            Tensor::<B, 3>::random([1, frames, cfg.hidden_dim], normal, device),
+        );
+        let values: Vec<f32> = velocity.into_data().to_vec().unwrap();
+        // Finiteness is asserted on its own: a NaN out of a mis-built mask
+        // reaches every mel band, and Burn's approximate comparisons treat NaN
+        // as equal to NaN.
+        println!(
+            "  forward : {:?} finite={}, rms={:.4}",
+            [1, cfg.n_mels, frames],
+            values.iter().all(|v| v.is_finite()),
+            (values.iter().map(|v| v * v).sum::<f32>() / values.len() as f32).sqrt(),
+        );
 
         let mut regulator = InterpolateRegulator::<B>::new(&cfg, device);
         let res = regulator
