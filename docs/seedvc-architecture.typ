@@ -175,6 +175,21 @@ is fidelity to a specific voice — a fine-tune has seen an hour of Alice and a
 reference vector has seen four seconds — and a much larger inference-time model,
 since everything a fine-tune baked into weights now has to be computed per run.
 
+So Seed-VC sits *beside* `rvc` and `tts` rather than above them. It answers "is
+there something more advanced than RVC v2" only by changing the question: a
+fine-tune spends hours once and very little thereafter, this spends nothing once
+and a great deal per conversion, and a fine-tune given more data can be pushed
+arbitrarily close to one voice where a 192-dimensional vector cannot be. Neither
+is the successor of the other, and the toolkit ships all three.
+
+One practical consequence is worth stating early, because it has no analogue in
+the other two engines. *The reference clip is the only evidence the model has
+about the target voice*, so everything in it reaches the output: room noise,
+reverberation, a second speaker in the background, a clip too short for the
+statistics pooling of §4.2 to average over. A fine-tune sees an hour of material
+and washes such things out; here there is no training run to do the washing, and
+the quality of one recording is the dominant free variable at run time.
+
 #panel(caption: [The end-to-end conversion path. The left column is the *source*,
 which supplies content only; the right column is the *reference*, which supplies
 everything about the voice. They meet inside the diffusion transformer and
@@ -517,25 +532,25 @@ the output.])[
   #set align(center)
   #set text(size: 8.5pt)
   #grid(columns: (0.9fr, 1.6fr), gutter: 0pt, align: horizon,
-    node([*content* — reference's, length-regulated to $P$ frames], fill: c-ref),
-    node([*content* — source's, length-regulated to $T$ frames], fill: c-feat),
+    node([*content* — reference's, length-regulated to $P$ frames], fill: c-ref, w: 100%),
+    node([*content* — source's, length-regulated to $T$ frames], fill: c-feat, w: 100%),
   )
   #v(3pt)
   #grid(columns: (0.9fr, 1.6fr), gutter: 0pt, align: horizon,
-    node([*`prompt_x`* — the reference mel], fill: c-ref),
-    node([*`prompt_x`* — zeros], fill: c-dead),
+    node([*`prompt_x`* — the reference mel], fill: c-ref, w: 100%),
+    node([*`prompt_x`* — zeros], fill: c-dead, w: 100%),
   )
   #v(3pt)
   #grid(columns: (0.9fr, 1.6fr), gutter: 0pt, align: horizon,
-    node([*state $x$* — pinned at 0 every step], fill: c-dead),
-    node([*state $x$* — noise at $t=0$, mel at $t=1$], fill: c-gen),
+    node([*state $x$* — pinned at 0 every step], fill: c-dead, w: 100%),
+    node([*state $x$* — noise at $t=0$, mel at $t=1$], fill: c-gen, w: 100%),
   )
   #v(3pt)
   #node([*timbre* `[192]` from CAM++ — broadcast across the whole width], fill: c-ref, w: 100%)
   #v(6pt)
   #grid(columns: (0.9fr, 1.6fr), gutter: 0pt, align: horizon,
-    node([discarded: `vc_target[:, :, P:]`], fill: c-dead),
-    node([→ BigVGAN → waveform], fill: c-voc),
+    node([discarded: `vc_target[:, :, P:]`], fill: c-dead, w: 100%),
+    node([→ BigVGAN → waveform], fill: c-voc, w: 100%),
   )
 ]
 
@@ -786,12 +801,30 @@ resamplers, plus the post-activation's pair. Being a deterministic function of
 the file overwrite them — which keeps the coverage report at zero unused and
 turns the stored copies into a free check on the derivation.
 
-Two smaller v2 flags decide things no shape could reveal. `use_tanh_at_final:
-false` means the output is a hard clamp to ±1 rather than a `tanh`, and these
-weights were trained against the clamp — `tanh` would compress every peak instead
-of passing it. `use_bias_at_final: false` means the final convolution's bias
-tensor is *absent from the checkpoint* rather than zero, which is why that one
-convolution is local to the crate instead of `burn-vits`'s.
+#panel(caption: [The anti-aliased activation, which appears 109 times in the
+vocoder. The two resampling convolutions are the same twelve Kaiser-windowed
+sinc taps in both directions, computed here and also stored in the checkpoint.])[
+  #set align(center)
+  #grid(columns: (auto, auto, auto, auto, auto, auto, auto), align: horizon, gutter: 0pt,
+    node([signal\ #text(size: 7.5pt)[rate $f$]], w: 100%),
+    ar,
+    node([*up* ×2\ #text(size: 7.5pt)[grouped conv, low-pass]], fill: c-feat),
+    ar,
+    node([`snakebeta`\ #text(size: 7.5pt)[doubles the bandwidth]], fill: c-voc),
+    ar,
+    node([*down* ×2\ #text(size: 7.5pt)[same filter]], fill: c-feat),
+  )
+  #v(6pt)
+  #text(size: 8.5pt, fill: ink.lighten(20%))[Without the wrapper, everything
+  $sin^2$ puts above Nyquist folds back down as audible aliasing.]
+]
+
+Two smaller v2 flags decide things no shape could reveal. A false
+`use_tanh_at_final` means the output is a hard clamp to ±1 rather than a `tanh`,
+and these weights were trained against the clamp — `tanh` would compress every
+peak instead of passing it. A false `use_bias_at_final` means the final
+convolution's bias tensor is *absent from the checkpoint* rather than zero, which
+is why that one convolution is local to the crate instead of `burn-vits`'s.
 
 Because a vocoder reconstructs phase from scratch, *a sample-wise difference
 between two runs proves nothing either way* — the port's check is that the
