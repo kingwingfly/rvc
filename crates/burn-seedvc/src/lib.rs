@@ -38,8 +38,10 @@ mod campplus;
 mod content;
 mod dit;
 mod flow;
-mod length_regulator;
-mod vq;
+pub mod length_regulator;
+pub mod vq;
 mod wavenet;
 
 pub use config::SeedVcConfig;
+pub use length_regulator::InterpolateRegulator;
+pub use vq::{ResidualVq, VqConfig};
