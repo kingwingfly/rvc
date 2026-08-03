@@ -325,9 +325,13 @@ impl<B: Backend> Model for BurnModel<B> {
                 content.len(),
             )));
         }
-        let style = self
-            .campplus
-            .forward(self.floats(&fbank, [1, fbank_frames, FBANK_BINS]));
+        // **Mean-normalised over time, per bin**, which upstream does at the call
+        // site rather than inside the encoder — so it is easy to miss, and
+        // missing it is silent: the embedding then carries the recording's
+        // channel and its microphone alongside the speaker, which is exactly
+        // what a zero-shot converter must not key on.
+        let fbank = self.floats(&fbank, [1, fbank_frames, FBANK_BINS]);
+        let style = self.campplus.forward(fbank.clone() - fbank.mean_dim(1));
 
         // `Spectral` is `center=False` with `(n_fft - hop)/2` padding, so this is
         // exactly `frames` and lines up with the grid the regulator resamples to.
