@@ -63,6 +63,19 @@ exists for — and hiding it behind a subcommand while `stt` and `tts` exposed i
 directly meant the three engines could not be learned once. If a future engine
 has a streaming mode, it goes on the bare invocation too.
 
+**`stt` used to be the exception, and is not any more.** It read the whole of
+stdin before transcribing anything, on the reasoning that segmentation needs to
+see the recording — so a ten-minute file emitted nothing for ten minutes while a
+short clip looked instant. What made the fix free is that `slice()`'s lookahead
+is *bounded*: a voiced run's end can no longer move once
+`max(min_silence, 2·pad)` of silence has followed it, so `audio_kit::Slicer`
+finalises there and the ranges are the ones the whole recording would have
+given. **A property test pins the streaming and batch slicers to identical cuts**
+— that equivalence is the reason this is not a speed/accuracy trade, and it is
+the thing to re-run before touching either. The single divergence is speech that
+never pauses for longer than `--max-clip`: streaming cuts at the quietest frame
+in the window it has, where batch balances the split across the whole run.
+
 The corollary is that **`voice` nests, it never renames.** `voice tts train`, not
 `voice tts-train`: `voice` hosts each engine's clap type unchanged, so a
 subcommand added to `tts` appears under `voice tts` with no edit to `voice-cli`
@@ -642,6 +655,54 @@ answer to the seam artefact our crossfade answers, so it is the place to look
 first if block joins ever become audible. Everything else in the release —
 UVR5→PyMSS separation, FCPE as a pitch option, CUDA graphs, single-GPU without
 DDP, the WebUI rewrite — is packaging and never reaches a tensor we own.
+
+### Seed-VC, and why the whole workspace is GPL-3.0 (`burn-seedvc`)
+The port in progress. Seed-VC converts a voice **without training on it** — a
+1–30 s reference clip is the entire speaker specification, where `rvc` and
+`tts` each want a fine-tune. That is why it sits beside them rather than
+replacing them, and it is the answer to "is there something more advanced than
+RVC v2": yes, but it is a different bargain, not a newer RVC.
+
+**Upstream is GPL-3.0, and a port written from reading it is a derivative work**,
+so the licence carries to everything that links `burn-seedvc`. The workspace was
+relicensed from `MIT OR Apache-2.0` to `GPL-3.0-only` for exactly this reason —
+one line, since every crate inherits `license.workspace = true`. `-only` rather
+than `-or-later` because upstream ships the bare GPL-3.0 text with no "or any
+later version" statement, and `-only` is the reading that is valid either way.
+Releases made before that stay MIT for whoever holds a copy; the change applies
+forward. **Anything that must stay permissive cannot depend on this crate.**
+
+The target is the v1 `seed-uvit-whisper-small-wavenet` preset, chosen for one
+reason that outweighs the rest: **its content encoder is `openai/whisper-small`,
+which `burn-whisper` already loads.** The v2 CFM+AR pair needs an
+ASTRAL-Quantization tokeniser ported first.
+
+`DiT_seed_v2_uvit_whisper_small_wavenet_bigvgan_pruned.pth` is 302 tensors /
+110M parameters, and `examples/load` prints where they live so a prefix nobody
+claims is visibly a piece nobody ported. **Two of the six networks are in
+nobody's checkpoint but their own** — the content encoder is whisper-small and
+the vocoder is `nvidia/bigvgan_v2_22khz_80band_256x` — which is worth knowing
+before hunting for their tensors in the wrong file.
+
+Two traps found while porting, both of the same kind — *the checkpoint contains
+more than the model runs*:
+
+- **`net.style_encoder.*` (18 tensors) is dead weight.** Upstream's
+  `build_model` assembles only `cfm` and `length_regulator`, so `load_checkpoint`
+  reads straight past it; inference instead builds a **separate** CAMPPlus from
+  `campplus_cn_common.bin`, and *that* is what conditions the transformer. The
+  18 tensors are a fossil of the training-time model. They are ported anyway,
+  because a subtree nobody claims is indistinguishable from one somebody forgot
+  — but **wiring inference to them would feed the transformer a timbre vector
+  Seed-VC was never conditioned on.** A real CAMPPlus port is still outstanding.
+- **`net.vq.*` is the same story**, and the length regulator's 2048-entry
+  codebook is allocated and never indexed, because this preset sets
+  `is_discrete: false`. Port faithfully, document what is live.
+
+Also: `sampling_ratios: [1,1,1,1]` **is not a ratio.** Upstream reads only its
+length — one conv stage per entry — so it means "four stages", not "rate
+unchanged". The length regulator is in fact the only thing in the model that
+changes the frame rate, 50 Hz from Whisper to ≈86.13 Hz for the mel.
 
 ### The Python boundary (`export/`)
 The only Python: a standalone `uv` project that converts a Burn `.safetensors` to
