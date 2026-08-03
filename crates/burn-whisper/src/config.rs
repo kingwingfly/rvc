@@ -53,6 +53,32 @@ impl WhisperConfig {
         }
     }
 
+    /// `openai/whisper-small` — 244M parameters, 80 mel bins.
+    ///
+    /// Here because it is the content encoder of Seed-VC's
+    /// `seed-uvit-whisper-small-wavenet` preset, which uses the encoder alone as
+    /// a frozen feature extractor and deletes the decoder. Its 768-wide output is
+    /// what that model's length regulator projects from — so the width is a
+    /// compatibility constraint there, not a size trade-off.
+    ///
+    /// Transcribed from the repo's own `config.json`, like every preset above:
+    /// nothing in this crate reads that file, so a new size is a new constructor.
+    pub fn small() -> Self {
+        Self {
+            num_mel_bins: 80,
+            max_source_positions: 1500,
+            max_target_positions: 448,
+            d_model: 768,
+            encoder_attention_heads: 12,
+            encoder_layers: 12,
+            encoder_ffn_dim: 3072,
+            decoder_attention_heads: 12,
+            decoder_layers: 12,
+            decoder_ffn_dim: 3072,
+            vocab_size: 51865,
+        }
+    }
+
     /// A tiny model with the same *structure*, for tests that check shapes and
     /// cache behaviour rather than weights.
     #[doc(hidden)]

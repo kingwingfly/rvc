@@ -36,7 +36,7 @@
 pub mod config;
 
 mod bigvgan;
-mod content;
+pub mod content;
 mod dit;
 mod flow;
 // Public where the unported siblings are private: the weight-coverage example
