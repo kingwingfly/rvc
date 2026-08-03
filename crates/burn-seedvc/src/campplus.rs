@@ -528,7 +528,8 @@ impl<B: Backend> XVector<B> {
         }
     }
 
-    /// `[batch, channels, frames]` → `[batch, embedding]`.
+    /// `[batch, channels, frames]` → `[batch, embedding, 1]`, the trailing axis
+    /// being the one-frame sequence the pointwise projection works on.
     fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
         let mut h = self.tdnn.forward(x);
         for (block, transit) in [
@@ -605,12 +606,14 @@ impl<B: Backend> CamPPlus<B> {
         &mut self,
         path: impl AsRef<Path>,
     ) -> Result<burn_store::ApplyResult, Box<dyn Error>> {
-        let longest = CamPPlusConfig::default()
-            .blocks
-            .iter()
-            .map(|(layers, _, _)| *layers)
-            .max()
-            .unwrap_or(0);
+        // Read off the tree that was built rather than off the default config,
+        // so a model constructed with deeper blocks still generates enough pairs.
+        let longest = self
+            .xvector
+            .block1
+            .len()
+            .max(self.xvector.block2.len())
+            .max(self.xvector.block3.len());
         let dense: Vec<(String, String)> = (0..longest)
             .map(|i| (format!(r"\.tdnnd{}\.", i + 1), format!(".{i}.")))
             .collect();
