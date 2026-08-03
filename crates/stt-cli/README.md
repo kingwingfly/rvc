@@ -33,9 +33,10 @@ to benchmark, not to test.
 ## Shape
 
 Recognition is the **bare invocation**, the same as `rvc` and `tts`: stdin to
-stdout, logs on stderr, no `--input` flag. Two subcommands sit beside it —
-`stt download`, which fetches the weights the first run would otherwise pull
-from Hugging Face, and `stt completions <shell>`.
+stdout, logs on stderr, no `--input` flag. Three subcommands sit beside it —
+`stt convert`, which transcribes files to a directory, `stt download`, which
+fetches the weights the first run would otherwise pull from Hugging Face, and
+`stt completions <shell>`.
 
 ```sh
 ffmpeg -v quiet -i take.mp3 -f f32le -ar 16000 -ac 1 - | stt
@@ -96,16 +97,27 @@ because mirrors of converted weights move and disappear.
 
 ## Recipes
 
-**Transcribe a directory, one transcript beside each take.** This is also how a
-`tts train` corpus gets its `<stem>.txt` files.
+**Transcribe a pile of files — `stt convert`.** One `<stem>.txt` per input in
+`-o`, which is how a `tts train` corpus gets its transcripts. ffmpeg decodes,
+so the inputs need not be WAV and need not be 16 kHz.
 
 ```sh
-fd -e wav . corpus -j 1 -x sh -c \
-  'ffmpeg -v quiet -i "$1" -f f32le -ar 16000 -ac 1 - | stt > "$2"' _ {} {.}.txt
+stt convert corpus/*.wav -o corpus/
 ```
 
-**`-j 1` is load-bearing**: without it a second `stt` loads a second copy of the
-model onto the same GPU.
+**The model is loaded once for the whole batch**, which is the entire reason
+this is a subcommand rather than a shell loop over the filter — a loop pays
+Whisper's load time per file, and running it in parallel to hide that puts a
+second copy of the model on the same GPU. Inputs are taken exactly as given:
+no globbing of a directory argument, and the shell's own expansion is what
+chooses the files. The first failure stops the run rather than leaving a
+half-transcribed corpus whose gaps you would have to find by eye.
+
+Nothing is written beside the inputs unless you point `-o` there, and
+`--format jsonl` writes `<stem>.jsonl` instead — **the extension follows the
+format**, because a `.txt` full of JSON is a trap for whatever reads the corpus
+next. Same-named inputs (`take.wav` and `take.mp3`) collide on one output; give
+them separate runs.
 
 **Subtitles and manifests — `--format jsonl`.** Adds the segment's position in
 the recording and the language the model used. `start` and `end` are the
@@ -157,8 +169,8 @@ does not resume a partial blob, so the next run would otherwise start over.
 
 Whisper's weights go to the shared cache — `--cache-dir` or `$STT_CACHE_DIR`,
 resolved as [`docs/setup.md`](../../docs/setup.md#where-models-are-stored)
-describes and printed by `-h`. Transcripts go where you point stdout, and
-nothing else is written.
+describes and printed by `-h`. Transcripts go where you point stdout — or, under
+`convert`, into `-o` — and nothing else is written.
 
 `stt download` fetches them without transcribing anything, which is how a
 machine that will be offline later — or a batch job that must not spend its

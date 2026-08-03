@@ -44,6 +44,8 @@ pub struct SttCli {
 
 #[derive(Debug, Subcommand)]
 pub enum SttCommand {
+    /// Transcribe audio files to `<stem>.txt` (or `.jsonl`) in a directory.
+    Convert(crate::convert::ConvertArgs),
     /// Prefetch the weights recognition needs, so the first run is offline.
     Download(DownloadArgs),
     /// Print a shell completion script (bash, zsh, fish, powershell, elvish).
@@ -116,7 +118,8 @@ pub struct SttArgs {
     /// Compute device: `auto`, `cpu`, `gpu`, `gpu:N`, `mps` or `vulkan`.
     #[arg(long, default_value = "auto", value_name = "DEVICE", value_parser = cli_kit::parse_device)]
     pub device: burn_kit::DeviceSpec,
-    /// Samples per input read chunk from stdin.
+    /// Samples per input read chunk. Read from stdin, so the `convert`
+    /// subcommand — which decodes files instead — ignores it.
     #[arg(long, default_value_t = 16000)]
     pub chunk: usize,
     /// Energy floor in dBFS: quieter than this counts as a gap between
@@ -170,39 +173,69 @@ impl SttArgs {
         );
         Ok(())
     }
+
+    /// The Whisper directory this run reads, fetched on demand when `--model`
+    /// names none.
+    pub async fn model_dir(&self) -> Result<PathBuf> {
+        match &self.model {
+            Some(dir) => Ok(dir.clone()),
+            None => {
+                tracing::info!("resolving Whisper weights from Hugging Face...");
+                Ok(
+                    hub_kit::fetch_whisper(self.repo.as_deref(), &self.cache_dir)
+                        .await
+                        .context("failed to fetch the Whisper model")?
+                        .dir,
+                )
+            }
+        }
+    }
+
+    /// Where to cut and what to ask the model for, as `stt-core` wants it.
+    pub fn options(&self) -> TranscribeOptions {
+        TranscribeOptions {
+            slice: audio_kit::SliceOptions {
+                silence_db: self.silence_db,
+                min_silence: self.min_silence,
+                min_clip: self.min_clip,
+                max_clip: self.max_clip,
+                ..Default::default()
+            },
+            decode: DecodeOptions {
+                language: self.language.clone(),
+                translate: self.translate,
+                max_tokens: self.max_tokens,
+            },
+        }
+    }
+}
+
+/// One segment as a line of output, in the requested format.
+///
+/// Shared with `convert`, so a file on disk and the same audio down the pipe
+/// cannot come out differently formatted.
+pub(crate) fn segment_line(format: Format, s: &stt_core::Segment) -> String {
+    match format {
+        Format::Text => format!("{}\n", s.text),
+        Format::Jsonl => format!(
+            "{{\"start\":{:.3},\"end\":{:.3},\"language\":\"{}\",\"text\":{}}}\n",
+            s.start,
+            s.end,
+            s.language,
+            json_string(&s.text)
+        ),
+    }
 }
 
 pub async fn transcribe(args: SttArgs) -> Result<()> {
     args.verify()?;
 
-    let dir = match &args.model {
-        Some(dir) => dir.clone(),
-        None => {
-            tracing::info!("resolving Whisper weights from Hugging Face...");
-            hub_kit::fetch_whisper(args.repo.as_deref(), &args.cache_dir)
-                .await
-                .context("failed to fetch the Whisper model")?
-                .dir
-        }
-    };
+    let dir = args.model_dir().await?;
 
     let mut stt =
         tokio::task::block_in_place(|| load_transcriber(&dir, args.backend, args.device))?;
 
-    let opts = TranscribeOptions {
-        slice: audio_kit::SliceOptions {
-            silence_db: args.silence_db,
-            min_silence: args.min_silence,
-            min_clip: args.min_clip,
-            max_clip: args.max_clip,
-            ..Default::default()
-        },
-        decode: DecodeOptions {
-            language: args.language.clone(),
-            translate: args.translate,
-            max_tokens: args.max_tokens,
-        },
-    };
+    let opts = args.options();
 
     let mut input = Box::pin(audio_kit::read_f32le(tokio::io::stdin(), args.chunk));
     let mut slicer = audio_kit::Slicer::new(stt_core::SAMPLE_RATE, &opts.slice);
@@ -226,17 +259,9 @@ pub async fn transcribe(args: SttArgs) -> Result<()> {
                 tokio::task::block_in_place(|| stt.segment(&clip.samples, start, &opts.decode))
                     .context("transcription failed")?;
             let Some(s) = decoded else { continue };
-            let line = match args.format {
-                Format::Text => format!("{}\n", s.text),
-                Format::Jsonl => format!(
-                    "{{\"start\":{:.3},\"end\":{:.3},\"language\":\"{}\",\"text\":{}}}\n",
-                    s.start,
-                    s.end,
-                    s.language,
-                    json_string(&s.text)
-                ),
-            };
-            out.write_all(line.as_bytes())
+            // Same formatter the `convert` subcommand uses, so the two paths
+            // cannot render a segment differently.
+            out.write_all(segment_line(args.format, &s).as_bytes())
                 .await
                 .context("writing stdout")?;
             // Flush per line: a downstream reader is the point of a filter, and
