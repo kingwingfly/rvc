@@ -383,6 +383,15 @@ impl<B: Backend> Model for BurnModel<B> {
                 self.cfg.n_mels,
             )));
         }
+        // `reference.frames == 0` is checked separately from the lengths below,
+        // which it would satisfy with three empty vectors: the sampler asserts a
+        // non-empty prompt, and a panic there says nothing about where the
+        // reference came from.
+        if reference.frames == 0 {
+            return Err(Error::Input(
+                "the reference specifies no frames — it conditions on nothing".into(),
+            ));
+        }
         if reference.mel.len() != self.cfg.n_mels * reference.frames
             || reference.cond.len() != reference.frames * self.cfg.hidden_dim
             || reference.style.len() != self.cfg.style_dim
