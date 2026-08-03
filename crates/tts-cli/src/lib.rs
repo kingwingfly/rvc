@@ -7,6 +7,7 @@
 
 pub mod args;
 pub mod backend;
+pub mod convert;
 pub mod download;
 pub mod train;
 
@@ -15,6 +16,7 @@ use clap::CommandFactory;
 
 pub use args::{TtsArgs, TtsCli, TtsCommand};
 pub use cli_kit::Backend;
+pub use convert::ConvertArgs;
 pub use train::{Stage, TrainArgs};
 
 /// Run one synthesis invocation.
@@ -28,6 +30,7 @@ pub async fn run<C: CommandFactory>(cli: TtsCli) -> Result<()> {
         // Synthesising is the whole engine, so it is the bare invocation;
         // everything else is a subcommand beside it.
         None => args::synthesize(cli.synth).await,
+        Some(TtsCommand::Convert(a)) => convert::run(*a).await,
         Some(TtsCommand::Train(a)) => train::run(*a).await,
         Some(TtsCommand::Preprocess(a)) => preprocess_kit::run(a).await,
         Some(TtsCommand::Download(a)) => download::run(a).await,

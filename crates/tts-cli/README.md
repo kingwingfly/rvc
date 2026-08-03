@@ -16,6 +16,7 @@ Build it with `cargo build --release -p tts-cli`. Every command below is also
 | | |
 |---|---|
 | `tts -r <clip> -t <transcript>` | **the bare invocation is the filter** — one line of text per utterance on stdin, f32le mono PCM on stdout |
+| `tts convert <text files…>` | speak whole files, one `<stem>.wav` per input |
 | `tts train <corpus>` | fine-tune `s1`, `s2` or both on a voice |
 | `tts preprocess <files…>` | slice recordings into clean per-sentence clips, ready for `stt` |
 | `tts download` | prefetch what a synthesis fetches on its first run |
@@ -35,6 +36,22 @@ gets it when asked.
 echo "今天天气很好" \
   | tts -r clip.wav -t "<what clip.wav actually says>" \
   | ffplay -f f32le -ar 32000 -ac 1 -
+```
+
+`tts convert` is the same synthesis with files at both ends —
+`{output_dir}/{stem}.wav`, one per input. **A file's non-blank lines are still
+one utterance each; they are concatenated into that file's single WAV**, so the
+line breaks are how you tell the model where an utterance ends, not how many
+files come out. The reference is decoded and analysed once for the whole batch,
+so a directory of scripts costs one startup rather than one per file, and the
+first failure stops the run rather than being skipped past. Here the two
+reference flags are plain required arguments — nothing else hangs off this
+subcommand, so leaving one out is a usage error rather than a diagnosis after a
+gigabyte has loaded.
+
+```sh
+tts convert script.txt chapter2.txt -o out/ \
+  -r clip.wav -t "<what clip.wav actually says>"
 ```
 
 The model produces 32 kHz; `--sr` resamples, which is how synthesis feeds

@@ -23,6 +23,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tts_core::{OUTPUT_SR, SampleOptions, SynthOptions};
 
 use crate::backend::{ModelPaths, load};
+use crate::convert::ConvertArgs;
 use crate::download::DownloadArgs;
 use crate::train::TrainArgs;
 pub use cli_kit::Backend;
@@ -42,6 +43,10 @@ pub struct TtsCli {
 
 #[derive(Debug, Subcommand)]
 pub enum TtsCommand {
+    /// Speak text files, one WAV per file.
+    // Boxed because it carries every synthesis knob on top of its own two, and
+    // an enum is as large as its biggest variant.
+    Convert(Box<ConvertArgs>),
     /// Fine-tune GPT-SoVITS on a corpus of audio with transcripts.
     // Boxed because it carries every knob of two training loops, and an enum is
     // as large as its biggest variant.
@@ -170,24 +175,31 @@ impl TtsArgs {
         );
         Ok(())
     }
+
+    /// The sampling settings these knobs describe.
+    pub fn options(&self) -> SynthOptions {
+        SynthOptions {
+            language: self.language.into(),
+            sample: SampleOptions {
+                top_k: self.top_k,
+                top_p: 1.0,
+                temperature: self.temperature,
+                repetition_penalty: self.repetition_penalty,
+            },
+            max_tokens: self.max_tokens,
+            seed: self.seed,
+            ..Default::default()
+        }
+    }
 }
 
-pub async fn synthesize(args: TtsArgs) -> Result<()> {
-    args.verify()?;
-
-    // Before anything is fetched or loaded. Clap cannot enforce these — they are
-    // flattened into a command that also has a `train` subcommand, which does not
-    // want them — so this is where "required" is decided, and a missing flag
-    // should cost a message rather than a model load.
-    let reference = args
-        .reference
-        .as_ref()
-        .context("a --reference recording is required")?;
-    let reference_text = args
-        .reference_text
-        .clone()
-        .context("--reference-text is required: it is what `s1` continues from")?;
-
+/// Resolve the weights — downloading whatever `--models`, `--s1`, `--s2` and
+/// `--prosody` did not name — and load them onto the chosen backend.
+///
+/// Shared with `convert`, which loads the same model once and then writes files
+/// instead of stdout: which checkpoint a flag overrides, and what happens when
+/// the prosody encoder is missing, must not be able to differ between the two.
+pub async fn load_models(args: &TtsArgs) -> Result<tts_core::Synthesizer> {
     let dir = match &args.model_dir {
         Some(dir) => dir.clone(),
         None => {
@@ -235,14 +247,7 @@ pub async fn synthesize(args: TtsArgs) -> Result<()> {
         }
     };
 
-    let audio = read_reference(reference).await?;
-    tracing::info!(
-        "reference: {} ({:.1} s)",
-        reference.display(),
-        audio.len() as f32 / tts_core::ANALYSIS_SR as f32
-    );
-
-    let mut model = tokio::task::block_in_place(|| {
+    tokio::task::block_in_place(|| {
         load(
             ModelPaths {
                 dir: &dir,
@@ -255,20 +260,34 @@ pub async fn synthesize(args: TtsArgs) -> Result<()> {
             args.backend,
             args.device,
         )
-    })?;
+    })
+}
 
-    let opts = SynthOptions {
-        language: args.language.into(),
-        sample: SampleOptions {
-            top_k: args.top_k,
-            top_p: 1.0,
-            temperature: args.temperature,
-            repetition_penalty: args.repetition_penalty,
-        },
-        max_tokens: args.max_tokens,
-        seed: args.seed,
-        ..Default::default()
-    };
+pub async fn synthesize(args: TtsArgs) -> Result<()> {
+    args.verify()?;
+
+    // Before anything is fetched or loaded. Clap cannot enforce these — they are
+    // flattened into a command that also has a `train` subcommand, which does not
+    // want them — so this is where "required" is decided, and a missing flag
+    // should cost a message rather than a model load.
+    let reference = args
+        .reference
+        .as_ref()
+        .context("a --reference recording is required")?;
+    let reference_text = args
+        .reference_text
+        .clone()
+        .context("--reference-text is required: it is what `s1` continues from")?;
+
+    let audio = read_reference(reference).await?;
+    tracing::info!(
+        "reference: {} ({:.1} s)",
+        reference.display(),
+        audio.len() as f32 / tts_core::ANALYSIS_SR as f32
+    );
+
+    let mut model = load_models(&args).await?;
+    let opts = args.options();
 
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut out = BufWriter::new(tokio::io::stdout());
@@ -301,7 +320,7 @@ pub async fn synthesize(args: TtsArgs) -> Result<()> {
 }
 
 /// Decode a reference recording to mono `f32` at the analysis rate.
-async fn read_reference(path: &std::path::Path) -> Result<Vec<f32>> {
+pub(crate) async fn read_reference(path: &std::path::Path) -> Result<Vec<f32>> {
     use futures::StreamExt;
 
     let opts = audio_kit::DecodeOptions::new(tts_core::ANALYSIS_SR);
