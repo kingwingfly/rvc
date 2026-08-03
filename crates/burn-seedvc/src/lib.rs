@@ -10,7 +10,9 @@
 //! 1. [`content`] runs the source audio through a frozen Whisper encoder, which
 //!    is what carries *what was said* while dropping most of who said it,
 //! 2. [`length_regulator`] resamples those features to the mel frame rate,
-//! 3. [`campplus`] turns the reference clip into one timbre vector,
+//! 3. [`style_encoder`] turns the reference clip's mel into one timbre vector —
+//!    though see its docs, because the *released* inference path takes that
+//!    vector from CAMPPlus, a separate checkpoint this crate does not yet port,
 //! 4. [`dit`] is a diffusion transformer that predicts a mel, conditioned on the
 //!    content stream and that timbre vector, with [`wavenet`] as its final block,
 //! 5. [`flow`] is the sampler that drives the transformer over N steps,
@@ -34,11 +36,13 @@
 pub mod config;
 
 mod bigvgan;
-mod campplus;
 mod content;
 mod dit;
 mod flow;
 mod length_regulator;
+// Public where its siblings are private: the weight-coverage example is this
+// crate's only test, and it has to construct the module it checks.
+pub mod style_encoder;
 mod vq;
 mod wavenet;
 

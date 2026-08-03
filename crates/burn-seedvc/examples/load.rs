@@ -19,7 +19,7 @@
 //! |---|---|---|
 //! | `net.cfm.module.estimator.*` | 255 | [`dit`] and [`wavenet`] |
 //! | `net.length_regulator.module.*` | 22 | [`length_regulator`] |
-//! | `net.style_encoder.module.*` | 18 | [`campplus`] |
+//! | `net.style_encoder.module.*` | 18 | [`style_encoder`] |
 //! | `net.vq.module.quantizers.*` | 7 | [`vq`] |
 //!
 //! Two of the six networks are **not in this file at all** — the content encoder
@@ -35,13 +35,15 @@ mod common;
 use std::collections::BTreeMap;
 
 use burn::tensor::backend::Backend;
+use burn::tensor::{Distribution, Int, Tensor};
+use burn_seedvc::style_encoder::{StyleEncoder, StyleEncoderConfig};
 
 struct Load {
     checkpoint: String,
 }
 
 impl common::Job for Load {
-    fn run<B: Backend>(self, _device: &B::Device) {
+    fn run<B: Backend>(self, device: &B::Device) {
         let tensors = burn_kit::store::pytorch_keys(self.checkpoint.as_ref(), None)
             .expect("failed to read checkpoint");
 
@@ -65,10 +67,65 @@ impl common::Job for Load {
             by_prefix.values().map(|(_, p)| p).sum::<usize>(),
             by_prefix.len()
         );
+        // Per-module coverage. One block per module as it lands; a prefix that
+        // is never claimed is a piece of the model nobody ported.
+        //
+        // Every loader is handed the whole 302-tensor checkpoint, so `unused`
+        // arrives full of other modules' weights. Each block filters it down to
+        // its own subtree — the only number that says anything about the port.
+        let cfg = StyleEncoderConfig::default();
+        let mut style = StyleEncoder::<B>::new(&cfg, device);
+        let res = style
+            .load_pytorch(&self.checkpoint)
+            .expect("failed to load net.style_encoder");
+        // `load_pytorch` strips `net.style_encoder.module.` off the keys it
+        // claims, so anything still wearing a `net.` prefix belongs to someone
+        // else and is not this module's business.
+        let unused: Vec<_> = res
+            .unused
+            .iter()
+            .filter(|key| !key.starts_with("net."))
+            .collect();
+        println!("\nstyle_encoder (net.style_encoder.module.*)");
+        println!("  applied : {}", res.applied.len());
+        println!("  missing : {}", res.missing.len());
+        for (name, why) in &res.missing {
+            println!("      MISSING {name}  ({why})");
+        }
+        println!("  unused  : {} (in this subtree)", unused.len());
+        for name in &unused {
+            println!("      UNUSED {name}");
+        }
+        println!("  errors  : {}", res.errors.len());
+        for e in &res.errors {
+            println!("      ERROR {e:?}");
+        }
+
+        // Coverage proves the layout, never the arithmetic — this repo has
+        // shipped a port that loaded at 100% and produced garbage. The cheapest
+        // check that exercises the forward pass: a timbre encoder that ignores
+        // its input fails in the way that looks healthiest, converting every
+        // clip into the same voice. Synthetic mels are enough to catch it, and
+        // they keep this harness free of an audio dependency.
+        //
+        // The two references differ in *spectral tilt*, not just in their
+        // samples: two white-noise mels are the same signal twice as far as any
+        // timbre encoder is concerned, so they would agree closely however the
+        // arithmetic were wired, and the comparison would prove nothing.
+        let normal = Distribution::Normal(0.0, 1.0);
+        let a = Tensor::<B, 3>::random([1, cfg.n_mels, 128], normal, device);
+        let tilt = Tensor::<B, 1, Int>::arange(0..cfg.n_mels as i64, device)
+            .float()
+            .reshape([1, cfg.n_mels, 1]);
+        let b = Tensor::<B, 3>::random([1, cfg.n_mels, 128], normal, device) * tilt;
+        let embed = |mel| -> Vec<f32> { style.forward(mel).into_data().to_vec().unwrap() };
+        let (va, va_again, vb) = (embed(a.clone()), embed(a), embed(b));
+        let dot = |x: &[f32], y: &[f32]| x.iter().zip(y).map(|(p, q)| p * q).sum::<f32>();
+        let cosine = dot(&va, &vb) / (dot(&va, &va) * dot(&vb, &vb)).sqrt();
         println!(
-            "\nNo module reports coverage yet. As each lands, add its arm here so \
-             `load` prints applied/missing/unused for it — a prefix that is never \
-             claimed is a piece of the model nobody ported."
+            "  forward : finite={}, repeatable={}, cos(two references)={cosine:.4}",
+            va.iter().all(|x| x.is_finite()),
+            va == va_again,
         );
     }
 }
