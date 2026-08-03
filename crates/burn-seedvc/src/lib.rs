@@ -35,9 +35,9 @@
 
 pub mod config;
 
-mod bigvgan;
 // All public: the weight-coverage example is this crate's only test, and it has
 // to construct every module it checks.
+pub mod bigvgan;
 pub mod campplus;
 pub mod content;
 pub mod dit;
@@ -47,6 +47,7 @@ pub mod style_encoder;
 pub mod vq;
 pub mod wavenet;
 
+pub use bigvgan::{BigVgan, BigVganConfig};
 pub use config::SeedVcConfig;
 pub use dit::Dit;
 pub use length_regulator::InterpolateRegulator;

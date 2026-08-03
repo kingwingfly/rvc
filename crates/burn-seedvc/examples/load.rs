@@ -25,14 +25,23 @@
 //! Two of the six networks are **not in this file at all** — the content encoder
 //! is `openai/whisper-small` and the vocoder is
 //! `nvidia/bigvgan_v2_22khz_80band_256x`, each from its own release. Hunting for
-//! their tensors here is a way to lose an afternoon.
+//! their tensors here is a way to lose an afternoon. The vocoder's own
+//! `bigvgan_generator.pt` can be named as a second argument, and then it gets a
+//! coverage block of its own; leaving it off skips that block rather than
+//! failing, so the Seed-VC checkpoint alone is still a complete run.
 //!
 //! The **speaker encoder is a third file again** — `campplus_cn_common.bin` from
-//! `funasr/campplus`, which is what upstream conditions the transformer on. Pass
-//! it as a second argument and its coverage is reported too; leave it off and
-//! everything else still runs.
+//! `funasr/campplus`, which is what upstream conditions the transformer on.
 //!
-//! Usage: `cargo run -p burn-seedvc --example load -- [--backend ndarray|cuda|tch] <ckpt.pth> [campplus_cn_common.bin]`
+//! So three released files between them hold this model, and each extra one is
+//! named rather than positional: passing only the Seed-VC checkpoint is still a
+//! complete run, and each flag adds its own block instead of being required to
+//! reach the next.
+//!
+//! ```text
+//! cargo run -p burn-seedvc --example load -- [--backend ndarray|cuda|tch] \
+//!     <ckpt.pth> [--campplus campplus_cn_common.bin] [--bigvgan bigvgan_generator.pt]
+//! ```
 
 #[path = "common/mod.rs"]
 mod common;
@@ -43,13 +52,17 @@ use burn::tensor::backend::Backend;
 use burn::tensor::{Distribution, Int, Tensor};
 use burn_seedvc::campplus::{CamPPlus, CamPPlusConfig};
 use burn_seedvc::style_encoder::{StyleEncoder, StyleEncoderConfig};
-use burn_seedvc::{Dit, InterpolateRegulator, ResidualVq, SeedVcConfig, VqConfig};
+use burn_seedvc::{
+    BigVgan, BigVganConfig, Dit, InterpolateRegulator, ResidualVq, SeedVcConfig, VqConfig,
+};
 
 struct Load {
     checkpoint: String,
     /// `campplus_cn_common.bin`, which is a **different file** — see the block
     /// that uses it.
     campplus: Option<String>,
+    /// `bigvgan_generator.pt`, a third file again.
+    bigvgan: Option<String>,
 }
 
 /// Applied/missing/unused for one module, in the form every `burn-*` crate's
@@ -331,13 +344,80 @@ impl common::Job for Load {
             .load_pytorch(&self.checkpoint)
             .expect("failed to read checkpoint");
         report("net.vq.module.quantizers.*", &res);
+
+        // The vocoder is the one module whose weights are **not** in the file
+        // above, so it is the one block that can be given a whole checkpoint of
+        // its own. Nothing else lives in `bigvgan_generator.pt`, which is why
+        // `report`'s "belonging to other modules" tally comes out at zero here
+        // and would be a real finding if it did not.
+        //
+        // An `if let` rather than a `let … else … return`, because blocks are
+        // appended to this function as modules land and an early return here
+        // would silently skip every one of them whenever the optional second
+        // argument is left off.
+        if let Some(path) = &self.bigvgan {
+            let mut vocoder = BigVgan::<B>::new(&BigVganConfig::v2_22khz_80band_256x(), device);
+            // Taken before the load, because the checkpoint is about to
+            // overwrite it.
+            let derived = vocoder.derived_filter();
+            let res = vocoder.load_pytorch(path).expect("failed to load bigvgan");
+            report("bigvgan (its own checkpoint)", &res);
+
+            // The anti-aliasing kernels are a deterministic function of the
+            // filter design, and upstream stores them anyway because
+            // `register_buffer` is persistent. That redundancy is free evidence:
+            // the copy the file carries is an independent answer to the same
+            // arithmetic, so the two agreeing says the Kaiser window, the sinc
+            // grid and the normalisation are all right. A disagreement here is a
+            // real defect that no coverage count and no shape check would show.
+            let loaded = vocoder.derived_filter();
+            let worst = derived
+                .iter()
+                .zip(&loaded)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            println!(
+                "  filter  : derived vs stored, max |Δ| = {worst:.3e} over {} taps",
+                derived.len()
+            );
+        } else {
+            println!(
+                "\nbigvgan: skipped — pass `nvidia/bigvgan_v2_22khz_80band_256x`'s \
+                 `bigvgan_generator.pt` as a second argument to cover it"
+            );
+        }
     }
 }
 
+/// Pull `--<flag> <value>` (or `--<flag>=<value>`) out of the arguments.
+///
+/// The two extra checkpoints are named rather than positional because they are
+/// independent: either can be given without the other, which a second and third
+/// position could not express.
+fn take_value(args: &mut Vec<String>, flag: &str) -> Option<String> {
+    let eq = format!("--{flag}=");
+    if let Some(i) = args.iter().position(|a| a.starts_with(&eq)) {
+        return Some(args.remove(i)[eq.len()..].to_string());
+    }
+    let name = format!("--{flag}");
+    let i = args.iter().position(|a| *a == name)?;
+    args.remove(i);
+    if i >= args.len() {
+        eprintln!("error: --{flag} needs a path");
+        std::process::exit(2);
+    }
+    Some(args.remove(i))
+}
+
 fn main() {
-    let (backend, args) = common::parse_args();
+    let (backend, mut args) = common::parse_args();
+    let campplus = take_value(&mut args, "campplus");
+    let bigvgan = take_value(&mut args, "bigvgan");
     let Some(checkpoint) = args.first() else {
-        eprintln!("usage: load [--backend ndarray|cuda|tch] <checkpoint> [campplus_cn_common.bin]");
+        eprintln!(
+            "usage: load [--backend ndarray|cuda|tch] <checkpoint> \
+             [--campplus campplus_cn_common.bin] [--bigvgan bigvgan_generator.pt]"
+        );
         std::process::exit(2);
     };
     println!("backend : {backend}");
@@ -345,7 +425,8 @@ fn main() {
         backend,
         Load {
             checkpoint: checkpoint.clone(),
-            campplus: args.get(1).cloned(),
+            campplus,
+            bigvgan,
         },
     );
 }
