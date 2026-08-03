@@ -409,6 +409,153 @@ pub fn gptsovits_paths(dir: &Path) -> Result<GptSovitsPaths> {
     })
 }
 
+/// Seed-VC's own release, holding the checkpoint and nothing else this needs.
+pub const DEFAULT_SEEDVC: (&str, &str) = ("Plachta", "Seed-VC");
+
+/// The `seed-uvit-whisper-small-wavenet` preset, 110M parameters. The repo ships
+/// several presets side by side and the name encodes which one this is — content
+/// encoder, backbone, vocoder — so it is spelled in full rather than abbreviated.
+const SEEDVC_FILE: &str = "DiT_seed_v2_uvit_whisper_small_wavenet_bigvgan_pruned.pth";
+
+/// The timbre encoder's release (28 MB).
+pub const DEFAULT_CAMPPLUS: (&str, &str) = ("funasr", "campplus");
+
+/// Its single file, spelled as upstream spells it in every entry point.
+const CAMPPLUS_FILE: &str = "campplus_cn_common.bin";
+
+/// The vocoder's release, used unmodified.
+pub const DEFAULT_BIGVGAN: (&str, &str) = ("nvidia", "bigvgan_v2_22khz_80band_256x");
+
+/// Its generator, which is the only half a conversion opens. The repo also ships
+/// the discriminator and its optimiser state — half a gigabyte of adversary —
+/// and this vocoder is used frozen, so neither is ever fetched.
+const BIGVGAN_FILE: &str = "bigvgan_generator.pt";
+
+/// The content encoder, and **not** a choice.
+///
+/// The checkpoint above was conditioned on this exact encoder's 50 Hz features,
+/// so a different size is not a quality trade but a different representation:
+/// the transformer would be fed embeddings it has never seen. It is named here
+/// rather than made overridable for that reason, unlike [`fetch_whisper`]'s own
+/// default, where swapping the model is the point.
+pub const SEEDVC_WHISPER: &str = "openai/whisper-small";
+
+/// Where each of Seed-VC's four networks landed.
+#[derive(Debug, Clone)]
+pub struct SeedVcPaths {
+    /// The DiT checkpoint: the transformer, the length regulator and the
+    /// training-time style encoder that inference does not use.
+    pub checkpoint: PathBuf,
+    /// CAMPPlus, the timbre encoder the transformer is actually conditioned on.
+    pub campplus: PathBuf,
+    pub bigvgan: PathBuf,
+    pub bigvgan_config: PathBuf,
+    /// The Whisper repo's directory, in the shape [`WhisperAssets`] gives.
+    pub whisper: PathBuf,
+}
+
+/// Fetch everything a Seed-VC conversion opens, from the **four separate repos**
+/// they are published in.
+///
+/// That is what makes this unlike [`fetch_gptsovits`], which returns one
+/// snapshot directory: no directory holds all of these, and manufacturing one
+/// would mean copying most of a gigabyte back out of the cache. Only the
+/// checkpoint is Seed-VC's own — the timbre encoder, the vocoder and the content
+/// encoder are three other projects' releases, used unmodified — which is worth
+/// knowing before hunting for a missing network's tensors in the wrong file.
+///
+/// Everything here is an inference asset and lands in the cache proper. There is
+/// deliberately no [`fetch_pretrained`] counterpart: Seed-VC is zero-shot, a
+/// reference clip is the entire speaker specification, so nothing here is ever a
+/// warm-start base for a fine-tune.
+pub async fn fetch_seedvc(cache_dir: &Path) -> Result<SeedVcPaths> {
+    let (owner, name) = DEFAULT_SEEDVC;
+    let checkpoint = fetch(&ModelRef::new(owner, name, SEEDVC_FILE), cache_dir).await?;
+
+    let (owner, name) = DEFAULT_CAMPPLUS;
+    let campplus = fetch(&ModelRef::new(owner, name, CAMPPLUS_FILE), cache_dir).await?;
+
+    let (owner, name) = DEFAULT_BIGVGAN;
+    let bigvgan = fetch(&ModelRef::new(owner, name, BIGVGAN_FILE), cache_dir).await?;
+    // Its hyper-parameters, and the vocoder cannot be built without them: the
+    // band count and upsampling rates are read from here rather than assumed.
+    let bigvgan_config = fetch(&ModelRef::new(owner, name, "config.json"), cache_dir).await?;
+
+    Ok(SeedVcPaths {
+        checkpoint,
+        campplus,
+        bigvgan,
+        bigvgan_config,
+        whisper: fetch_whisper(Some(SEEDVC_WHISPER), cache_dir).await?.dir,
+    })
+}
+
+/// Locate the same four inside one hand-assembled directory.
+///
+/// Tolerant about naming for the reason [`gptsovits_paths`] is — someone who
+/// already holds these weights should not download them again — so each file is
+/// matched by what identifies it rather than by its full upstream name: the
+/// checkpoint's encodes a preset that changes between releases, and the vocoder
+/// ships under two names in its own repo.
+///
+/// Whisper is looked for **as a subdirectory**, never as loose files, because
+/// its `config.json` and BigVGAN's share a name and a flat layout would hand
+/// each loader the other's. Both parse, so the failure would be silent.
+pub fn seedvc_paths(dir: &Path) -> Result<SeedVcPaths> {
+    let entries: Vec<(String, PathBuf)> = std::fs::read_dir(dir)
+        .map_err(|e| {
+            HubError::Io(std::io::Error::new(
+                e.kind(),
+                format!("{}: {e}", dir.display()),
+            ))
+        })?
+        .flatten()
+        .map(|e| (e.file_name().to_string_lossy().to_lowercase(), e.path()))
+        .collect();
+    let find = |what: &str, matches: &dyn Fn(&str) -> bool| {
+        entries
+            .iter()
+            .find(|(name, _)| matches(name))
+            .map(|(_, path)| path.clone())
+            .ok_or_else(|| missing(what, dir))
+    };
+
+    // The discriminator is excluded by name rather than trusted to fail on load:
+    // a clone of the vocoder's repo carries `bigvgan_discriminator_optimizer.pt`
+    // beside the generator, and `read_dir` order decides which a bare `.pt`
+    // match would find.
+    let bigvgan = find("bigvgan_generator.pt", &|n| n == BIGVGAN_FILE).or_else(|_| {
+        find("a bigvgan*.pt generator", &|n| {
+            n.contains("bigvgan") && n.ends_with(".pt") && !n.contains("discriminator")
+        })
+    })?;
+    // Found by what it contains rather than by what it is called: the Hub
+    // snapshot, a clone and a hand-made copy name this directory three different
+    // things, and the weights file is the one name Whisper itself fixes.
+    let whisper = entries
+        .iter()
+        .map(|(_, path)| path)
+        .find(|path| path.join("model.safetensors").exists())
+        .cloned()
+        .ok_or_else(|| missing("a directory holding whisper-small", dir))?;
+    Ok(SeedVcPaths {
+        checkpoint: find("a DiT*.pth checkpoint", &|n| {
+            n.starts_with("dit") && n.ends_with(".pth")
+        })?,
+        campplus: find(CAMPPLUS_FILE, &|n| {
+            n.starts_with("campplus") && n.ends_with(".bin")
+        })?,
+        bigvgan,
+        // Preferred over a bare `config.json` so that a directory carrying both
+        // this and a stray one still pairs the vocoder with its own.
+        bigvgan_config: find("the vocoder's config.json", &|n| {
+            n.contains("bigvgan") && n.ends_with(".json")
+        })
+        .or_else(|_| find("the vocoder's config.json", &|n| n == "config.json"))?,
+        whisper,
+    })
+}
+
 fn missing(what: &str, dir: &Path) -> HubError {
     HubError::Io(std::io::Error::new(
         std::io::ErrorKind::NotFound,
@@ -502,6 +649,44 @@ mod tests {
                 assert!(!dir.starts_with(std::env::current_dir().unwrap()));
             }
         }
+    }
+
+    /// A hand-assembled Seed-VC directory resolves, under names that are not the
+    /// upstream ones — which is the whole point of the resolver being tolerant.
+    /// The two `config.json`s are the trap: the vocoder's must not be satisfied
+    /// by Whisper's, since both parse and the mistake would be silent.
+    #[test]
+    fn seedvc_paths_tolerates_a_hand_assembled_directory() {
+        let dir = std::env::temp_dir().join(format!("hub-kit-seedvc-{}", std::process::id()));
+        let whisper = dir.join("whisper");
+        std::fs::create_dir_all(&whisper).unwrap();
+        for name in ["dit.pth", "campplus_cn_common.bin", "bigvgan.pt"] {
+            std::fs::write(dir.join(name), []).unwrap();
+        }
+        for name in ["model.safetensors", "config.json"] {
+            std::fs::write(whisper.join(name), []).unwrap();
+        }
+
+        // No vocoder config yet, so the whole thing must fail rather than reach
+        // into the Whisper directory for one.
+        assert!(seedvc_paths(&dir).is_err());
+
+        std::fs::write(dir.join("bigvgan_config.json"), []).unwrap();
+        let paths = seedvc_paths(&dir).unwrap();
+        assert_eq!(paths.checkpoint, dir.join("dit.pth"));
+        assert_eq!(paths.campplus, dir.join(CAMPPLUS_FILE));
+        assert_eq!(paths.bigvgan, dir.join("bigvgan.pt"));
+        assert_eq!(paths.bigvgan_config, dir.join("bigvgan_config.json"));
+        assert_eq!(paths.whisper, whisper);
+
+        // The upstream spelling is a bare `config.json`, and it still resolves.
+        std::fs::rename(dir.join("bigvgan_config.json"), dir.join("config.json")).unwrap();
+        assert_eq!(
+            seedvc_paths(&dir).unwrap().bigvgan_config,
+            dir.join("config.json")
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// `RVC_CACHE_DIR` predates the toolkit-wide variable, so scripts that set it
