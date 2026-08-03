@@ -694,7 +694,9 @@ more than the model runs*:
   18 tensors are a fossil of the training-time model. They are ported anyway,
   because a subtree nobody claims is indistinguishable from one somebody forgot
   — but **wiring inference to them would feed the transformer a timbre vector
-  Seed-VC was never conditioned on.** A real CAMPPlus port is still outstanding.
+  Seed-VC was never conditioned on.** The real timbre encoder is `campplus.rs`,
+  loading `campplus_cn_common.bin` from HF **`funasr/campplus`** (Apache-2.0,
+  named verbatim in three of upstream's entry points) at 815/0/0.
 - **`net.vq.*` is the same story**, and the length regulator's 2048-entry
   codebook is allocated and never indexed, because this preset sets
   `is_discrete: false`. Port faithfully, document what is live.
@@ -703,6 +705,33 @@ Also: `sampling_ratios: [1,1,1,1]` **is not a ratio.** Upstream reads only its
 length — one conv stage per entry — so it means "four stages", not "rate
 unchanged". The length regulator is in fact the only thing in the model that
 changes the frame rate, 50 Hz from Whisper to ≈86.13 Hz for the mel.
+
+**Three front ends, three rates, and none of them interchangeable.** Whisper's
+content encoder eats **16 kHz** and its log-mel is *not* `burn_vits::Spectral` —
+it centres its STFT, takes power rather than magnitude, and ends in `log10` with
+a peak-relative floor. CAMPPlus eats a **Kaldi filterbank** at 16 kHz,
+mean-normalised over time, and takes `[batch, frames, bins]` — the **opposite**
+order to `StyleEncoder::forward`. Everything from the diffusion transformer
+onward is **22.05 kHz**, where `Spectral` *is* exact, for BigVGAN as well as for
+Seed-VC. Every one of those pairings has matching frame counts and 80 bands, so
+substituting one for another runs happily and computes something else.
+
+### The shared target directory is unsafe for concurrent worktrees
+`target/debug/examples/<name>` is **not** hashed per worktree, so two checkouts
+building an example of the same name overwrite each other's binary and
+`cargo run --example` silently executes whichever landed last. Two workers hit
+this independently while porting Seed-VC: one got a complete, plausible, *wrong*
+coverage report out of it, and another had `cargo test` run a sibling's test
+binary — a fifteen-test set including tests its own tree did not contain. The
+same fingerprinting confusion also produces compile errors that contradict the
+file on disk (a `pub use` reported missing when it is plainly there), where the
+fix is `touch`, not debugging.
+
+This is why cargo's "output filename collision" warning on the `load` and `keys`
+examples is **not** the harmless noise it looks like. Working in parallel
+checkouts means an isolated `CARGO_TARGET_DIR`, or copying the built binary out
+and running the copy — which is where every coverage number in `burn-seedvc`'s
+module docs comes from.
 
 ### The Python boundary (`export/`)
 The only Python: a standalone `uv` project that converts a Burn `.safetensors` to

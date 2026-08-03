@@ -25,7 +25,8 @@
 //! are ported here because they are what the checkpoint contains and therefore
 //! the only thing weight coverage can verify — **but wiring inference to this
 //! module would produce a timbre vector Seed-VC was never conditioned on.**
-//! Reaching parity with upstream needs CAMPPlus, which is a port of its own.
+//! Parity with upstream is [`crate::campplus`], which has since been ported and
+//! is what inference should reach for.
 //!
 //! # What is guessed, and how wrong it can be
 //!
