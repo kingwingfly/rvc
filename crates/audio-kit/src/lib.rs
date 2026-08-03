@@ -28,4 +28,4 @@ pub use decode::{DecodeOptions, decode_path, decode_paths};
 pub use encode::{write_wav, write_wav_file};
 pub use filter::AudioFilter;
 pub use pcm::{read_f32le, resample_linear, write_f32le, write_f32le_chunk};
-pub use slice::{SliceOptions, slice};
+pub use slice::{Clip, SliceOptions, Slicer, slice};

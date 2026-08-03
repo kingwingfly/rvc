@@ -12,6 +12,13 @@
 //! the decode loop deals in token ids and `f32` logits, which is the most either
 //! has to agree on.
 //!
+//! Nothing here needs the whole recording. Each span is encoded and decoded from
+//! scratch — both engines reset their key/value cache and encoder output on
+//! [`Transcriber::segment`] — so a caller holding a [`Slicer`] can transcribe
+//! and print each clip the moment its audio has arrived. [`Transcriber::transcribe`]
+//! is that same loop over a slicer fed in one go, so the batch and streaming
+//! paths cannot drift apart.
+//!
 //! ```no_run
 //! # use stt_core::{Transcriber, TranscribeOptions};
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -42,7 +49,7 @@ pub use tokenizer::{Tokens, Vocabulary};
 
 use std::path::Path;
 
-use audio_kit::slice::{SliceOptions, slice};
+use audio_kit::slice::{SliceOptions, Slicer};
 use burn_whisper::WhisperConfig;
 use engine::Engine;
 
@@ -166,21 +173,42 @@ impl Transcriber {
     }
 
     /// Transcribe mono 16 kHz audio.
+    ///
+    /// Held here for callers that already have the whole recording; a filter
+    /// should drive [`Slicer`] and [`Transcriber::segment`] itself, which is
+    /// what this is.
     pub fn transcribe(&mut self, audio: &[f32], opts: &TranscribeOptions) -> Result<Vec<Segment>> {
-        let spans = slice(audio, SAMPLE_RATE, &opts.slice);
-        let mut out = Vec::with_capacity(spans.len());
-        for (start, end) in spans {
-            let segment = self.window(&audio[start..end], &opts.decode)?;
-            if segment.text.trim().is_empty() {
-                continue;
-            }
-            out.push(Segment {
-                start: start as f32 / SAMPLE_RATE as f32,
-                end: end as f32 / SAMPLE_RATE as f32,
-                ..segment
-            });
+        let mut slicer = Slicer::new(SAMPLE_RATE, &opts.slice);
+        let mut out = Vec::new();
+        let clips = slicer.push(audio).into_iter().chain(slicer.finish());
+        for clip in clips {
+            let start = clip.start as f32 / SAMPLE_RATE as f32;
+            out.extend(self.segment(&clip.samples, start, &opts.decode)?);
         }
         Ok(out)
+    }
+
+    /// Transcribe one clip already cut out of the input.
+    ///
+    /// `start` is the clip's offset in seconds from the beginning of the
+    /// recording, so the timings come back absolute however the audio was cut
+    /// up. `None` when the model produced nothing but whitespace, which is what
+    /// a clip of breath or room tone gives.
+    pub fn segment(
+        &mut self,
+        clip: &[f32],
+        start: f32,
+        opts: &DecodeOptions,
+    ) -> Result<Option<Segment>> {
+        let segment = self.window(clip, opts)?;
+        if segment.text.trim().is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(Segment {
+            start,
+            end: start + clip.len() as f32 / SAMPLE_RATE as f32,
+            ..segment
+        }))
     }
 
     /// Transcribe one span, which must fit a single 30 s encoder window.
