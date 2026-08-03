@@ -290,6 +290,8 @@ pub async fn synthesize(args: TtsArgs) -> Result<()> {
         audio_kit::write_f32le_chunk(&mut out, &pcm)
             .await
             .context("writing stdout")?;
+        // Flush eagerly so downstream players get low latency.
+        out.flush().await.ok();
         spoken += 1;
     }
 
