@@ -126,7 +126,7 @@ fn fail(msg: &str) -> ! {
 fn not_compiled_in(backend: &str) -> ! {
     eprintln!(
         "error: this example was built without the `{backend}` backend.\n\
-         Rebuild with:  cargo run -p burn-gptsovits --example <name> --features {backend} -- ..."
+         Rebuild with:  cargo run -p burn-seedvc --example <name> --features {backend} -- ..."
     );
     if backend == "tch" {
         eprintln!("note: the `tch` feature also needs LIBTORCH set — see the README.");
