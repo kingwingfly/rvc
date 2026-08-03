@@ -27,7 +27,12 @@
 //! `nvidia/bigvgan_v2_22khz_80band_256x`, each from its own release. Hunting for
 //! their tensors here is a way to lose an afternoon.
 //!
-//! Usage: `cargo run -p burn-seedvc --example load -- [--backend ndarray|cuda|tch] <ckpt.pth>`
+//! The **speaker encoder is a third file again** — `campplus_cn_common.bin` from
+//! `funasr/campplus`, which is what upstream conditions the transformer on. Pass
+//! it as a second argument and its coverage is reported too; leave it off and
+//! everything else still runs.
+//!
+//! Usage: `cargo run -p burn-seedvc --example load -- [--backend ndarray|cuda|tch] <ckpt.pth> [campplus_cn_common.bin]`
 
 #[path = "common/mod.rs"]
 mod common;
@@ -36,11 +41,15 @@ use std::collections::BTreeMap;
 
 use burn::tensor::backend::Backend;
 use burn::tensor::{Distribution, Int, Tensor};
+use burn_seedvc::campplus::{CamPPlus, CamPPlusConfig};
 use burn_seedvc::style_encoder::{StyleEncoder, StyleEncoderConfig};
 use burn_seedvc::{InterpolateRegulator, ResidualVq, SeedVcConfig, VqConfig};
 
 struct Load {
     checkpoint: String,
+    /// `campplus_cn_common.bin`, which is a **different file** — see the block
+    /// that uses it.
+    campplus: Option<String>,
 }
 
 /// Applied/missing/unused for one module, in the form every `burn-*` crate's
@@ -196,6 +205,94 @@ impl common::Job for Load {
             .expect("failed to read checkpoint");
         report("net.length_regulator.module.*", &res);
 
+        // CAMPPlus, if its checkpoint was named. It is deliberately optional:
+        // `campplus_cn_common.bin` is a 28 MB file from somebody else's release
+        // (`funasr/campplus`), so requiring it would make the map above
+        // unreachable for anyone who only has the Seed-VC weights.
+        if let Some(path) = &self.campplus {
+            let cfg = CamPPlusConfig::default();
+            let mut model = CamPPlus::<B>::new(&cfg, device);
+            let res = model.load_pytorch(path).expect("failed to load CAMPPlus");
+            // A separate file, so `report`'s `net.` filter says nothing here —
+            // every key in it is this module's. What is left over instead is one
+            // `num_batches_tracked` per norm: a training counter PyTorch stores
+            // as a buffer and inference never reads.
+            let (counters, real): (Vec<&String>, Vec<&String>) = res
+                .unused
+                .iter()
+                .partition(|k| k.ends_with("num_batches_tracked"));
+            println!(
+                "\ncampplus_cn_common.bin\n  applied : {}\n  missing : {}\n  unused  : {} ({} \
+                 num_batches_tracked, expected; {} genuinely unused)\n  errors  : {}",
+                res.applied.len(),
+                res.missing.len(),
+                res.unused.len(),
+                counters.len(),
+                real.len(),
+                res.errors.len(),
+            );
+            for (name, why) in &res.missing {
+                println!("      MISSING {name}  ({why})");
+            }
+            for name in &real {
+                println!("      UNUSED {name}");
+            }
+            for e in &res.errors {
+                println!("      ERROR {e:?}");
+            }
+
+            // Same forward check as the style encoder's, for the same reason and
+            // against the same failure: an encoder that ignores its input
+            // converts every clip into one voice and looks perfectly healthy.
+            // Note the axis order — CAMPPlus takes frames before bins.
+            let a = Tensor::<B, 3>::random([1, 240, cfg.feat_dim], normal, device);
+            let tilt = Tensor::<B, 1, Int>::arange(0..cfg.feat_dim as i64, device)
+                .float()
+                .reshape([1, 1, cfg.feat_dim]);
+            let b = Tensor::<B, 3>::random([1, 240, cfg.feat_dim], normal, device) * tilt;
+            let embed = |x| -> Vec<f32> { model.forward(x).into_data().to_vec().unwrap() };
+            let (va, va_again, vb) = (embed(a.clone()), embed(a), embed(b));
+            let cosine = dot(&va, &vb) / (dot(&va, &va) * dot(&vb, &vb)).sqrt();
+            println!(
+                "  forward : finite={}, repeatable={}, cos(two references)={cosine:.4}",
+                va.iter().all(|x| x.is_finite()),
+                va == va_again,
+            );
+
+            // A stronger claim than "the output moves": a *speaker* encoder has
+            // to key on the spectral envelope and ignore what is under it. Two
+            // independent noise draws shaped by the same envelope must land
+            // closer together than either does to a third under a different
+            // envelope — which no amount of weight coverage can tell you, and
+            // which a transposed axis or a softmax over the wrong dimension
+            // would destroy.
+            //
+            // Evidence rather than proof: these are not real filterbanks, so a
+            // narrow margin here would be as likely to be the input distribution
+            // as the port.
+            let bins = Tensor::<B, 1, Int>::arange(0..cfg.feat_dim as i64, device).float();
+            let shape = [1, 1, cfg.feat_dim];
+            let rising = bins.clone().div_scalar(40.0).add_scalar(1.0).reshape(shape);
+            let falling = bins.div_scalar(-40.0).add_scalar(3.0).reshape(shape);
+            let noise = || Tensor::<B, 3>::random([1, 240, cfg.feat_dim], normal, device);
+            let same_a = embed(noise() * rising.clone());
+            let same_b = embed(noise() * rising);
+            let other = embed(noise() * falling);
+            let cos = |x: &[f32], y: &[f32]| dot(x, y) / (dot(x, x) * dot(y, y)).sqrt();
+            println!(
+                "  envelope: cos(same envelope, different noise)={:.4} vs cos(different \
+                 envelope)={:.4}",
+                cos(&same_a, &same_b),
+                cos(&same_a, &other),
+            );
+        } else {
+            println!(
+                "\ncampplus_cn_common.bin\n  not checked — pass it as a second argument. It is \
+                 what the transformer is really conditioned on, so a run without it says \
+                 nothing about the timbre path."
+            );
+        }
+
         // Reported for completeness rather than because anything runs it:
         // upstream's `build_model` does not construct this subtree at all, so it
         // is a residue of the training script. See `burn_seedvc::vq`.
@@ -210,7 +307,7 @@ impl common::Job for Load {
 fn main() {
     let (backend, args) = common::parse_args();
     let Some(checkpoint) = args.first() else {
-        eprintln!("usage: load [--backend ndarray|cuda|tch] <checkpoint>");
+        eprintln!("usage: load [--backend ndarray|cuda|tch] <checkpoint> [campplus_cn_common.bin]");
         std::process::exit(2);
     };
     println!("backend : {backend}");
@@ -218,6 +315,7 @@ fn main() {
         backend,
         Load {
             checkpoint: checkpoint.clone(),
+            campplus: args.get(1).cloned(),
         },
     );
 }
