@@ -38,7 +38,7 @@ pub mod config;
 mod bigvgan;
 pub mod content;
 mod dit;
-mod flow;
+pub mod flow;
 // Public where the unported siblings are private: the weight-coverage example
 // is this crate's only test, and it has to construct the modules it checks.
 pub mod length_regulator;
