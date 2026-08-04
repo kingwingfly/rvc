@@ -46,6 +46,12 @@ pub async fn resolve_paths(opts: &ModelOpts) -> Result<Paths> {
     // Matched rather than fetched-then-overridden so that a fully specified run
     // touches no network and needs no cache directory to exist: a user who was
     // handed the weights should not have a download attempted behind their back.
+    //
+    // A *partial* override still fetches all four, because `fetch_seedvc` is
+    // all-or-nothing and the upstream filenames it fetches by are private to
+    // `hub-kit`. Reaching past it would mean writing those names down a second
+    // place for them to drift from, which costs more than the one redundant
+    // download it would save.
     Ok(
         match (
             &opts.checkpoint,
