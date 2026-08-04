@@ -7,43 +7,61 @@
 //!
 //! ```
 //! # use text_kit::{Language, phonemize, phonemize_mixed};
-//! let out = phonemize("你好", Language::Zh).unwrap();
+//! let out = phonemize("你好", Language::Zh, None).unwrap();
 //! assert_eq!(out.phones, ["n", "i2", "h", "ao3"]);
 //!
 //! // Mixed text is the normal case here, and each run gets its own front-end.
-//! let out = phonemize_mixed("你好world", Language::Zh).unwrap();
+//! let out = phonemize_mixed("你好world", Language::Zh, None).unwrap();
 //! assert_eq!(out.phones[4..], ["W", "ER1", "L", "D"]);
 //! ```
 //!
-//! Two front-ends today, and they are not symmetric. Mandarin is a pipeline of
+//! Three front-ends, and they are not symmetric. Mandarin is a pipeline of
 //! rules (jieba, pinyin, tone sandhi, the opencpop table) and reports a phoneme
 //! count per character. English is a 126k-entry dictionary with a cascade of
 //! fallbacks behind it, and reports no per-character count at all — see
-//! [`Phonemes::word2ph`].
+//! [`Phonemes::word2ph`]. Japanese is an OpenJTalk analyser whose accent output
+//! this crate turns into prosody symbols, and it is the one that needs something
+//! from the caller: a [`JapaneseDict`], because its dictionary is 28.7 MB and a
+//! download does not belong in a `build.rs`.
 //!
-//! Testable without a GPU, without weights and without a network, which is why
-//! it is built before the network it feeds.
+//! Testable without a GPU, without weights and without a network — and, for the
+//! Japanese rules, without the dictionary either — which is why it is built
+//! before the network it feeds.
 
 mod chinese;
 mod english;
+mod japanese;
 mod normalize;
 mod segment;
 pub mod symbols;
 
+pub use japanese::JapaneseDict;
 pub use segment::{Language, Run, split};
 pub use symbols::{SYMBOLS, UNKNOWN, id, to_ids};
 
 /// Something the front-end cannot say.
 #[derive(Debug, thiserror::Error)]
 pub enum TextError {
-    /// A language whose front-end is not written yet. Deliberately an error
-    /// rather than a fallback: phonemizing Japanese as English produces confident
-    /// nonsense, and silence about it is worse than refusing.
+    /// Japanese was asked for with no dictionary to ask.
+    ///
+    /// Deliberately an error rather than a fallback to another front-end:
+    /// phonemizing Japanese as English produces confident nonsense, and silence
+    /// about it is worse than refusing.
     #[error(
-        "no grapheme-to-phoneme front-end for {0} yet — \
-         Chinese and English are the two that are implemented"
+        "Japanese needs a NAIST-JDic dictionary and none was given — \
+         open one with `JapaneseDict::open` and pass it to `phonemize`"
     )]
-    Unsupported(&'static str),
+    NoJapaneseDictionary,
+
+    /// The Japanese dictionary would not load, or would not analyse a line.
+    ///
+    /// A `jpreprocess` dictionary is version-locked to the release that built
+    /// it, so a directory from a different one is the commonest cause.
+    #[error("the Japanese dictionary at `{}` could not be used: {reason}", path.display())]
+    JapaneseDictionary {
+        path: std::path::PathBuf,
+        reason: String,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, TextError>;
