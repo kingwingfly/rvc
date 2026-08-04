@@ -5,10 +5,15 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Auto-download and cache ONNX model assets from the Hugging Face Hub"
+description = "Auto-download and cache every engine's model assets"
 
 [dependencies]
 hf-hub.workspace = true
+# Only for `fetch_naist_jdic`: a GitHub release asset is a plain URL and a
+# gzipped tar, neither of which `hf-hub` can describe or unpack.
+reqwest.workspace = true
+flate2.workspace = true
+tar.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

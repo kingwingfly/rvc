@@ -22,7 +22,7 @@
 //! twice — and a [`Reference`] is plain data, so it outlives whichever engine
 //! produced it.
 
-use text_kit::{Language, Phonemes};
+use text_kit::{JapaneseDict, Language, Phonemes};
 
 use crate::engine::{EOS, Engine, PRIOR_CHANNELS};
 use crate::error::{Result, TtsError};
@@ -89,6 +89,7 @@ pub struct Reference {
 pub struct Synthesizer {
     engine: Box<dyn Engine>,
     prosody: Option<Box<dyn ProsodyEncoder>>,
+    japanese: Option<JapaneseDict>,
 }
 
 impl Synthesizer {
@@ -98,10 +99,23 @@ impl Synthesizer {
     /// business — see [`BurnEngine::load`](crate::BurnEngine::load) and
     /// [`OnnxEngine::load`](crate::onnx_engine).
     ///
-    /// `prosody` is optional: without it the model is given zero features, which
-    /// costs expressiveness on Chinese but still speaks.
-    pub fn new(engine: Box<dyn Engine>, prosody: Option<Box<dyn ProsodyEncoder>>) -> Self {
-        Self { engine, prosody }
+    /// The two front-end resources beside it are both optional, and their
+    /// absences are not alike. Without `prosody` the model is given zero
+    /// features, which costs expressiveness on Chinese but still speaks; without
+    /// `japanese` a Japanese run **fails**, because there is no reading of a
+    /// kanji to fall back on. It is a constructor argument rather than something
+    /// set later so that the dictionary a synthesizer will need is settled
+    /// before its first line, not after.
+    pub fn new(
+        engine: Box<dyn Engine>,
+        prosody: Option<Box<dyn ProsodyEncoder>>,
+        japanese: Option<JapaneseDict>,
+    ) -> Self {
+        Self {
+            engine,
+            prosody,
+            japanese,
+        }
     }
 
     /// Analyse a reference clip and its transcript.
@@ -122,7 +136,7 @@ impl Synthesizer {
         }
         let (tokens, speaker) = self.engine.analyse(audio)?;
 
-        let phones = text_kit::phonemize_mixed(text, language)?;
+        let phones = text_kit::phonemize_mixed(text, language, self.japanese.as_ref())?;
         if phones.phones.is_empty() {
             return Err(TtsError::Weights(
                 "the reference transcript produced no phonemes — `s1` needs it to \

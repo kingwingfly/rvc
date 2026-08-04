@@ -1,5 +1,8 @@
-//! Auto-download and cache the shared ContentVec + RMVPE assets from the
-//! Hugging Face Hub.
+//! Auto-download and cache every engine's model assets, almost all of them from
+//! the Hugging Face Hub.
+//!
+//! The exception is [`fetch_naist_jdic`], which reads a GitHub release asset —
+//! see its own doc comment for why that cannot be a [`ModelRef`].
 //!
 //! The trained generator (`voice.onnx`/`voice.safetensors`) is produced
 //! locally by the training pipeline and is **not** fetched here. Repo IDs and
@@ -28,6 +31,12 @@ pub enum HubError {
     /// I/O error resolving the cache directory.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    /// Error from the plain HTTP client, which only [`fetch_naist_jdic`] uses.
+    #[error("http error: {0}")]
+    Http(#[from] reqwest::Error),
+    /// A download that arrived, but not intact.
+    #[error("{0}")]
+    Download(String),
 }
 
 /// Convenience alias.
@@ -499,6 +508,97 @@ pub fn gptsovits_paths(dir: &Path) -> Result<GptSovitsPaths> {
         s2: find("s2G", ".pth").ok_or_else(|| missing("an s2G*.pth", dir))?,
         s2d: find("s2D", ".pth"),
     })
+}
+
+/// Where the Japanese dictionary comes from, and **the one asset in this crate
+/// that is not on the Hugging Face Hub**: NAIST-JDic, compiled into
+/// `jpreprocess`'s own binary layout and attached to its v0.15.0 release.
+///
+/// It gets a URL and a function of its own rather than a [`ModelRef`] because
+/// that type is `owner/name/file` *inside a Hub repo*, and a release asset has
+/// no repo path, no revision and no siblings to list. Filling those three fields
+/// in for a GitHub tarball would mean a value whose every part misdescribes
+/// where the bytes come from, and [`fetch`] would then have to branch on which
+/// kind of `ModelRef` it held.
+///
+/// The version is pinned into the URL because the layout is the *reader's*, not
+/// a standard: a dictionary is only guaranteed readable by the `jpreprocess`
+/// release that compiled it, so moving that dependency means moving this line.
+///
+/// **Deliberately not `jpreprocess`'s `naist-jdic` cargo feature.** That feature
+/// downloads the same tarball from its `build.rs`, which would charge every
+/// `cargo build`, every `cargo test` and every CI job 28 MB before compiling a
+/// line — a build-time download is exactly the shape `rvc-core/build.rs` exists
+/// to refuse. Assets are fetched when a run needs them, never when a build does.
+pub const NAIST_JDIC_URL: &str = "https://github.com/jpreprocess/jpreprocess/releases/download/v0.15.0/naist-jdic-jpreprocess.tar.gz";
+
+/// The archive's exact size, checked once it has arrived.
+///
+/// Worth the constant because a truncated body is otherwise reported by the gzip
+/// decoder as a corrupt archive, which reads as "the release is broken" and
+/// sends the user to the wrong place — the transfer stopped early, and retrying
+/// fixes it.
+const NAIST_JDIC_BYTES: usize = 28_668_638;
+
+/// The single directory the archive holds, and the name it keeps in the cache.
+const NAIST_JDIC_DIR: &str = "naist-jdic";
+
+/// Fetch and unpack the Japanese dictionary, returning the directory it landed in.
+///
+/// An **inference asset**, so it lands in the cache root beside the weights
+/// rather than under [`pretrained_dir`]: nothing trains on it, and one copy
+/// serves every run on the machine. Costly enough (28 MB packed, ~100 MB
+/// unpacked) that it is fetched only when a Japanese run actually needs it.
+///
+/// Reuse is [`fetch_pretrained`]'s rule applied to a directory: the archive is
+/// unpacked into a staging directory and only *renamed* into place once it is
+/// whole, so a directory under the final name is always a complete dictionary
+/// and an interrupted fetch can never be mistaken for one.
+pub async fn fetch_naist_jdic(cache_dir: &Path) -> Result<PathBuf> {
+    let dest = cache_dir.join(NAIST_JDIC_DIR);
+    if dest.exists() {
+        return Ok(dest);
+    }
+
+    tracing::info!(
+        "downloading the Japanese dictionary ({} MB) to {}",
+        NAIST_JDIC_BYTES / 1_000_000,
+        cache_dir.display()
+    );
+    let body = reqwest::get(NAIST_JDIC_URL)
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
+    if body.len() != NAIST_JDIC_BYTES {
+        return Err(HubError::Download(format!(
+            "{NAIST_JDIC_URL} gave {} bytes where the release is {NAIST_JDIC_BYTES} — \
+             the transfer stopped early; retrying is the fix",
+            body.len()
+        )));
+    }
+
+    // Inflating 28 MB and writing ~100 MB of it is blocking work, and every
+    // caller is inside an async runtime. The staging directory carries the
+    // process id so two runs fetching at once cannot unpack over each other.
+    let staging = cache_dir.join(format!(
+        "{NAIST_JDIC_DIR}.incomplete-{}",
+        std::process::id()
+    ));
+    tokio::task::spawn_blocking(move || -> Result<PathBuf> {
+        // Whatever an earlier attempt of *this* process left behind; a live
+        // sibling's staging directory has a different pid and is untouched.
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging)?;
+        tar::Archive::new(flate2::read::GzDecoder::new(&body[..])).unpack(&staging)?;
+        // The archive holds exactly one top-level directory, so the payload is a
+        // level below the staging root.
+        std::fs::rename(staging.join(NAIST_JDIC_DIR), &dest)?;
+        let _ = std::fs::remove_dir(&staging);
+        Ok(dest)
+    })
+    .await
+    .map_err(|e| HubError::Io(std::io::Error::other(e)))?
 }
 
 /// Seed-VC's own release, holding the checkpoint and nothing else this needs.

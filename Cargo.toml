@@ -116,6 +116,14 @@ ffmpeg-next = "8.1"
 
 # Model download (async API is the default in 1.0; `blocking` is opt-in)
 hf-hub = { version = "1.0", features = ["rustls-tls"] }
+# For the one asset that is not on the Hub: NAIST-JDic ships as a GitHub release
+# tarball, so it needs a plain HTTP GET and an unpacker. `reqwest` is the client
+# `hf-hub` already drives, and its defaults carry `default-tls` = rustls, so this
+# is a direct dependency on what is being linked anyway rather than a second
+# stack. Named here so nothing depends on `hf-hub`'s features to compile.
+reqwest = "0.13"
+flate2 = "1"
+tar = "0.4"
 
 # Text
 # BPE vocabularies straight from a Hugging Face `tokenizer.json`.
