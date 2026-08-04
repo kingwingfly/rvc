@@ -279,8 +279,20 @@ pub fn convert(
 pub(crate) struct Rng(u64);
 
 impl Rng {
+    /// Seeded through splitmix64's finalizer, **not** by using the seed as state.
+    ///
+    /// `seed | 1` was the obvious thing and it makes seeds 0 and 1 the same run:
+    /// the low bit is all that separates them and setting it erases the
+    /// difference. That matters more here than anywhere else in the workspace —
+    /// the noise is the *only* thing that varies a take, so `--seed 0` and
+    /// `--seed 1` produced byte-identical audio, which is precisely the nudge a
+    /// user reaches for. `| 1` afterwards only keeps the state non-zero, which
+    /// the xorshift below requires.
     pub(crate) fn new(seed: u64) -> Self {
-        Self(seed | 1)
+        let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        Self((z ^ (z >> 31)) | 1)
     }
 
     fn next_f32(&mut self) -> f32 {
@@ -442,6 +454,14 @@ mod tests {
         assert_eq!(draw(7), draw(7));
         assert_ne!(draw(7), draw(8));
         assert!(draw(0).iter().all(|v| v.is_finite()));
+
+        // 0 and 1 specifically: `seed | 1` mapped both to the same state, and
+        // 7/8 above did not catch it because only an even seed collides with its
+        // successor. Every adjacent pair has to differ, since incrementing the
+        // seed is what a user does when a take comes out wrong.
+        for seed in 0..8 {
+            assert_ne!(draw(seed), draw(seed + 1), "seeds {seed} and {}", seed + 1);
+        }
 
         // Standard normal, loosely: the check is that it is not uniform and not
         // scaled, since either would still integrate to *something*.

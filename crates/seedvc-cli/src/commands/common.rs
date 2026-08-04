@@ -1,16 +1,17 @@
-//! Shared setup: resolve the four checkpoints, load them, analyse the reference,
-//! and hand back the [`Converter`] both conversion paths drive.
+//! Shared setup: resolve the four checkpoints, load them, and analyse the
+//! reference against them.
 //!
-//! The two paths differ only in their [`StreamParams`] — the filter takes
-//! [`StreamParams::realtime`] and `convert` takes [`StreamParams::batch`] — so
-//! everything up to that point lives here once, exactly as `rvc-cli`'s
-//! `build_converter` does.
+//! Everything the two conversion paths share, and no more — they diverge after
+//! this. The filter has to stream, so it drives
+//! [`Converter`](seedvc_core::Converter); `convert` has whole files and so drives
+//! [`seedvc_core::convert`], which knows each source's length up front and can
+//! therefore balance its last chunk instead of leaving a fragment.
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use burn_kit::DeviceSpec;
-use seedvc_core::{ConvertOptions, Converter, ModelPaths, StreamParams};
+use seedvc_core::{Model, ModelPaths, Reference};
 
 use crate::args::{Backend, ModelOpts};
 
@@ -91,19 +92,23 @@ pub async fn resolve_paths(opts: &ModelOpts) -> Result<Paths> {
     })
 }
 
-/// Load the model, analyse the reference, and build the converter around both.
+/// Load the four checkpoints and analyse the reference against them.
+///
+/// Hands back both rather than a built converter, because the two commands want
+/// different things from them: the filter wraps them in a
+/// [`Converter`](seedvc_core::Converter), while `convert` drives
+/// [`seedvc_core::convert`], which balances a file's last chunk in a way a
+/// stream cannot.
 ///
 /// The reference is analysed **once**, here, rather than per file or per chunk:
 /// it costs a Whisper encode, a CAMPPlus pass and a mel, and none of that
 /// depends on the source. That is what makes a batch of files cheaper than the
 /// same files through the filter one at a time.
-pub async fn build_converter(
+pub async fn load_model(
     opts: &ModelOpts,
     backend: Backend,
     device: DeviceSpec,
-    params: StreamParams,
-    convert: ConvertOptions,
-) -> Result<Converter> {
+) -> Result<(Box<dyn Model>, Reference)> {
     let reference = opts.reference()?;
     // Asked before the fetch, not after: `load` checks this again, but by then a
     // cold cache has already spent a gigabyte on a backend that was never going
@@ -142,5 +147,5 @@ pub async fn build_converter(
         analysed.frames as f32 / model.config().frame_rate(),
     );
 
-    Ok(Converter::new(model, analysed, params, convert)?)
+    Ok((model, analysed))
 }

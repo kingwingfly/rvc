@@ -26,11 +26,11 @@
 
 use anyhow::{Context, Result};
 use futures::StreamExt;
-use seedvc_core::{CONTENT_SR, StreamParams, convert_stream};
+use seedvc_core::{CONTENT_SR, Converter, StreamParams, convert_stream};
 use tokio::io::{AsyncWriteExt, BufWriter};
 
 use crate::args::FilterArgs;
-use crate::commands::common::build_converter;
+use crate::commands::common::load_model;
 
 pub async fn run(args: FilterArgs) -> Result<()> {
     args.verify()?;
@@ -39,14 +39,13 @@ pub async fn run(args: FilterArgs) -> Result<()> {
     // or a model load can happen.
     let reference = args.models.reference()?;
 
-    let converter = build_converter(
-        &args.models,
-        args.backend,
-        args.device,
+    let (model, analysed) = load_model(&args.models, args.backend, args.device).await?;
+    let converter = Converter::new(
+        model,
+        analysed,
         StreamParams::realtime(),
         args.sampler.options(),
-    )
-    .await?;
+    )?;
     let out_sr = converter.output_sr();
     tracing::info!(
         "{}: stdin f32le mono @{CONTENT_SR} Hz -> stdout f32le mono @{out_sr} Hz",

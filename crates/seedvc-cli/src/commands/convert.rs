@@ -3,14 +3,21 @@
 //! The same engine the bare invocation runs, with files at both ends instead of
 //! a pipe. The model is loaded and the reference analysed **once** for the whole
 //! batch, which is what this buys over a shell loop over the filter.
+//!
+//! It drives [`seedvc_core::convert`] rather than the streaming
+//! [`Converter`](seedvc_core::Converter), and that is the one real difference
+//! between the two paths: a file's length is known before the first chunk, so
+//! the last chunk can be balanced against the one before it instead of being
+//! whatever is left over. A stream cannot do that — it has already emitted the
+//! audio it would need to give back.
 
 use anyhow::{Context, Result};
 use audio_kit::{DecodeOptions, decode_paths, write_wav_file};
 use futures::{StreamExt, stream};
-use seedvc_core::{CONTENT_SR, StreamParams};
+use seedvc_core::CONTENT_SR;
 
 use crate::args::ConvertArgs;
-use crate::commands::common::build_converter;
+use crate::commands::common::load_model;
 
 pub async fn run(args: Box<ConvertArgs>) -> Result<()> {
     args.verify()?;
@@ -18,15 +25,9 @@ pub async fn run(args: Box<ConvertArgs>) -> Result<()> {
     // gives: clap cannot mark it required where these options sit.
     args.models.reference()?;
 
-    let mut converter = build_converter(
-        &args.models,
-        args.backend,
-        args.device,
-        StreamParams::batch(),
-        args.sampler.options(),
-    )
-    .await?;
-    let out_sr = converter.output_sr();
+    let (model, reference) = load_model(&args.models, args.backend, args.device).await?;
+    let out_sr = model.config().sample_rate;
+    let opts = args.sampler.options();
 
     tokio::fs::create_dir_all(&args.output_dir)
         .await
@@ -35,13 +36,14 @@ pub async fn run(args: Box<ConvertArgs>) -> Result<()> {
     for input in &args.input {
         tracing::info!("converting {}", input.display());
         let source = decode(input).await?;
-        // Re-seeds the sampler's noise as well as clearing the buffers, so each
-        // file is reproducible on its own rather than only as the nth of a run.
-        converter.reset();
         // Seconds of uninterrupted tensor work per chunk, so it goes on a
-        // blocking thread rather than stalling the runtime.
-        let out = tokio::task::block_in_place(|| converter.convert_all(&source))
-            .with_context(|| format!("converting {}", input.display()))?;
+        // blocking thread rather than stalling the runtime. Each call draws its
+        // noise from a generator seeded afresh, so a file is reproducible on its
+        // own rather than only as the nth of a run.
+        let out = tokio::task::block_in_place(|| {
+            seedvc_core::convert(model.as_ref(), &reference, &source, &opts)
+        })
+        .with_context(|| format!("converting {}", input.display()))?;
 
         // A source under one content frame has nothing for the encoder to read,
         // so the converter correctly returns nothing. Writing that would leave a

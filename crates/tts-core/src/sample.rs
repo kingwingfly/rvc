@@ -38,8 +38,19 @@ impl Default for SampleOptions {
 pub struct Rng(u64);
 
 impl Rng {
+    /// Seeded through splitmix64's finalizer, **not** by using the seed as state.
+    ///
+    /// `seed | 1` was the obvious thing and it makes seeds 0 and 1 the same run:
+    /// the low bit is all that separates them and setting it erases the
+    /// difference. Adjacent seeds are exactly what a user tries when a take comes
+    /// out wrong, so the one operation the seed has to survive is `+1`. The
+    /// finalizer decorrelates them; `| 1` afterwards only keeps the state
+    /// non-zero, which the xorshift below requires.
     pub fn new(seed: u64) -> Self {
-        Self(seed | 1)
+        let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        Self((z ^ (z >> 31)) | 1)
     }
 
     fn next_f32(&mut self) -> f32 {

@@ -551,6 +551,33 @@ that does not match the text length is the tell.** Illustrative docs are safe �
 `clip.wav` beside a generic transcript is self-consistent, since a reader supplies
 both — but any command naming a real file must name what that file actually says.
 
+### `seedvc-core` depends on `cli-kit`, and that is allowed
+It is the only `*-core` that does, which reads as a layering slip and is not one.
+`seedvc_core::load` erases the Burn backend behind `Box<dyn Model>`, so it has to
+name a backend, and the rule above is that there is **one** `--backend` enum for
+the whole workspace — declaring a second one in `seedvc-core` to avoid the
+dependency is the thing explicitly forbidden. `cli-kit` is a `*-kit` crate,
+listed as safe for anything to depend on, so the dependency is the sanctioned
+half of that trade.
+
+The other three engines differ only because their cores have no loader at all:
+`stt-cli` and `tts-cli` build the `Engine` themselves. Moving `backend.rs` up to
+`seedvc-cli` to match would strand `seedvc-core`'s three examples, which are the
+crate's only test harness and which take `--backend` themselves.
+
+### `seedvc convert` drives the batch path, not the streaming one
+Both exist and both are live, which is deliberate. `crate::convert` knows a
+file's length before the first chunk, so it balances the last chunk against the
+one before it (`MIN_CHUNK_FRAMES`); `Converter` cannot, having already emitted
+the audio it would need to hand back. So the file command uses the file path and
+the filter uses the stream, and `streaming_matches_the_batch_path` pins them to
+each other.
+
+**That equivalence test is the reason neither may be deleted as a duplicate.**
+It is what caught `flush` rounding a frame count where the batch path floors —
+the frame count sets the noise buffer's width, so one frame re-indexes every
+value and the sampler integrates a different field entirely.
+
 ### Verifying a port beyond weight coverage
 Coverage says the module tree matches the checkpoint. It says nothing about
 whether the forward pass computes the right thing, and this repo has already
