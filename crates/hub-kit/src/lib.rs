@@ -477,8 +477,12 @@ pub async fn fetch_seedvc(cache_dir: &Path) -> Result<SeedVcPaths> {
 
     let (owner, name) = DEFAULT_BIGVGAN;
     let bigvgan = fetch(&ModelRef::new(owner, name, BIGVGAN_FILE), cache_dir).await?;
-    // Its hyper-parameters, and the vocoder cannot be built without them: the
-    // band count and upsampling rates are read from here rather than assumed.
+    // Its hyper-parameters. **Nothing reads this today** — `seedvc-core` builds
+    // the vocoder from `BigVganConfig::v2_22khz_80band_256x()`, a preset named
+    // after this very repo, so the two cannot disagree while the repo is pinned.
+    // It is fetched anyway because it is what identifies the vocoder in a
+    // hand-assembled directory, and because a second preset would make parsing
+    // it the honest answer.
     let bigvgan_config = fetch(&ModelRef::new(owner, name, "config.json"), cache_dir).await?;
 
     Ok(SeedVcPaths {

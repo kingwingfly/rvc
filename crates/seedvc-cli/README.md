@@ -200,7 +200,7 @@ are other projects' releases used unmodified:
 |---|---|---|
 | `DiT_seed_v2_uvit_whisper_small_wavenet_bigvgan_pruned.pth` | `Plachta/Seed-VC` | the transformer **and** the length regulator |
 | `campplus_cn_common.bin` | `funasr/campplus` | the timbre encoder |
-| `bigvgan_generator.pt` + its `config.json` | `nvidia/bigvgan_v2_22khz_80band_256x` | the vocoder — the band count and upsampling rates are read from that JSON, not assumed |
+| `bigvgan_generator.pt` + its `config.json` | `nvidia/bigvgan_v2_22khz_80band_256x` | the vocoder. The band count and upsampling rates come from a preset named after this repo, **not** from that JSON — it is fetched because it identifies the vocoder in a hand-assembled directory |
 | the repo directory | `openai/whisper-small` | the content encoder; only its encoder half is read |
 
 All four are **inference assets**, so they go to the shared cache —
