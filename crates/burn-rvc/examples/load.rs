@@ -1,17 +1,31 @@
-//! Load a reference RVC generator checkpoint and report weight coverage.
+//! Load a reference RVC checkpoint and report weight coverage.
 //!
 //! This is the crate's stand-in for unit tests: the network has none, so the
 //! check is that real pretrained weights map onto the module tree with nothing
 //! missing. The counts must come out identical on every backend — a backend that
 //! changes them is a bug.
 //!
-//! Usage: `cargo run -p burn-rvc --example load -- [--backend ndarray|cuda|tch] <G.pth> [D.pth]`
+//! Two checkpoints, because RVC is two published files rather than one. The
+//! default is the generator (and optionally its discriminator); `contentvec`
+//! is the content encoder on the input side, `hubert_base/` from the same
+//! `lj1995/VoiceConversionWebUI` repository.
+//!
+//! **Coverage cannot catch a wrong readout.** ContentVec's checkpoint carries
+//! `final_proj`, which is RVC *v1*'s ninth-layer head; v2 reads the 12th
+//! encoder layer directly, so those two tensors are expected to land in
+//! `unused` and taking them as a signal to wire them up is exactly the wrong
+//! move. Comparing features against `vec-768-layer-12.onnx` on real audio is
+//! the check for everything coverage cannot see.
+//!
+//! Usage:
+//! - `cargo run -p burn-rvc --example load -- [--backend ndarray|cuda|tch] <G.pth> [D.pth]`
+//! - `cargo run -p burn-rvc --example load -- [--backend …] contentvec <hubert_base dir|pytorch_model.bin>`
 
 #[path = "common/mod.rs"]
 mod common;
 
 use burn::tensor::backend::Backend;
-use burn_rvc::{MultiPeriodDiscriminator, Synthesizer, SynthesizerConfig};
+use burn_rvc::{ContentVec, MultiPeriodDiscriminator, Synthesizer, SynthesizerConfig};
 
 struct Load {
     generator: String,
@@ -69,18 +83,87 @@ impl common::Job for Load {
     }
 }
 
+struct LoadContentVec {
+    weights: String,
+}
+
+impl common::Job for LoadContentVec {
+    fn run<B: Backend>(self, device: &B::Device) {
+        let (_, res) = ContentVec::<B>::load(std::path::Path::new(&self.weights), device)
+            .expect("failed to read checkpoint");
+
+        println!("applied : {}", res.applied.len());
+        println!(
+            "missing : {}  (model params with no checkpoint tensor)",
+            res.missing.len()
+        );
+        for (name, why) in &res.missing {
+            println!("    MISSING {name}  ({why})");
+        }
+
+        // Every unused tensor is accounted for by name rather than by a total,
+        // because the whole value of this check is that a *new* one stands out.
+        // `final_proj` is RVC v1's ninth-layer readout and `masked_spec_embed` is
+        // SpecAugment's mask token — both in the file, both read by nothing at
+        // inference. The LayerNorms are a reporting artefact: `burn-store`
+        // applies them under Burn's `gamma`/`beta` names and still counts the
+        // originals unconsumed.
+        let class = |k: &str| {
+            if k.starts_with("final_proj.") {
+                "final_proj (v1's readout)"
+            } else if k == "masked_spec_embed" {
+                "masked_spec_embed (SpecAugment)"
+            } else if k.ends_with("layer_norm.weight") || k.ends_with("layer_norm.bias") {
+                "LayerNorm (applied as gamma/beta)"
+            } else {
+                "UNACCOUNTED"
+            }
+        };
+        println!("unused  : {}", res.unused.len());
+        let mut counts: std::collections::BTreeMap<&str, Vec<&String>> = Default::default();
+        for name in &res.unused {
+            counts.entry(class(name)).or_default().push(name);
+        }
+        for (why, names) in &counts {
+            println!("    {:3}  {why}", names.len());
+            if *why == "UNACCOUNTED" {
+                for name in names {
+                    println!("         {name}");
+                }
+            }
+        }
+        println!("errors  : {}", res.errors.len());
+        for e in &res.errors {
+            println!("    ERROR {e:?}");
+        }
+    }
+}
+
 fn main() {
-    let (backend, args) = common::parse_args();
-    let Some(generator) = args.first().cloned() else {
-        eprintln!("usage: load [--backend ndarray|cuda|tch] <G.pth> [D.pth]");
+    let (backend, mut args) = common::parse_args();
+    let contentvec = args.first().is_some_and(|a| a == "contentvec");
+    if contentvec {
+        args.remove(0);
+    }
+
+    let Some(first) = args.first().cloned() else {
+        eprintln!(
+            "usage: load [--backend ndarray|cuda|tch] <G.pth> [D.pth]\n   \
+             or: load [--backend ndarray|cuda|tch] contentvec <hubert_base dir|pytorch_model.bin>"
+        );
         std::process::exit(2);
     };
     println!("backend : {backend}");
-    common::run_on(
-        backend,
-        Load {
-            generator,
-            discriminator: args.get(1).cloned(),
-        },
-    );
+
+    if contentvec {
+        common::run_on(backend, LoadContentVec { weights: first });
+    } else {
+        common::run_on(
+            backend,
+            Load {
+                generator: first,
+                discriminator: args.get(1).cloned(),
+            },
+        );
+    }
 }

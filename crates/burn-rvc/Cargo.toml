@@ -18,6 +18,10 @@ tch = ["burn/tch"]
 [dependencies]
 burn = { version = "0.21", default-features = false, features = ["std"] }
 burn-vits.workspace = true
+# ContentVec is a HuBERT checkpoint, and the architecture is shared with
+# GPT-SoVITS's cnhubert — so `contentvec.rs` wraps that crate rather than
+# restating the network here.
+burn-hubert.workspace = true
 burn-store.workspace = true
 # Checkpoint loading lives in `burn-kit`, shared with every other network crate.
 burn-kit = { workspace = true, features = ["store"] }

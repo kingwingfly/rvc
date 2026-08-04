@@ -982,6 +982,7 @@ name = "burn-rvc"
 version = "0.1.0"
 dependencies = [
  "burn",
+ "burn-hubert",
  "burn-kit",
  "burn-ndarray",
  "burn-store",
