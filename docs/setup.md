@@ -144,7 +144,13 @@ Both default to `auto`, and **both take the same spellings on every binary**.
 | `cuda` | `burn`, `burn-cuda` | native Burn, CubeCL/CUDA kernels | NVIDIA only |
 | `tch` | `libtorch`, `burn-tch` | native Burn, LibTorch | CUDA, MPS, Vulkan, CPU |
 | `wgpu` | `webgpu`, `burn-wgpu` | native Burn, WebGPU | any Vulkan/Metal/DX12 GPU |
-| `auto` *(default)* | | an ONNX export if one is there, else the first available of: LibTorch on a GPU, CubeCL/CUDA, WebGPU, LibTorch on CPU | |
+| `auto` *(default)* | | an ONNX export if one is there, else the first available of: LibTorch on a GPU, CubeCL/CUDA, LibTorch on CPU, WebGPU | |
+
+LibTorch on CPU comes **before** WebGPU because it is the answer to a question
+that was actually asked: LibTorch linked and reporting no GPU means this host has
+none it can reach, whereas WebGPU panics outright when there is no adapter at
+all. Slow beats broken. WebGPU is reached only when nothing was probeable, where
+it is the safer guess than CubeCL — it runs on non-NVIDIA hardware too.
 
 `--device` takes `auto`, `cpu`, `gpu`, `gpu:N`, `mps` or `vulkan`; `cuda` and
 `cuda:N` are accepted spellings of `gpu` and `gpu:N`. Multiple GPUs are

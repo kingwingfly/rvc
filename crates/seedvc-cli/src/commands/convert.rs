@@ -6,6 +6,6 @@ use anyhow::Result;
 
 use crate::args::ConvertArgs;
 
-pub async fn run(_args: ConvertArgs) -> Result<()> {
+pub async fn run(_args: Box<ConvertArgs>) -> Result<()> {
     anyhow::bail!("batch conversion is not wired up yet")
 }

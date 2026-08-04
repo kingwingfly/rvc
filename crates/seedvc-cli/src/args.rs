@@ -25,7 +25,9 @@ pub struct SeedVcCli {
 #[derive(Debug, Subcommand)]
 pub enum SeedVcCommand {
     /// Convert audio files into the reference's voice (WAV output).
-    Convert(ConvertArgs),
+    // Boxed because it carries every model path and every sampler knob on top of
+    // its own two, and clippy is right that `completions` shouldn't pay for that.
+    Convert(Box<ConvertArgs>),
     /// Prefetch the weights a conversion needs, so the first run is offline.
     Download(DownloadArgs),
     /// Print a shell completion script (bash, zsh, fish, powershell, elvish).
