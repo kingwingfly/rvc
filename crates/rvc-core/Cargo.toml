@@ -15,7 +15,13 @@ description = "RVC v2 voice-conversion inference (ort/ONNX) as a streaming Conve
 # `burn` alone gives the *generic* `BurnGenerator<B>` and no concrete compute
 # backend — deliberate, so a consumer picks what it links. `cuda`/`tch` each add
 # one, and both can be on at once: `--backend` then chooses at runtime.
-burn = ["dep:burn", "dep:burn-rvc"]
+#
+# It also brings in the Burn ContentVec and RMVPE (`burn_features.rs`). The two
+# halves are one feature rather than three because they are one decision: a
+# build that wants Burn inference wants all of it, and `--backend`,
+# `--content-vec-backend` and `--rmvpe-backend` are run-time choices over what
+# is linked, never build-time ones.
+burn = ["dep:burn", "dep:burn-rvc", "dep:burn-rmvpe"]
 # CubeCL/CUDA compute backend for the Burn generator.
 cuda = ["burn", "burn/cuda", "burn-kit/cuda"]
 # LibTorch compute backend. Needs a LibTorch install at build time — see
@@ -40,4 +46,5 @@ thiserror.workspace = true
 tracing.workspace = true
 burn = { workspace = true, optional = true }
 burn-rvc = { workspace = true, optional = true }
+burn-rmvpe = { workspace = true, optional = true }
 tch = { workspace = true, optional = true }

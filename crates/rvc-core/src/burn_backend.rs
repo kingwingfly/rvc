@@ -36,11 +36,16 @@ pub struct BurnGenerator<B: Backend> {
 }
 
 impl<B: Backend> BurnGenerator<B> {
-    /// Load the feature extractors and the generator weights
-    /// (`.pth`/`.safetensors`).
+    /// Load the generator weights (`.pth`/`.safetensors`) around an
+    /// already-built [`FeatureExtractor`].
+    ///
+    /// The extractor is a parameter rather than something built here, and that
+    /// is the whole reason `--content-vec-backend` and `--rmvpe-backend` can
+    /// mean anything: this used to take two `.onnx` paths and construct an ONNX
+    /// pair itself, which silently forced the analysis models onto ORT no matter
+    /// what the flags said.
     pub fn load(
-        content: &Path,
-        rmvpe: &Path,
+        extractor: FeatureExtractor,
         weights: &Path,
         model_sr: u32,
         speaker_id: i64,
@@ -72,7 +77,6 @@ impl<B: Backend> BurnGenerator<B> {
             weights.display()
         );
 
-        let extractor = FeatureExtractor::load(content, rmvpe)?;
         Ok(Self {
             extractor,
             model,
@@ -126,8 +130,7 @@ impl<B: Backend> Generator for BurnGenerator<B> {
 /// at run time without depending on `burn`.
 #[cfg(feature = "cuda")]
 pub fn cuda_generator(
-    content: &Path,
-    rmvpe: &Path,
+    features: FeatureExtractor,
     weights: &Path,
     model_sr: u32,
     speaker_id: i64,
@@ -137,7 +140,7 @@ pub fn cuda_generator(
 
     let device = burn_kit::cuda_device(device)?;
     guard_init("cuda", || {
-        BurnGenerator::<Cuda>::load(content, rmvpe, weights, model_sr, speaker_id, &device)
+        BurnGenerator::<Cuda>::load(features, weights, model_sr, speaker_id, &device)
     })?
 }
 
@@ -145,8 +148,7 @@ pub fn cuda_generator(
 /// and the only one that runs on AMD, Intel or Apple GPUs.
 #[cfg(feature = "wgpu")]
 pub fn wgpu_generator(
-    content: &Path,
-    rmvpe: &Path,
+    features: FeatureExtractor,
     weights: &Path,
     model_sr: u32,
     speaker_id: i64,
@@ -156,15 +158,14 @@ pub fn wgpu_generator(
 
     let device = burn_kit::wgpu_device(device)?;
     guard_init("wgpu", || {
-        BurnGenerator::<Wgpu>::load(content, rmvpe, weights, model_sr, speaker_id, &device)
+        BurnGenerator::<Wgpu>::load(features, weights, model_sr, speaker_id, &device)
     })?
 }
 
 /// Load the Burn generator on the LibTorch backend.
 #[cfg(feature = "tch")]
 pub fn libtorch_generator(
-    content: &Path,
-    rmvpe: &Path,
+    features: FeatureExtractor,
     weights: &Path,
     model_sr: u32,
     speaker_id: i64,
@@ -174,6 +175,6 @@ pub fn libtorch_generator(
 
     let device = burn_kit::libtorch_device(device)?;
     guard_init("tch", || {
-        BurnGenerator::<LibTorch<f32>>::load(content, rmvpe, weights, model_sr, speaker_id, &device)
+        BurnGenerator::<LibTorch<f32>>::load(features, weights, model_sr, speaker_id, &device)
     })?
 }

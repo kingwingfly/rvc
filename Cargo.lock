@@ -6338,6 +6338,7 @@ dependencies = [
  "audio-kit",
  "burn",
  "burn-kit",
+ "burn-rmvpe",
  "burn-rvc",
  "futures",
  "ndarray 0.17.2",
