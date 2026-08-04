@@ -43,20 +43,34 @@
 //!   re-integrating the prompt.
 //!
 //! Only the vocoder scales with the block. So halving the block halves the
-//! buffering term, leaves the model term roughly where it was, and close to
-//! doubles the total work over a whole stream.
+//! buffering term and leaves the *per-chunk* model term roughly where it was.
+//! What that costs over a whole stream depends on the reference, and the
+//! measurement below is a good deal kinder than this reasoning implies — a short
+//! reference makes the sampler's per-chunk saving real enough to pay for the
+//! extra encodes.
 //!
 //! ## Measured
 //!
-//! On the maintainer's RTX 2060 with `--backend tch --device gpu` at the default
-//! 30 Euler steps, the batch path converted 7.79 s of source in **10.9 s** of
-//! model time (unit 4's end-to-end run). **The model alone is ~1.4× slower than
-//! realtime on that hardware**, before any per-chunk overhead, and chunking
-//! multiplies the fixed costs above rather than amortising them.
-//! [`StreamParams::realtime`] is therefore named for being the lowest-latency
-//! preset and not for a throughput promise it cannot keep here. What hardware
-//! would keep up is unmeasured; the guess is that it takes both a much faster
-//! device and a lower step count.
+//! On the maintainer's RTX 2060, `--backend tch --device gpu`, 30 Euler steps,
+//! 7.79 s of source against a 6.1 s reference — one file, both paths, from
+//! `examples/stream --compare`:
+//!
+//! | | model time | first chunk out |
+//! |---|---|---|
+//! | batch, one chunk | 11.0 s | 11.0 s |
+//! | stream, `realtime()` (4 chunks) | 12.2 s | **3.1 s** |
+//!
+//! Two things to read off that. **The model alone is ~1.4× slower than realtime
+//! on this hardware**, so a live pipe falls behind whatever the block size is —
+//! [`StreamParams::realtime`] is named for the latency column, not the
+//! throughput one. And chunking cost only 11% more total work here, far less
+//! than the "padded Whisper window per chunk" reasoning above would suggest,
+//! because this reference is short: the sampler's per-chunk saving from a
+//! 188-frame window instead of a 671-frame one paid for three extra Whisper
+//! encodes. **With a 25 s reference that saving mostly disappears** and the
+//! extra encodes are not paid for — that case is unmeasured and the direction is
+//! a guess, not a number. What hardware would keep up is also unmeasured; the
+//! guess is that it takes both a much faster device and fewer steps.
 //!
 //! # The reference and the block compete for one window
 //!
@@ -71,23 +85,35 @@
 //!
 //! # Where a streamed conversion differs from a batch one
 //!
-//! Same model, same crossfade, same grid — but the cuts land differently, and
-//! two of the reasons are worth knowing when the two are compared:
+//! **Given one chunk to work with, nowhere at all.** On the run above with the
+//! block widened past the source's length, the streamed output is *identical* to
+//! the batch path's — energy-envelope correlation 1.0000, RMS ratio 1.0000 —
+//! which is what the shared `room` check, crossfade and `Rng` are for. Getting
+//! there took two corrections worth keeping: [`Converter::flush`] truncates the
+//! frame count where interior cuts round (the batch path's `natural` floors, and
+//! **the frame count sets the noise's width, so one frame of disagreement
+//! re-indexes every value and generates something else**), and it feeds the
+//! whole remainder rather than only the part the frame grid covers.
+//!
+//! Across a chunk boundary the two paths do diverge, because the chunks either
+//! side of a seam are independent generations:
 //!
 //! - **The frame grid is nominal here.** The batch path knows the source's
-//!   length, so it spreads its frames across exactly that many samples; a stream
-//!   uses the preset's own 185.76 samples per frame. The two drift by well under
-//!   a frame per chunk (≈7 ms over 30 s) and neither is wrong, but it means the
-//!   two paths cut in *almost* the same places rather than the same ones.
+//!   length and spreads its frames across exactly that many samples; a stream
+//!   uses the preset's own 185.76. Under a frame per chunk, and it moves where
+//!   an interior cut falls.
 //! - **The last chunk is not balanced**, and a stream can end up to `crossfade`
 //!   frames long. The batch path hands frames back from the penultimate chunk to
 //!   keep the last one usable; a stream has already emitted that audio. If the
 //!   input stops inside the region the last chunk generated, [`Converter::flush`]
-//!   releases that held tail rather than re-generating a fragment — up to 0.19 s
-//!   of audio past where the source ended.
+//!   releases that held tail rather than re-generating a fragment.
 //!
-//! So the honest comparison between the two is a log-spectrogram or
-//! energy-envelope correlation, never a sample-wise difference.
+//! At the realtime preset — four chunks against the batch path's one — the same
+//! clip came back at **0.9111** envelope correlation and an RMS ratio of 0.888,
+//! and `stt` transcribed both to the same sentence, word for word, as it did the
+//! source. So the honest comparison between two chunkings is a log-spectrogram
+//! or energy-envelope correlation and a transcript, never a sample-wise
+//! difference: the seams are phase-independent by construction.
 
 use audio_kit::Samples;
 use burn_seedvc::content::{CONTENT_STRIDE, WINDOW_SAMPLES};
@@ -314,23 +340,30 @@ impl Converter {
     /// Convert what is left and release the withheld crossfade tail.
     ///
     /// The remainder is normally shorter than a block, so this is where a stream
-    /// gets its one undersized chunk. Audio past the last whole frame is dropped,
-    /// and so is an entire stream under one content frame (20 ms) — there is
-    /// nothing for the content encoder to read in either case.
+    /// gets its one undersized chunk. A whole stream under one content frame
+    /// (20 ms) is dropped — there is nothing for the content encoder to read.
     pub fn flush(&mut self) -> Result<Vec<Samples>> {
         let mut outs = Vec::new();
         let start = self.at(self.done);
-        // The inverse of `at`, so the last cut lands on the same grid as every
-        // other one instead of on a second, slightly different, rounding.
-        let end = (((start + self.pending.len()) as f64 / self.per_frame).round() as usize)
-            .max(self.done);
+        // The inverse of `at`, **truncating** where `at` rounds, because this is
+        // the batch path's `natural` rather than one of its interior cuts: a
+        // frame the source does not fill is 11.6 ms of audio nobody said. It is
+        // also what makes the two paths agree exactly on a source they both take
+        // in one chunk — the frame count sets the noise's width, so one frame of
+        // disagreement re-indexes every value and generates something else.
+        let end = (((start + self.pending.len()) as f64 / self.per_frame) as usize).max(self.done);
         let frames = end - self.done;
-        let width = (self.at(end) - start).min(self.pending.len());
 
         // Only worth generating if it reaches past what the last chunk already
         // covered; anything shorter is already in `tail`.
-        if frames > self.chunk - self.block && width >= CONTENT_STRIDE {
-            let wave = self.generate(width, frames)?;
+        //
+        // All of what is left is fed, not just the part the frame grid covers:
+        // the sub-frame remainder is content the source really has, the length
+        // regulator resamples whatever it is given onto `frames` either way, and
+        // feeding it is what makes this identical to the batch path's last
+        // chunk rather than 10 ms short of it.
+        if frames > self.chunk - self.block && self.pending.len() >= CONTENT_STRIDE {
+            let wave = self.generate(self.pending.len(), frames)?;
             self.tail.clear();
             outs.push(wave);
         } else if !self.tail.is_empty() {
