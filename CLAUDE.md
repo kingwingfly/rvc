@@ -205,7 +205,7 @@ an engine depends on must never be named `voice-*` — that is why the shared
 crates are `*-kit`. `voice-cli` is the only `voice-*` crate.
 
 ### Where documentation goes
-Six places, and putting a paragraph in the wrong one is exactly how `README.md`
+Eight places, and putting a paragraph in the wrong one is exactly how `README.md`
 once grew ninety lines of engine manual:
 
 - **`README.md`** is an *index*: what `voice` is, the pipeline, which binary to
@@ -231,6 +231,22 @@ once grew ninety lines of engine manual:
   the same losses, and that `s1` is deliberately not. A per-crate document
   cannot say what two crates share. **A flag's default belongs in the engine
   README, not here** — this page explains the mechanism, the README drives it.
+- **`docs/realtime.md`** is everything true of driving the engines *live*: the
+  sample rate at each end of a pipe, ffmpeg capture and playback, turning a
+  filter into a virtual microphone with `module-pipe-source`, and an honest
+  per-engine latency budget. It exists because the `ffplay` one-liners had been
+  copied into six files with three different output rates between them, and
+  because "can `rvc` be a virtual mic" had a working answer — yes, with no code
+  from us — that lived nowhere. Same division as `setup.md`: **a measurement
+  belongs here, a flag's default belongs in the engine README.** Recipes it
+  could not run are labelled untested *in the page*, not only in a PR body.
+- **`docs/roadmap.md`** is what is *not* built and what each thing would cost.
+  Before it, "not started" existed only as a cell in `README.md`'s engine table,
+  which can record that `translate` is missing but not what blocks it. The
+  division against **this** file is the tense: a decision already **taken** and
+  the trap it avoids goes here, a decision still **open** goes there. Every
+  entry names what actually blocks it, because the value is entirely in the
+  constraint rather than in the wish.
 - **`docs/*.typ`** are the long-form architecture papers, one per network —
   `rvc-architecture`, `gptsovits-architecture`, `whisper-architecture`,
   `seedvc-architecture` — for
@@ -238,9 +254,13 @@ once grew ninety lines of engine manual:
   loss term is for, why the training loop has the shape it does. Typst sources
   with the rendered PDF committed beside them, so reading needs no toolchain;
   rebuild with `typst compile docs/<name>.typ` and commit both.
-- **this file** is the fifth: why a decision was made and which trap it avoids.
+- **this file** is the eighth: why a decision was made and which trap it avoids.
   A fact that would be equally true of any VITS repo belongs in a `.typ` paper;
   a fact that will bite whoever edits this code next belongs here.
+
+That count has been wrong before — the closing bullet said "the fifth" while the
+list held six — so **adding a page means editing the opening line and the
+closing bullet in the same commit**, not only inserting a bullet.
 
 ## Build / run / verify
 
@@ -274,6 +294,8 @@ cargo build --release --no-default-features --features cuda
 # Correctness of the Burn port is checked by loading REAL pretrained weights
 # (there are no unit tests for the network) — reports applied/missing/unused:
 cargo run -p burn-rvc --example load -- <path/to/f0G48k.pth>       # 560/0, 165/0
+cargo run -p burn-rvc --example load -- contentvec <path/to/hubert_base>  # 210/0
+cargo run -p burn-rmvpe --example load -- <path/to/rmvpe.pt>       # 623/0/118
 cargo run -p burn-whisper --example load -- <path/to/model.safetensors>  # 587/0
 cargo run -p burn-gptsovits --example load -- hubert <chinese-hubert-base/pytorch_model.bin>  # 210/0
 cargo run -p burn-gptsovits --example keys -- --group <any checkpoint>   # what names to mirror
@@ -317,6 +339,46 @@ back through the PyTorch path is what `load_burn_safetensors_into` exists to
 prevent. Rectangular weights fail loudly on `ShapeMismatch`; a square one would
 load "fine" and be silently scrambled. `burn-kit`'s round-trip test pins it.
 
+**PyTorch's weight norm has two spellings on disk, and which one a checkpoint
+uses says nothing about the model.** `torch.nn.utils.weight_norm` writes
+`weight_g`/`weight_v`; `torch.nn.utils.parametrizations.weight_norm`, which
+supersedes it, writes `parametrizations.weight.original0`/`original1` for the
+same two tensors in the same order. Two HuBERT checkpoints of the *same*
+architecture differ by exactly this — `chinese-hubert-base` is the old spelling,
+RVC's ContentVec the new one — so `burn-hubert` accepts both. Getting it wrong is
+silent: the two parameters simply go missing and the positional convolution keeps
+its initialised values, which is a mis-scaled position embedding rather than an
+error. `missing` in an `ApplyResult` is the only thing that shows it, which is
+why a coverage report is *read* rather than glanced at (ContentVec first loaded
+at 208/2). Accepting both spellings left `chinese-hubert-base` untouched, checked
+rather than assumed: `burn-gptsovits`'s `examples/load -- hubert` still reports
+210/0 afterwards.
+
+**A layer upstream builds conditionally is an `Option`, always.** RMVPE's
+`ConvBlockRes` creates its 1×1 residual shortcut only when the block changes
+channel count, and probes it with `hasattr`, so 45 of the 56 blocks in `rmvpe.pt`
+have no `shortcut.*` key at all. Modelling it as `Option<Conv2d<B>>` is what
+makes that a load with **nothing** missing, rather than 90 absent parameters a
+reader has to talk themselves out of. `burn-seedvc`'s CAMPPlus has the same shape
+for the same reason, so this is the pattern and not a one-off.
+
+**`torch.nn.GRU`'s storage is not Burn's, and the difference is silent.** PyTorch
+concatenates the three gates into one `weight_ih_l0` of `[3 * hidden, input]`,
+while Burn's `nn::Gru` holds three separate `GateController`s — and a
+`KeyRemapper` renames keys, it cannot cut one tensor into three. So
+`burn_rmvpe::gru::BiGru` carries PyTorch's own field names (`weight_ih_l0`,
+`weight_hh_l0`, `bias_ih_l0`, `bias_hh_l0` and their `_reverse` twins) and its own
+forward pass. Two details of that pass have to be right and neither is visible to
+a coverage count: the gate order is **`r, z, n`**, and `bias_ih` and `bias_hh`
+stay **separate**, because PyTorch computes
+`n = tanh(W_in x + b_in + r * (W_hn h + b_hn))` — `b_hn` is applied *inside* the
+reset gating, so fusing the biases moves it outside and changes the answer
+wherever `r != 1`, which is everywhere. Either mistake loads at 100%, produces
+finite output, and predicts the wrong pitch confidently. A scalar reference
+written straight from PyTorch's documented equations pins both, and a second test
+pins that the reverse direction actually travels backwards — running it forwards
+and storing it at the same index passes every shape and finiteness check there is.
+
 **tokio's `BufWriter` bypasses its own buffer for any single write at or above
 capacity (8 KiB)**, so a filter that writes large chunks and forgets to flush
 *looks* like it streams: at realistic sample rates most of each chunk goes
@@ -328,6 +390,19 @@ run-to-run variance, while at `--sr 1600`, where a whole utterance fits the
 buffer, it was unambiguous — two lines released in one lump before, one release
 per utterance after, with byte totals identical either way.
 
+**Two ways of driving a filter live look identical to a hung model, and neither
+is one** (both measured, in `docs/realtime.md`). Writing into a pipe source with
+**nothing capturing**: the FIFO holds about 64 KiB — a third of a second at
+48 kHz mono `f32` — the sound server only drains it while some application is
+recording, so the engine blocks until a consumer opens the device. A writer
+feeding 10 s of audio was still blocked 60 s later. With **something capturing
+but the engine behind**: there is no backpressure to apply, so the device
+underruns and substitutes **silence**, and the delay therefore never grows — an
+output that is quietly part silence rather than a glitch you can hear. `rvc`'s
+model load is the most visible case, 18 s of `underrun 0 < 8192` before the first
+sample. Into a *pipe* the same shortfall shows up as the opposite symptom, an
+unbounded delay, because the reader does apply backpressure.
+
 Requires **ffmpeg 8.1** dev libraries (and the `ffmpeg` binary for the realtime
 filter examples, which is what captures and plays PCM at either end of the pipe).
 A system package needs no configuration; `FFMPEG_DIR` names your own build at
@@ -336,8 +411,9 @@ afterwards, and
 `crates/audio-kit/build.rs` refuses a build that has an unpacked `./ffmpeg` at
 the project root without naming it — `ffmpeg-sys-next` would not look there, and
 its pkg-config failure never mentions the directory sitting in front of you.
-ContentVec + RMVPE ONNX assets auto-download from Hugging Face (the `download`
-subcommand prefetches them). Only 48 kHz is supported today.
+ContentVec + RMVPE auto-download from Hugging Face in whichever of the two
+weight formats the chosen backend reads (the `download` subcommand prefetches
+them, and takes `--backend` so it knows which). Only 48 kHz is supported today.
 
 ### Exit 134 when an ORT session drops (RTX 2060, accepted)
 Dropping an ONNX Runtime session on the CUDA execution provider aborts with
@@ -383,9 +459,11 @@ Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper
 |-------|------|
 | `burn-kit` | Burn plumbing with no model knowledge: `--device` resolution and checkpoint loading, shared by every network crate |
 | `audio-kit` | ffmpeg decode/resample + WAV/raw-PCM I/O, all as `futures::Stream<f32>` |
-| `rvc-core` | the voice-conversion pipeline: `FeatureExtractor` (ContentVec + RMVPE), coarse-pitch/upsample/pitch-shift DSP, streaming `Converter` (block/overlap with an **overlapping** crossfade — consecutive kept blocks share `xf_out` output samples so the blend adds, never deletes, audio), an optional post de-hiss stage (`denoise.rs`, `--denoise`), and **all three** generator backends (ort, Burn/LibTorch, Burn/CubeCL) behind one `Generator` trait |
+| `rvc-core` | the voice-conversion pipeline: `FeatureExtractor` (ContentVec + RMVPE), coarse-pitch/upsample/pitch-shift DSP, streaming `Converter` (block/overlap with an **overlapping** crossfade — consecutive kept blocks share `xf_out` output samples so the blend adds, never deletes, audio), an optional post de-hiss stage (`denoise.rs`, `--denoise`), and **all three** generator backends (ort, Burn/LibTorch, Burn/CubeCL) behind one `Generator` trait. The two *feature* models have the same run-time choice behind `ContentEncoder`/`PitchEstimator` (`analysis.rs`, implemented in `encoder.rs`/`f0.rs` for ORT and `burn_features.rs` for Burn), picked independently of each other and of the generator |
 | `burn-vits` | the VITS blocks RVC and GPT-SoVITS share (both descend from the same source, which is why their `state_dict` names line up): attention stack, `Wn`, flow, posterior encoder, `ResBlock1`, weight-norm convs, discriminators, the family's losses, the differentiable STFT |
-| `burn-rvc` | what is RVC's alone: `SourceModule` (NSF), the 768-dim `TextEncoder`, `GeneratorNsf`, the synthesizer wiring; re-exports `burn-vits` so it still reads as one model |
+| `burn-rvc` | what is RVC's alone: `SourceModule` (NSF), the 768-dim `TextEncoder`, `GeneratorNsf`, the synthesizer wiring; re-exports `burn-vits` so it still reads as one model. Also `ContentVec` — RVC's *readout* of `burn-hubert` and nothing more, since the network is shared. **RVC v2 takes the final (12th) encoder layer directly** where v1 took layer 9 through `final_proj`, so that head sits in the checkpoint wired to nothing, and `hubert_base/config.json` is `HubertConfig::chinese_base()` field for field (pinned as a constant rather than parsed, so a disagreeing checkpoint fails as a shape mismatch). `examples/load -- contentvec <hubert_base>` reports 210/0 |
+| `burn-hubert` | the HuBERT SSL encoder, its own crate because **two engines read it**: GPT-SoVITS calls it cnhubert, and RVC's ContentVec is the same architecture with other weights. `hidden_states` returns every layer rather than only the last, which is what makes a variant that reads a different layer a choice of index instead of a second port. Lifted out of `burn-gptsovits` with no field renamed, and that extraction is the cleanest proof on record of **Moving a module between crates is free** — the load example still reports 210/0 afterwards. It carries no `cuda`/`tch` features, because those exist to give a crate's *examples* a backend and this network's coverage harness stays `burn-gptsovits`'s |
+| `burn-rmvpe` | the RMVPE pitch network, upstream's `E2E(4, 1, (2, 2))`: a five-level U-net, a `Conv2d(16 → 3, 3×3)` head, one bidirectional GRU (384 → 256 each way) and `Linear(512, 360)`. `[batch, 128, T]` log-mel in, `[batch, T, 360]` cents salience out — the mel front end (`rvc-core`'s `mel.rs`) and the salience→Hz decode (`dsp::rmvpe_decode`) stay in `rvc-core` so both runtimes share them, rather than giving the two backends a chance to disagree about something neither computes. `rmvpe.pt` loads at **623/0/118**, the unused being one `num_batches_tracked` per `BatchNorm`. Aligning the frame count to a multiple of 32 is `forward`'s job, not the caller's |
 | `burn-whisper` | the Whisper network (standalone Burn port); mirrors HF's `state_dict` layout so `openai/whisper-large-v3-turbo` loads unchanged |
 | `burn-gptsovits` | the GPT-SoVITS network. `hubert` at 210/0, `quantizer` at 3/0, and `s2` complete at 773/0 (the 3 unused are the codebook's EMA training statistics). **`s2` is verified numerically, not just structurally**: `examples/reconstruct` round-trips real audio through cnhubert, the quantiser and the synthesizer, and the output tracks the source's energy envelope at r=0.91 against a chance baseline of 0.30. `t2s` (`s1`) is at 295/0. Every network of GPT-SoVITS is now ported; `tts-core`/`tts-cli` wire them into a working `tts`, and `tts-train` fine-tunes **both** stages — `s1` for delivery, `s2` for timbre. `SovitsPartial::forward_train` composes `enc_q` → `flow.forward` → random segment → `dec` and returns the five tensors the VITS losses need; the matching `s2D2333k.pth` discriminator loads at 111/0/0. `examples/keys` lists any checkpoint's tensors, which is the first thing to run against a new one |
 | `rvc-train` | native Rust/Burn adversarial training loop (see `docs/training.md`) |
@@ -519,12 +597,76 @@ plan was to port `rvc-core`'s ContentVec and RMVPE to Burn *in order to* drop
 ONNX Runtime from the toolkit entirely and take `ORT_DYLIB_PATH` out of setup.
 Backend choice turned out to be worth more than one environment variable: people
 deploy where they deploy, and on plenty of targets ORT is the only runtime
-available. Porting ContentVec and RMVPE is still worth doing — it would give
-`rvc`'s feature extraction the same run-time choice its generator already has,
-and demote ORT from a hard requirement to an option — but as an **addition**.
-ContentVec is a HuBERT variant, so `burn-gptsovits`'s `hubert.rs` already covers
-its architecture; doing it means lifting that module into a `burn-hubert` of its
-own, since two engines would then share it.
+available. So the port happened as an **addition**, and ORT stays a supported
+target for both models rather than being demoted.
+
+**That port has landed, and the prediction it replaces was right about the
+shape.** ContentVec is a HuBERT variant, so `burn-gptsovits`'s `hubert.rs` did
+cover its architecture, and it was lifted into `burn-hubert` first because two
+engines now share it — the "anything two of them need moves to a neutral crate
+first" rule applied *before* the second reader arrived rather than after. RMVPE
+needed a network of its own (`burn-rmvpe`). `rvc` therefore joins `tts` in
+reaching the target: every model it runs runs either way, chosen at run time.
+
+Four things about that choice are worth having written down:
+
+- **The two feature models choose separately from the generator and from each
+  other.** `--content-vec-backend` and `--rmvpe-backend` override `--backend`
+  per model and default to it, because a conversion is three models and only one
+  of them was ever a choice. They default to the **already-resolved** generator
+  backend, never the raw `--backend`: resolving `auto` twice would let a `.onnx`
+  generator settle on ORT while its feature models independently re-derived
+  `auto` from the hardware. `--rmvpe-backend auto` therefore means *inherit*,
+  not *re-derive* — `Backend::Auto` is not a runtime and would reach
+  `weight_format` matching no arm.
+- **A backend decides which *file* is downloaded, and that mapping lives in
+  `rvc-cli` (`args::weight_format`) because it is the only crate entitled to
+  know both halves.** `cli-kit` owns `Backend` and states that it knows nothing
+  about weight formats; `hub-kit` owns `WeightFormat` and must not depend on
+  `cli-kit`. RMVPE's two formats are a one-word filename change inside the same
+  first-party `lj1995/VoiceConversionWebUI` repo (`rmvpe.onnx` / `rmvpe.pt`), so
+  the torch arm was nearly free — but ContentVec's torch form is a **directory**
+  (`hubert_base/` = weights, config, preprocessor) where the ONNX one is a single
+  community-mirrored file, so `fetch_contentvec` follows `fetch_whisper`'s
+  multi-file shape. Only the engine in the middle knows that asymmetry.
+  `rvc download` gained `--backend` for the same reason: with no `-m` to inspect
+  it could only guess, it used to guess ONNX, and prefetching the wrong format
+  leaves the first real run downloading anyway.
+- **The pure-ORT early return in `build_converter` demands that all three models
+  agree on ONNX, which is not the same test as `backend == Onnx`.** `RvcModel`
+  is *one fused pipeline*, built from a single `RvcConfig`/`ModelPaths` naming
+  all three graphs at once, so an ONNX generator with a LibTorch RMVPE cannot be
+  described to it at all; anything mixed takes the generic path, which composes a
+  `FeatureExtractor` from separately chosen parts. Simplifying the condition back
+  reads as identical and silently discards both flags.
+- **`rvc train`'s feature backends default to `onnx`, not to `--backend`, and the
+  reason is not that ORT cannot train.** Feature extraction is not training — it
+  runs once over the corpus before the loop starts. It is that `rvc-train` builds
+  its own `FeatureExtractor` from two paths and that constructor is ONNX-only, so
+  inheriting `--backend tch` would fetch `rmvpe.pt`, hand it to an ORT session
+  builder and break the recommended training command. A Burn backend named there
+  is an **error with a reason**, never a quiet downgrade — somebody who asked for
+  it must not come away believing the corpus was analysed on Burn. When the
+  trainer takes a prebuilt extractor, the exception goes away.
+
+**The numbers are the point, because coverage would not have caught a wrong gate
+order.** ContentVec on Burn against ContentVec on ORT: per-frame cosine
+**1.000000** as both mean and minimum, with identical frame counts — where
+comparing frame *i* against frame *i + T/2* gives 0.004, so that is agreement and
+not a degenerate metric. RMVPE, network against network on one shared mel:
+**0.70 Hz** mean absolute F0 difference over 406 jointly voiced frames at
+correlation **0.9932–0.9996**; driven through `FeatureExtractor` itself on four
+clips, **0.11–1.11 Hz**. A swapped GRU gate or a fused bias does not perturb a
+contour by fractions of a hertz, it decorrelates it.
+
+**That residual is a known difference and not a defect to reconcile.** The U-net
+wants a multiple of 32 frames; `Rmvpe::forward` pads with **zeros**, which is
+upstream's `F.pad(mode="constant")` and therefore what the published weights were
+actually run with, while `rvc-core`'s `f0.rs` reflect-pads by hand for the ONNX
+path. Both trim afterwards, so the two can only differ over the last ≤ 31 frames
+— except that the GRU's reverse half carries a little of it back across the whole
+clip, which is why the disagreement is not confined to the tail.
+`crates/rvc-core/examples/f0_runtimes` is the check.
 
 ### `s1` generates by continuation (`tts-core`)
 The reference's **transcript** is part of the prompt, not metadata: `s1` is shown
@@ -716,7 +858,8 @@ Three changes *are* real, and each was deliberately not adopted:
   no inference path — but `burn_vits::spectral` is shared with `tts-train`, where
   GPT-SoVITS upstream still uses 1e-5, so lowering it silently would move two
   engines' loss scales and invalidate every recorded number. **Worth trying for
-  ASMR, as a measured change with both engines re-baselined, not as a fix.**
+  soft, close-mic material, as a measured change with both engines re-baselined,
+  not as a fix.**
 - **The long-file split search was fixed**: 2.2 accumulated *signed* samples
   (`audio_sum += audio_pad[i : i - window]`) and only then took `np.abs`, so a
   loud symmetric waveform sums to ≈0 and could be chosen as the quietest cut
@@ -827,10 +970,10 @@ releases used unmodified. All four are inference assets, so all four go to the
 shared cache and there is no `pretrained/` counterpart — a warm-start base is a
 training input, and this engine has no training.
 
-**`examples/load` now collides four ways.** `burn-rvc`, `burn-whisper`,
-`burn-gptsovits` and `burn-seedvc` each have one, so cargo's "output filename
-collision" warning names four crates rather than two. It is the hazard the next
-section describes, not noise.
+**`examples/load` now collides five ways.** `burn-rvc`, `burn-whisper`,
+`burn-gptsovits`, `burn-seedvc` and `burn-rmvpe` each have one, so cargo's
+"output filename collision" warning names five crates rather than two. It is the
+hazard the next section describes, not noise.
 
 ### The shared target directory is unsafe for concurrent worktrees
 `target/debug/examples/<name>` is **not** hashed per worktree, so two checkouts
@@ -943,7 +1086,7 @@ windows uniformly across each corpus file, so raw recordings full of
 between-sentence dead-air collapse the generator to silence. `rvc preprocess
 raw/*.mp3 -o clips/` then `rvc train clips/*.wav ...` slices the corpus into
 clean per-sentence clips first — it removes between-sentence dead-air while
-**preserving soft/breathy ASMR content** (energy is used only to find long
+**preserving soft, breathy, close-mic content** (energy is used only to find long
 silent gaps, never to gate quiet-but-present sound). The shared slicer lives in
 `crates/audio-kit/src/slice.rs` (`SliceOptions`, `slice`); the two tuning knobs
 are `--silence-db` (energy floor; lower to keep the softest passages) and
