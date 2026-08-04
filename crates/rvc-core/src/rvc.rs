@@ -8,18 +8,19 @@
 use ort::session::Session;
 use ort::value::Tensor;
 
+use crate::analysis::{ContentEncoder, PitchEstimator};
 use crate::config::ConvertParams;
 use crate::config::{CONTENT_DIM, RvcConfig};
 use crate::dsp::{f0_to_coarse, shift_pitch, upsample_rows};
-use crate::encoder::ContentEncoder;
+use crate::encoder::OnnxContentEncoder;
 use crate::error::{Result, VcError};
-use crate::f0::F0Estimator;
+use crate::f0::OnnxPitchEstimator;
 use crate::session::build_session;
 
 /// Loaded RVC pipeline ready to convert audio.
 pub struct RvcModel {
-    encoder: ContentEncoder,
-    f0: F0Estimator,
+    encoder: OnnxContentEncoder,
+    f0: OnnxPitchEstimator,
     generator: Session,
     cfg: RvcConfig,
     rng: Xorshift,
@@ -28,8 +29,8 @@ pub struct RvcModel {
 impl RvcModel {
     /// Load all three ONNX models described by `cfg`.
     pub fn load(cfg: RvcConfig) -> Result<Self> {
-        let encoder = ContentEncoder::new(build_session(&cfg.models.content)?);
-        let f0 = F0Estimator::new(build_session(&cfg.models.rmvpe)?, cfg.f0_threshold);
+        let encoder = OnnxContentEncoder::new(build_session(&cfg.models.content)?);
+        let f0 = OnnxPitchEstimator::new(build_session(&cfg.models.rmvpe)?, cfg.f0_threshold);
         let generator = build_session(&cfg.models.generator)?;
         Ok(Self {
             encoder,

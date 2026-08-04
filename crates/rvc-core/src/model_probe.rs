@@ -13,8 +13,9 @@
 
 use std::io::Read;
 
-use crate::encoder::ContentEncoder;
-use crate::f0::F0Estimator;
+use crate::analysis::{ContentEncoder, PitchEstimator};
+use crate::encoder::OnnxContentEncoder;
+use crate::f0::OnnxPitchEstimator;
 use crate::session::build_session;
 
 fn read_f32le(path: &str) -> Vec<f32> {
@@ -39,7 +40,7 @@ fn probe_shared_models() {
     let audio = read_f32le(&wav);
     eprintln!("audio samples: {}", audio.len());
 
-    let mut enc = ContentEncoder::new(build_session(&content).expect("load contentvec"));
+    let mut enc = OnnxContentEncoder::new(build_session(&content).expect("load contentvec"));
     let feats = enc.extract(&audio).expect("contentvec extract");
     eprintln!(
         "contentvec frames: {}  dim: {}",
@@ -56,7 +57,7 @@ fn probe_shared_models() {
         eprintln!("rmvpe output `{}`: {:?}", o.name(), o.dtype());
     }
 
-    let mut f0 = F0Estimator::new(sess, 0.03);
+    let mut f0 = OnnxPitchEstimator::new(sess, 0.03);
     let pitch = f0.extract(&audio).expect("rmvpe extract");
     let voiced = pitch.iter().filter(|&&x| x > 0.0).count();
     eprintln!("rmvpe frames: {}  voiced: {}", pitch.len(), voiced);

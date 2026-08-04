@@ -6,11 +6,12 @@
 
 use std::path::Path;
 
+use crate::analysis::{ContentEncoder, PitchEstimator};
 use crate::config::ANALYSIS_SR;
 use crate::dsp::upsample_rows;
-use crate::encoder::ContentEncoder;
+use crate::encoder::OnnxContentEncoder;
 use crate::error::Result;
-use crate::f0::F0Estimator;
+use crate::f0::OnnxPitchEstimator;
 use crate::session::build_session;
 
 /// Default window (16 kHz samples ≈ 10 s) for chunked extraction — keeps the
@@ -29,22 +30,50 @@ pub struct Features {
     pub f0: Vec<f32>,
 }
 
-/// Builds and holds the ContentVec + RMVPE ONNX sessions for repeated use.
+/// Holds whichever content encoder and pitch estimator the caller chose.
+///
+/// The two are independent: nothing here requires them to run on the same
+/// backend, which is the whole point of `--content-vec-backend` and
+/// `--rmvpe-backend` being separate flags.
 pub struct FeatureExtractor {
-    content: ContentEncoder,
-    f0: F0Estimator,
+    content: Box<dyn ContentEncoder>,
+    f0: Box<dyn PitchEstimator>,
 }
 
 impl FeatureExtractor {
     /// The analysis sample rate feature extraction expects (16 kHz mono).
     pub const ANALYSIS_SR: u32 = ANALYSIS_SR;
 
-    /// Load the ContentVec and RMVPE ONNX models from disk.
+    /// Load the ContentVec and RMVPE **ONNX** models from disk.
+    ///
+    /// Kept as the convenience it always was, since the pure-ORT path builds
+    /// exactly this pair. Anything else goes through [`Self::from_parts`].
     pub fn load(content_onnx: &Path, rmvpe_onnx: &Path) -> Result<Self> {
-        let content = ContentEncoder::new(build_session(content_onnx)?);
-        let f0 = F0Estimator::new(build_session(rmvpe_onnx)?, F0_THRESHOLD);
-        Ok(Self { content, f0 })
+        Ok(Self::from_parts(
+            Box::new(OnnxContentEncoder::new(build_session(content_onnx)?)),
+            Box::new(OnnxPitchEstimator::new(
+                build_session(rmvpe_onnx)?,
+                F0_THRESHOLD,
+            )),
+        ))
     }
+
+    /// Assemble from two already-built models.
+    ///
+    /// Deciding *which* implementations these are belongs to the binary, not to
+    /// this crate — the same division `stt-cli` and `tts-cli` use, where the
+    /// core defines the trait and the CLI constructs the engine. It is what
+    /// keeps `rvc-core` free of any backend enum.
+    pub fn from_parts(content: Box<dyn ContentEncoder>, f0: Box<dyn PitchEstimator>) -> Self {
+        Self { content, f0 }
+    }
+
+    /// The RMVPE voicing threshold this toolkit uses everywhere (0.03).
+    ///
+    /// Exposed so a caller building a non-ONNX [`PitchEstimator`] uses the same
+    /// number rather than picking its own — the threshold decides which frames
+    /// come out as 0, and 0 is what switches the generator to its noise branch.
+    pub const F0_THRESHOLD: f32 = F0_THRESHOLD;
 
     /// Extract content vectors and F0 from a mono **16 kHz** `f32` buffer.
     ///

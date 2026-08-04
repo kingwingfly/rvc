@@ -2,6 +2,7 @@
 
 use ort::session::Session;
 
+use crate::analysis::PitchEstimator;
 use crate::config::RMVPE_BINS;
 use crate::dsp::{locate_axis, rmvpe_decode, to_time_major};
 use crate::error::Result;
@@ -9,13 +10,13 @@ use crate::mel::RmvpeMel;
 use crate::session::run_single_f32;
 
 /// Wraps the RMVPE ONNX session and yields an F0 (Hz) contour at 100 Hz.
-pub struct F0Estimator {
+pub struct OnnxPitchEstimator {
     session: Session,
     mel: RmvpeMel,
     threshold: f32,
 }
 
-impl F0Estimator {
+impl OnnxPitchEstimator {
     /// Wrap an already-built session with the given voicing threshold.
     pub fn new(session: Session, threshold: f32) -> Self {
         Self {
@@ -24,14 +25,16 @@ impl F0Estimator {
             threshold,
         }
     }
+}
 
+impl PitchEstimator for OnnxPitchEstimator {
     /// Estimate the F0 (Hz) contour from a mono 16 kHz `f32` buffer.
     ///
     /// RMVPE consumes a `[1, 128, T]` log-mel magnitude spectrogram and emits a
     /// `[1, T, 360]` cents-bin salience, which we decode to Hz. The UNet halves
     /// time several times, so the frame count is reflect-padded to a multiple of
     /// 32 before inference and the salience is trimmed back afterwards.
-    pub fn extract(&mut self, wav16k: &[f32]) -> Result<Vec<f32>> {
+    fn extract(&mut self, wav16k: &[f32]) -> Result<Vec<f32>> {
         let (n_mels, time, data) = self.mel.compute(wav16k);
         if time == 0 {
             return Ok(Vec::new());

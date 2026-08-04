@@ -11,6 +11,7 @@
 //! so the conversion CLI is a plain Unix filter and a realtime service is a thin
 //! wrapper.
 
+mod analysis;
 mod backend;
 mod config;
 mod convert;
@@ -30,6 +31,7 @@ mod burn_backend;
 #[cfg(test)]
 mod model_probe;
 
+pub use analysis::{ContentEncoder, PitchEstimator};
 pub use backend::Generator;
 #[cfg(feature = "burn")]
 pub use burn_backend::BurnGenerator;
