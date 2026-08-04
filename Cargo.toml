@@ -16,6 +16,7 @@ members = [
     "crates/burn-vits",
     "crates/burn-gptsovits",
     "crates/burn-whisper",
+    "crates/burn-rmvpe",
     "crates/burn-seedvc",
     "crates/seedvc-core",
     "crates/seedvc-cli",
@@ -56,6 +57,7 @@ burn-kit = { path = "crates/burn-kit" }
 burn-vits = { path = "crates/burn-vits" }
 burn-gptsovits = { path = "crates/burn-gptsovits" }
 burn-whisper = { path = "crates/burn-whisper" }
+burn-rmvpe = { path = "crates/burn-rmvpe" }
 burn-seedvc = { path = "crates/burn-seedvc" }
 seedvc-core = { path = "crates/seedvc-core" }
 # `default-features = false` for the same reason as the other `*-cli` crates:
