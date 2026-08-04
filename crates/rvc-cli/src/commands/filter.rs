@@ -39,6 +39,7 @@ pub async fn run(args: FilterArgs) -> Result<()> {
 
     let converter = build_converter(
         &args.models,
+        args.features,
         args.backend,
         args.device,
         args.transpose,

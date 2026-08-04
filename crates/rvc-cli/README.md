@@ -62,6 +62,47 @@ three Burn backends train, and the weights they write are interchangeable.
 Naming a backend or device that is unavailable is an **error with a reason**,
 never a silent fallback; only `auto` substitutes.
 
+### The two feature models pick their own runtime
+
+A conversion runs three models, not one: the ContentVec content encoder, the
+RMVPE F0 estimator and the generator. `--backend` sets all three, and
+`--content-vec-backend` and `--rmvpe-backend` override it per model. Both take
+the same spellings and aliases as `--backend`, and both **default to whatever
+`--backend` resolved to**, so a single flag still configures the whole pipeline.
+
+```sh
+# everything on LibTorch
+rvc convert -m models/voice.safetensors --backend tch -o out/ in.mp3
+
+# LibTorch generator and content encoder, but keep RMVPE on ONNX Runtime
+rvc convert -m models/voice.safetensors --backend tch --rmvpe-backend onnx -o out/ in.mp3
+```
+
+The reason it matters beyond taste is the **download**: ONNX Runtime and Burn
+read different published files — a single `vec-768-layer-12.onnx` against
+`hubert_base/`'s weights, config and preprocessor; `rmvpe.onnx` against
+`rmvpe.pt` — and the resolved backend is what decides which gets fetched. That
+is why `download` carries `--backend` too: with no `-m` to inspect it cannot
+otherwise know, and prefetching the wrong format leaves the first real run
+downloading anyway.
+
+```sh
+rvc download --backend onnx    # the ONNX pair
+rvc download --backend tch     # the PyTorch pair
+```
+
+`--content` and `--rmvpe` still name a path directly and bypass the choice
+entirely, which is the escape hatch when a mirror this doesn't know about has
+the file you want.
+
+**Two limits, both real today.** `train`'s feature extraction is ONNX whichever
+backend trains the generator — the trainer builds its own extractor and that
+constructor is ONNX-only — so the two flags accept `onnx` there and refuse a
+Burn backend rather than downgrading it quietly; `--backend tch` still trains on
+LibTorch. And on the conversion path the Burn ContentVec and RMVPE are **not
+wired up yet**: the flags parse, resolve and select the download, and the
+converter refuses a Burn feature model with a message saying so.
+
 ## Train a voice
 
 The timbre lives in a trained generator: train once on the *target* voice, then
@@ -141,8 +182,9 @@ uv run --project export python export/export_rvc.py models/voice.safetensors mod
 
 ## Where files land
 
-ContentVec, RMVPE and the warm-start bases all go to the shared cache —
-`--cache-dir` or `$RVC_CACHE_DIR`, resolved as
+ContentVec, RMVPE and the warm-start bases all go to the shared cache — one copy
+per weight format, so switching backends adds a download rather than replacing
+one — under `--cache-dir` or `$RVC_CACHE_DIR`, resolved as
 [`docs/setup.md`](../../docs/setup.md#where-models-are-stored) describes and
 printed by `-h`. An output directory holds only what the run produced — which
 includes its log: `-o models/voice` under the dashboard writes

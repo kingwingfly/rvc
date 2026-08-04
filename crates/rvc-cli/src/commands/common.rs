@@ -1,5 +1,6 @@
-//! Shared helpers: resolve ONNX assets, build an [`RvcConfig`], and construct a
-//! backend-agnostic [`Converter`] for both the streaming filter and `convert`.
+//! Shared helpers: resolve the feature-model assets, build an [`RvcConfig`], and
+//! construct a backend-agnostic [`Converter`] for both the streaming filter and
+//! `convert`.
 
 use std::path::{Path, PathBuf};
 
@@ -10,7 +11,7 @@ use rvc_core::{
     ConvertParams, Converter, DenoiseParams, ModelPaths, RvcConfig, RvcModel, StreamParams,
 };
 
-use crate::args::{Backend, ModelOpts};
+use crate::args::{Backend, FeatureBackendOpts, FeatureBackends, ModelOpts, weight_format};
 
 /// Resolve `--backend` against the weights and the hardware present.
 ///
@@ -26,6 +27,7 @@ pub fn resolve_backend(backend: Backend, model: &Path) -> Backend {
 /// block/overlap/crossfade code drives either the ONNX or the Burn generator.
 pub async fn build_converter(
     opts: &ModelOpts,
+    feature_opts: FeatureBackendOpts,
     backend: Backend,
     device: DeviceSpec,
     transpose: i32,
@@ -35,14 +37,34 @@ pub async fn build_converter(
     let conv_params = ConvertParams { transpose };
     let model = opts.model()?;
     let backend = resolve_backend(backend, model);
+    let features = feature_opts.resolve(backend);
 
-    if backend == Backend::Onnx {
-        let cfg = build_rvc_config(opts).await?;
+    // The pure-ORT path is **one fused pipeline, not three independent models**:
+    // [`RvcModel`] is built from a single [`RvcConfig`]/[`ModelPaths`] naming all
+    // three graphs at once, and there is no way to describe an ONNX generator
+    // whose RMVPE runs on LibTorch to it. That is why this is an early return
+    // and not a fourth arm of the match below — and why it demands that all
+    // three agree. Any mixed configuration goes the generic way instead, which
+    // composes a `FeatureExtractor` out of separately chosen parts and hands it
+    // to a boxed `Generator`.
+    //
+    // Do not "simplify" this back to `if backend == Backend::Onnx`: that reads
+    // as the same thing and quietly forces both feature models onto the
+    // generator's runtime, discarding whatever the two override flags said.
+    if backend == Backend::Onnx
+        && features.content == Backend::Onnx
+        && features.rmvpe == Backend::Onnx
+    {
+        let (content, rmvpe) = resolve_feature_models(opts, features).await?;
+        let cfg = build_rvc_config(opts, content, rmvpe)?;
         let onnx = RvcModel::load(cfg).context("failed to load RVC models")?;
         return Ok(Converter::new(onnx, params, conv_params).with_denoise(denoise));
     }
 
-    let (content, rmvpe) = resolve_feature_models(opts).await?;
+    // Before the fetch, not after: refusing a configuration is worth a second,
+    // and the PyTorch ContentVec alone is ~190 MB to download and throw away.
+    ensure_features_are_onnx(features)?;
+    let (content, rmvpe) = resolve_feature_models(opts, features).await?;
     anyhow::ensure!(
         model.exists(),
         "generator weights not found: {} (train one with the `train` subcommand)",
@@ -112,51 +134,95 @@ pub async fn build_converter(
     Ok(converter.with_denoise(denoise))
 }
 
-/// Resolve the ContentVec and RMVPE ONNX paths (downloading when not provided).
-/// Used by the Burn inference path, which needs the feature extractors but not
-/// the ORT generator session.
-pub async fn resolve_feature_models(opts: &ModelOpts) -> Result<(PathBuf, PathBuf)> {
+// ---------------------------------------------------------------------------
+// The block the `rvc-core` unit's PR replaces.
+//
+// Every generator constructor still takes the two feature-model *paths* and
+// builds an ONNX `FeatureExtractor` itself, so a Burn ContentVec or RMVPE has
+// nowhere to go on this branch — everything above it (the flags, the format
+// mapping, the fetch selection) is ready, and this is the one thing that is
+// not. Once `rvc-core` exposes
+//
+//     onnx_content_encoder(&Path)                             -> Box<dyn ContentEncoder>
+//     {cuda,libtorch,wgpu}_content_encoder(&Path, DeviceSpec)  -> Box<dyn ContentEncoder>
+//     onnx_pitch_estimator(&Path)                             -> Box<dyn PitchEstimator>
+//     {cuda,libtorch,wgpu}_pitch_estimator(&Path, DeviceSpec)  -> Box<dyn PitchEstimator>
+//
+// and the three generator constructors take a prebuilt `FeatureExtractor` in
+// place of `(&content, &rmvpe)`, this call is deleted and becomes: match each of
+// `features.content`/`features.rmvpe` to its constructor, pair them with
+// `FeatureExtractor::from_parts`, and pass the result down instead of the paths.
+// ---------------------------------------------------------------------------
+fn ensure_features_are_onnx(features: FeatureBackends) -> Result<()> {
+    for (flag, backend) in [
+        ("--content-vec-backend", features.content),
+        ("--rmvpe-backend", features.rmvpe),
+    ] {
+        anyhow::ensure!(
+            backend == Backend::Onnx,
+            "{flag} {backend} is not wired up yet: ContentVec and RMVPE run on \
+             ONNX Runtime whatever the generator does. Pass `{flag} onnx` — the \
+             generator still runs wherever `--backend` sent it. (Both flags \
+             default to `--backend`, so a `--backend {backend}` run inherits \
+             {backend} here without naming it.)"
+        );
+    }
+    Ok(())
+}
+
+/// Resolve the ContentVec and RMVPE paths, downloading each in the weight
+/// format its chosen backend can read.
+///
+/// The two formats are not interchangeable and not even the same shape: an ONNX
+/// ContentVec is a single `.onnx` file where the PyTorch one is a *directory* of
+/// weights, config and preprocessor. `--content`/`--rmvpe` bypass the choice
+/// entirely, which is the escape hatch for a mirror this doesn't know about.
+pub async fn resolve_feature_models(
+    opts: &ModelOpts,
+    features: FeatureBackends,
+) -> Result<(PathBuf, PathBuf)> {
     let cache = opts.cache_dir.as_path();
     let content = match &opts.content {
         Some(p) => p.clone(),
-        None => hub_kit::fetch_contentvec(hub_kit::WeightFormat::Onnx, cache)
-            .await
-            .context("failed to fetch ContentVec ONNX (override with --content)")?,
+        None => {
+            tracing::info!(
+                "resolving ContentVec ({}) from Hugging Face...",
+                features.content
+            );
+            hub_kit::fetch_contentvec(weight_format(features.content), cache)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to fetch ContentVec for {} (override the path with --content)",
+                        features.content
+                    )
+                })?
+        }
     };
     let rmvpe = match &opts.rmvpe {
         Some(p) => p.clone(),
-        None => hub_kit::fetch_rmvpe(hub_kit::WeightFormat::Onnx, cache)
-            .await
-            .context("failed to fetch RMVPE ONNX (override with --rmvpe)")?,
+        None => {
+            tracing::info!("resolving RMVPE ({}) from Hugging Face...", features.rmvpe);
+            hub_kit::fetch_rmvpe(weight_format(features.rmvpe), cache)
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to fetch RMVPE for {} (override the path with --rmvpe)",
+                        features.rmvpe
+                    )
+                })?
+        }
     };
     Ok((content, rmvpe))
 }
 
-/// Resolve the ContentVec and RMVPE ONNX paths, downloading from Hugging Face
-/// when not provided explicitly, then assemble the full pipeline config.
-pub async fn build_rvc_config(opts: &ModelOpts) -> Result<RvcConfig> {
-    let cache = opts.cache_dir.as_path();
-
-    let content = match &opts.content {
-        Some(p) => p.clone(),
-        None => {
-            tracing::info!("resolving ContentVec ONNX from Hugging Face...");
-            hub_kit::fetch_contentvec(hub_kit::WeightFormat::Onnx, cache)
-                .await
-                .context("failed to fetch ContentVec ONNX (override with --content)")?
-        }
-    };
-
-    let rmvpe = match &opts.rmvpe {
-        Some(p) => p.clone(),
-        None => {
-            tracing::info!("resolving RMVPE ONNX from Hugging Face...");
-            hub_kit::fetch_rmvpe(hub_kit::WeightFormat::Onnx, cache)
-                .await
-                .context("failed to fetch RMVPE ONNX (override with --rmvpe)")?
-        }
-    };
-
+/// Assemble the fused ORT pipeline config from paths already resolved by
+/// [`resolve_feature_models`].
+///
+/// Takes the two paths rather than fetching them again: this is only reachable
+/// when generator, ContentVec and RMVPE all run on ONNX Runtime, and fetching
+/// inside would have to re-derive that fact from nothing.
+pub fn build_rvc_config(opts: &ModelOpts, content: PathBuf, rmvpe: PathBuf) -> Result<RvcConfig> {
     let generator = opts.model()?;
     anyhow::ensure!(
         generator.exists(),

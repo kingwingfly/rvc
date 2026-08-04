@@ -49,10 +49,13 @@ pub struct ModelOpts {
     /// Generator output sample rate (40000 or 48000).
     #[arg(long, default_value_t = 48000)]
     pub model_sr: u32,
-    /// ContentVec encoder ONNX [default: auto-downloaded from Hugging Face].
+    /// ContentVec encoder: an `.onnx` file, or the directory a PyTorch one was
+    /// unpacked to [default: auto-downloaded from Hugging Face in the format
+    /// `--content-vec-backend` needs].
     #[arg(long)]
     pub content: Option<PathBuf>,
-    /// RMVPE F0 ONNX [default: auto-downloaded from Hugging Face].
+    /// RMVPE F0 estimator, `.onnx` or `.pt` [default: auto-downloaded from
+    /// Hugging Face in the format `--rmvpe-backend` needs].
     #[arg(long)]
     pub rmvpe: Option<PathBuf>,
     /// Directory the downloaded models are cached in. Shared by every engine
@@ -94,6 +97,95 @@ impl ModelOpts {
     }
 }
 
+/// Which runtime runs the two **feature** models, ContentVec and RMVPE.
+///
+/// They are independent of the generator and of each other — an ONNX generator
+/// with a LibTorch RMVPE is a legitimate configuration — so each gets its own
+/// flag. Both default to `--backend`, and they are `Option` for exactly that
+/// reason: clap derive cannot default one argument to another, so the fallback
+/// is applied after the parse, in [`Self::resolve`].
+///
+/// Flattened into `convert`, the bare filter, `train` and `download` alike.
+/// One definition, so the four cannot drift the way the `--backend`/`--device`
+/// help text beside them already had.
+#[derive(Debug, Args, Clone, Copy)]
+pub struct FeatureBackendOpts {
+    /// Runtime for the ContentVec content encoder — the same spellings
+    /// `--backend` takes [default: whatever `--backend` resolves to; under
+    /// `train`, always `onnx`].
+    #[arg(long, value_enum, value_name = "BACKEND")]
+    pub content_vec_backend: Option<Backend>,
+    /// Runtime for the RMVPE F0 estimator — the same spellings `--backend`
+    /// takes [default: whatever `--backend` resolves to; under `train`, always
+    /// `onnx`].
+    #[arg(long, value_enum, value_name = "BACKEND")]
+    pub rmvpe_backend: Option<Backend>,
+}
+
+/// The runtime each feature model will actually run on, once `--backend` has
+/// been applied as the default and `auto` is gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FeatureBackends {
+    pub content: Backend,
+    pub rmvpe: Backend,
+}
+
+impl FeatureBackendOpts {
+    /// Apply `--backend` as the default.
+    ///
+    /// `generator` is the **already-resolved** generator backend, never the raw
+    /// `--backend` value: resolving twice would let a `.onnx` generator settle
+    /// on ORT while its feature models independently re-derived `auto` from the
+    /// hardware and went to Burn, which is a mixed pipeline nobody asked for.
+    /// Inheriting an unresolved `auto` is not a runtime either.
+    ///
+    /// A backend named on either flag is passed through untouched — the
+    /// contract [`Backend::resolve`] keeps and its tests assert. Substituting
+    /// one the user did not ask for is how somebody ends up loading weights in
+    /// the wrong format and blaming the model.
+    ///
+    /// The one value that is not passed through is `auto`, and it is not an
+    /// exception: **`--rmvpe-backend auto` means the same as leaving the flag
+    /// off**, which is what the help text promises. It cannot mean "re-derive
+    /// from the hardware", because that is the double resolution above; and it
+    /// must not be carried through as `Auto`, because `Auto` is not a runtime —
+    /// it would leave a value that matches no arm and maps to no weight format.
+    pub fn resolve(self, generator: Backend) -> FeatureBackends {
+        let inherit = |chosen: Option<Backend>| match chosen {
+            None | Some(Backend::Auto) => generator,
+            Some(explicit) => explicit,
+        };
+        FeatureBackends {
+            content: inherit(self.content_vec_backend),
+            rmvpe: inherit(self.rmvpe_backend),
+        }
+    }
+}
+
+/// The weight format a backend can load — which is what decides *which file*
+/// gets downloaded for it.
+///
+/// The mapping lives in the engine on purpose, and it is the only place in the
+/// workspace that knows both halves. `cli-kit` owns [`Backend`] and states that
+/// it knows nothing about weight formats; `hub-kit` owns
+/// [`hub_kit::WeightFormat`] and must not depend on `cli-kit`. Only the engine
+/// loading the file knows that a PyTorch ContentVec is a *directory* where the
+/// ONNX one is a single file.
+///
+/// `auto` cannot reach here — [`FeatureBackendOpts::resolve`] turns it into the
+/// generator's backend — but it is mapped rather than panicked on, since the
+/// answer for a Burn backend is the same whichever one it turns out to be.
+pub fn weight_format(backend: Backend) -> hub_kit::WeightFormat {
+    match backend {
+        Backend::Onnx => hub_kit::WeightFormat::Onnx,
+        // Every Burn compute backend reads the same PyTorch checkpoint: the
+        // format is a property of the weights, not of the kernels.
+        Backend::Cuda | Backend::Tch | Backend::Wgpu | Backend::Auto => {
+            hub_kit::WeightFormat::Torch
+        }
+    }
+}
+
 #[derive(Debug, Args)]
 pub struct ConvertArgs {
     #[command(flatten)]
@@ -115,6 +207,8 @@ pub struct ConvertArgs {
     /// `vulkan` (`cuda`/`cuda:N` also accepted). The `cuda` backend has GPUs only.
     #[arg(long, default_value = "auto", value_name = "DEVICE", value_parser = cli_kit::parse_device)]
     pub device: burn_kit::DeviceSpec,
+    #[command(flatten)]
+    pub features: FeatureBackendOpts,
     #[command(flatten)]
     pub denoise: DenoiseOpts,
 }
@@ -147,6 +241,8 @@ pub struct FilterArgs {
     /// `vulkan` (`cuda`/`cuda:N` also accepted). The `cuda` backend has GPUs only.
     #[arg(long, default_value = "auto", value_name = "DEVICE", value_parser = cli_kit::parse_device)]
     pub device: burn_kit::DeviceSpec,
+    #[command(flatten)]
+    pub features: FeatureBackendOpts,
     #[command(flatten)]
     pub denoise: DenoiseOpts,
 }
@@ -225,18 +321,37 @@ impl DenoiseOpts {
     }
 }
 
+/// Prefetch what a conversion would fetch on its first run.
+///
+/// It carries `--backend` for one reason: **which weights are the right ones is
+/// a property of the runtime that will read them**, and ONNX Runtime and Burn
+/// read different files. Without it this command could only ever guess, and it
+/// used to guess ONNX — which is wrong for anybody whose next command is
+/// `--backend tch`, and is the opposite of "fetches exactly what a default bare
+/// invocation would fetch on demand".
+///
+/// There is no `-m` here, so `auto` has no weights to inspect and resolves on
+/// hardware alone. Pass `--backend onnx` when the generator you will run is an
+/// `.onnx` export.
 #[derive(Debug, Args)]
 pub struct DownloadArgs {
     /// Directory the downloaded models are cached in. Shared by every engine
     /// unless `$RVC_CACHE_DIR` (or `$VOICE_CACHE_DIR`) says otherwise.
     #[arg(long, default_value_os_t = hub_kit::cache_dir_for("RVC_CACHE_DIR"))]
     pub cache_dir: PathBuf,
+    /// Runtime the fetched weights must load into: `auto`, `onnx`, `cuda`
+    /// (aliases `burn`, `burn-cuda`), `tch` (`libtorch`, `burn-tch`) or `wgpu`
+    /// (`webgpu`, `burn-wgpu`). ONNX Runtime and Burn read different files.
+    #[arg(long, value_enum, default_value_t = Backend::Auto)]
+    pub backend: Backend,
+    #[command(flatten)]
+    pub features: FeatureBackendOpts,
     /// Override the ContentVec repo as `owner/name:file`
-    /// [default: the toolkit's ContentVec ONNX on Hugging Face].
+    /// [default: the toolkit's ContentVec for the chosen backend].
     #[arg(long)]
     pub content: Option<String>,
     /// Override the RMVPE repo as `owner/name:file`
-    /// [default: the toolkit's RMVPE ONNX on Hugging Face].
+    /// [default: the toolkit's RMVPE for the chosen backend].
     #[arg(long)]
     pub rmvpe: Option<String>,
 }
@@ -337,12 +452,16 @@ pub struct TrainArgs {
     /// fetches nothing either: it continues from weights that already exist.
     #[arg(long)]
     pub no_pretrained: bool,
-    /// ContentVec encoder ONNX [default: auto-downloaded].
+    /// ContentVec encoder ONNX [default: auto-downloaded]. The trainer's
+    /// extractors are ONNX whichever backend trains the generator.
     #[arg(long)]
     pub content: Option<PathBuf>,
-    /// RMVPE F0 ONNX [default: auto-downloaded].
+    /// RMVPE F0 ONNX [default: auto-downloaded]. As above: ONNX, whatever
+    /// `--backend` says.
     #[arg(long)]
     pub rmvpe: Option<PathBuf>,
+    #[command(flatten)]
+    pub features: FeatureBackendOpts,
     /// Directory the downloaded models are cached in. Shared by every engine
     /// unless `$RVC_CACHE_DIR` (or `$VOICE_CACHE_DIR`) says otherwise.
     #[arg(long, default_value_os_t = hub_kit::cache_dir_for("RVC_CACHE_DIR"))]
@@ -401,6 +520,209 @@ impl TrainArgs {
             "--snr-weight must be zero (uniform) or a positive, finite exponent"
         );
         anyhow::ensure!(!self.device.is_empty(), "--device names no device");
+        self.feature_backends()?;
         Ok(())
+    }
+
+    /// Which runtime extracts the corpus's content and F0 features.
+    ///
+    /// **`train` is the one command where the two flags do not inherit
+    /// `--backend`: their default here is `onnx`.** Not because ONNX Runtime
+    /// cannot train — feature extraction is not training, it runs once over the
+    /// corpus before the loop starts — but because `rvc-train` builds its own
+    /// `FeatureExtractor` from two paths, and that constructor is ONNX-only. If
+    /// the extractors followed `--backend`, the recommended training command
+    /// would fetch `rmvpe.pt`, hand it to an ORT session builder, and fail.
+    ///
+    /// Naming a Burn backend explicitly is therefore an error and not a quiet
+    /// downgrade: somebody who asked for it should not come away believing the
+    /// corpus was analysed on Burn. When the trainer takes a prebuilt
+    /// extractor, the default here becomes the resolved `--backend` like
+    /// everywhere else and this method goes away.
+    pub fn feature_backends(&self) -> Result<FeatureBackends> {
+        let features = self.features.resolve(Backend::Onnx);
+        for (flag, backend) in [
+            ("--content-vec-backend", features.content),
+            ("--rmvpe-backend", features.rmvpe),
+        ] {
+            anyhow::ensure!(
+                backend == Backend::Onnx,
+                "{flag} {backend} cannot be used with `train`: the trainer's \
+                 feature extraction runs on ONNX Runtime only, whichever backend \
+                 trains the generator. Drop the flag (or pass `{flag} onnx`) — \
+                 `--backend {backend}` still trains on {backend}."
+            );
+        }
+        Ok(features)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    /// The `rvc` binary's own tree, minus `completions` — which belongs to the
+    /// executable rather than to the engine, and is not what these test.
+    #[derive(Parser)]
+    #[command(name = "rvc")]
+    struct Cli {
+        #[command(flatten)]
+        rvc: RvcCli,
+    }
+
+    fn parse(argv: &[&str]) -> RvcCommand {
+        Cli::try_parse_from(argv)
+            .unwrap_or_else(|e| panic!("{argv:?} rejected: {e}"))
+            .rvc
+            .command
+            .expect("expected a subcommand")
+    }
+
+    fn convert(extra: &[&str]) -> ConvertArgs {
+        let mut argv = vec!["rvc", "convert", "-m", "voice.safetensors", "in.wav"];
+        argv.extend_from_slice(extra);
+        match parse(&argv) {
+            RvcCommand::Convert(a) => a,
+            other => panic!("expected `convert`, got {other:?}"),
+        }
+    }
+
+    fn train(extra: &[&str]) -> TrainArgs {
+        let mut argv = vec!["rvc", "train", "clip.wav"];
+        argv.extend_from_slice(extra);
+        match parse(&argv) {
+            RvcCommand::Train(a) => *a,
+            other => panic!("expected `train`, got {other:?}"),
+        }
+    }
+
+    fn download(extra: &[&str]) -> DownloadArgs {
+        let mut argv = vec!["rvc", "download"];
+        argv.extend_from_slice(extra);
+        match parse(&argv) {
+            RvcCommand::Download(a) => a,
+            other => panic!("expected `download`, got {other:?}"),
+        }
+    }
+
+    /// Neither flag given: both feature models follow `--backend`, whatever it
+    /// resolved to. This is the property the whole design rests on — one flag
+    /// still configures the whole pipeline.
+    #[test]
+    fn both_default_to_the_main_backend() {
+        let opts = convert(&[]).features;
+        assert_eq!(opts.content_vec_backend, None);
+        assert_eq!(opts.rmvpe_backend, None);
+        for generator in [Backend::Onnx, Backend::Cuda, Backend::Tch, Backend::Wgpu] {
+            let features = opts.resolve(generator);
+            assert_eq!(
+                features.content, generator,
+                "content, --backend {generator}"
+            );
+            assert_eq!(features.rmvpe, generator, "rmvpe, --backend {generator}");
+        }
+    }
+
+    /// Each flag overrides only its own model, and neither is substituted for
+    /// something else — the contract `Backend::resolve` keeps for `--backend`.
+    #[test]
+    fn an_override_is_never_substituted_and_never_leaks() {
+        let features = convert(&["--content-vec-backend", "tch"])
+            .features
+            .resolve(Backend::Onnx);
+        assert_eq!(features.content, Backend::Tch);
+        assert_eq!(features.rmvpe, Backend::Onnx, "rmvpe kept --backend");
+
+        let features = convert(&["--rmvpe-backend", "onnx"])
+            .features
+            .resolve(Backend::Tch);
+        assert_eq!(features.content, Backend::Tch, "content kept --backend");
+        assert_eq!(features.rmvpe, Backend::Onnx);
+    }
+
+    /// `auto` is a value clap offers on both flags, so it has to mean
+    /// something: the same as leaving the flag off. It must not survive as
+    /// `Backend::Auto`, which is not a runtime — it matches no loader arm and
+    /// names no weight format, so it would silently take the Torch branch of
+    /// `weight_format` and then fail to equal `Onnx` anywhere.
+    #[test]
+    fn auto_named_out_loud_still_means_inherit() {
+        let features = convert(&["--content-vec-backend", "auto", "--rmvpe-backend", "auto"])
+            .features
+            .resolve(Backend::Onnx);
+        assert_eq!(features.content, Backend::Onnx);
+        assert_eq!(features.rmvpe, Backend::Onnx);
+        assert_eq!(weight_format(features.content), hub_kit::WeightFormat::Onnx);
+    }
+
+    /// Both flags take `cli_kit::Backend`, so every alias any binary accepts
+    /// works here too. Spelled out because the failure mode of a second enum is
+    /// exactly this drifting apart.
+    #[test]
+    fn aliases_parse_on_both_flags() {
+        let features = convert(&[
+            "--content-vec-backend",
+            "libtorch",
+            "--rmvpe-backend",
+            "burn-cuda",
+        ])
+        .features
+        .resolve(Backend::Onnx);
+        assert_eq!(features.content, Backend::Tch);
+        assert_eq!(features.rmvpe, Backend::Cuda);
+    }
+
+    /// ONNX Runtime reads the `.onnx` artefacts; every Burn compute backend
+    /// reads the same PyTorch one. This is what makes the auto-download fetch a
+    /// file the chosen runtime can actually open.
+    #[test]
+    fn weight_format_follows_the_backend() {
+        assert_eq!(weight_format(Backend::Onnx), hub_kit::WeightFormat::Onnx);
+        for burn in [Backend::Cuda, Backend::Tch, Backend::Wgpu] {
+            assert_eq!(weight_format(burn), hub_kit::WeightFormat::Torch, "{burn}");
+        }
+    }
+
+    /// `download` has no `-m`, so `auto` resolves on hardware alone — but a
+    /// named backend still decides the format, which is the whole point of the
+    /// command growing a `--backend`.
+    #[test]
+    fn download_fetches_for_the_backend_it_is_told() {
+        let a = download(&["--backend", "onnx"]);
+        let features = a.features.resolve(a.backend.resolve(false));
+        assert_eq!(weight_format(features.content), hub_kit::WeightFormat::Onnx);
+        assert_eq!(weight_format(features.rmvpe), hub_kit::WeightFormat::Onnx);
+
+        let a = download(&["--backend", "tch", "--rmvpe-backend", "onnx"]);
+        let features = a.features.resolve(a.backend.resolve(false));
+        assert_eq!(
+            weight_format(features.content),
+            hub_kit::WeightFormat::Torch
+        );
+        assert_eq!(weight_format(features.rmvpe), hub_kit::WeightFormat::Onnx);
+    }
+
+    /// `train` is the documented exception: its extractors are ONNX whatever
+    /// trains the generator, so `--backend tch` must not drag them along — that
+    /// would break the recommended training command.
+    #[test]
+    fn train_keeps_onnx_extractors_under_a_burn_backend() {
+        let features = train(&["--backend", "tch"])
+            .feature_backends()
+            .expect("--backend tch must not change the trainer's extractors");
+        assert_eq!(features.content, Backend::Onnx);
+        assert_eq!(features.rmvpe, Backend::Onnx);
+    }
+
+    /// …and asking for one out loud is refused rather than quietly downgraded.
+    #[test]
+    fn train_refuses_a_burn_feature_backend() {
+        let err = train(&["--rmvpe-backend", "tch"])
+            .feature_backends()
+            .expect_err("a Burn extractor on `train` must be an error")
+            .to_string();
+        assert!(err.contains("--rmvpe-backend"), "{err}");
+        assert!(err.contains("ONNX Runtime only"), "{err}");
     }
 }

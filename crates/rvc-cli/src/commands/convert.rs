@@ -15,6 +15,7 @@ pub async fn run(args: ConvertArgs) -> Result<()> {
     // One loaded model (GPU/ORT init is expensive), reused across files.
     let mut converter = build_converter(
         &args.models,
+        args.features,
         args.backend,
         args.device,
         args.transpose,
