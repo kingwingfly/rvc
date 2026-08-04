@@ -111,11 +111,13 @@ impl ModelOpts {
 #[derive(Debug, Args, Clone, Copy)]
 pub struct FeatureBackendOpts {
     /// Runtime for the ContentVec content encoder — the same spellings
-    /// `--backend` takes [default: whatever `--backend` resolves to].
+    /// `--backend` takes [default: whatever `--backend` resolves to; under
+    /// `train`, always `onnx`].
     #[arg(long, value_enum, value_name = "BACKEND")]
     pub content_vec_backend: Option<Backend>,
     /// Runtime for the RMVPE F0 estimator — the same spellings `--backend`
-    /// takes [default: whatever `--backend` resolves to].
+    /// takes [default: whatever `--backend` resolves to; under `train`, always
+    /// `onnx`].
     #[arg(long, value_enum, value_name = "BACKEND")]
     pub rmvpe_backend: Option<Backend>,
 }
