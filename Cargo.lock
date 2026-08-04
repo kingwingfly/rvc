@@ -852,10 +852,21 @@ name = "burn-gptsovits"
 version = "0.1.0"
 dependencies = [
  "burn",
+ "burn-hubert",
  "burn-kit",
  "burn-ndarray",
  "burn-store",
  "burn-vits",
+]
+
+[[package]]
+name = "burn-hubert"
+version = "0.1.0"
+dependencies = [
+ "burn",
+ "burn-kit",
+ "burn-ndarray",
+ "burn-store",
 ]
 
 [[package]]

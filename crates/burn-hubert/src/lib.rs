@@ -1,4 +1,4 @@
-//! cnhubert — the SSL encoder GPT-SoVITS takes its semantic tokens from.
+//! HuBERT — the self-supervised speech encoder, in [Burn](https://burn.dev).
 //!
 //! A stock `transformers` `HubertModel` (`TencentGameMate/chinese-hubert-base`),
 //! so the module tree mirrors that `state_dict` and the checkpoint loads
@@ -6,9 +6,20 @@
 //! audio into 50 Hz frames, a projection to the model width, and a post-norm
 //! transformer.
 //!
-//! Used on both sides of the pipeline. The quantiser downstream turns these
-//! features into the discrete tokens the T2S model predicts, and the same
-//! features describe the reference audio at synthesis time.
+//! **This is its own crate because two engines share it**, and the workspace rule
+//! is that anything two engines need moves to a neutral crate first. GPT-SoVITS
+//! calls it cnhubert: the quantiser downstream turns these features into the
+//! discrete tokens the T2S model predicts, and the same features describe the
+//! reference audio at synthesis time. RVC's ContentVec is the same architecture
+//! with different weights and a different readout.
+//!
+//! [`Hubert::hidden_states`] is what makes that second reader cheap. It returns
+//! every layer's output rather than only the last, so a variant that reads an
+//! intermediate layer — RVC v2 takes the final encoder layer directly, where
+//! v1 took the ninth — is a choice of index at the call site rather than another
+//! forward pass. `Hubert::forward` is the last-layer shorthand.
+//!
+//! Nothing here names a compute backend, and there are no app dependencies.
 
 use burn::module::{Module, Param};
 use burn::nn::conv::{Conv1d, Conv1dConfig};
@@ -331,7 +342,7 @@ impl<B: Backend> Encoder<B> {
     }
 }
 
-/// cnhubert.
+/// The whole encoder: convolutional front-end, projection, transformer.
 #[derive(Module, Debug)]
 pub struct Hubert<B: Backend> {
     feature_extractor: FeatureExtractor<B>,
