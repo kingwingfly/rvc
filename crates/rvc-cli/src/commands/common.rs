@@ -61,9 +61,6 @@ pub async fn build_converter(
         return Ok(Converter::new(onnx, params, conv_params).with_denoise(denoise));
     }
 
-    // Before the fetch, not after: refusing a configuration is worth a second,
-    // and the PyTorch ContentVec alone is ~190 MB to download and throw away.
-    ensure_features_are_onnx(features)?;
     let (content, rmvpe) = resolve_feature_models(opts, features).await?;
     anyhow::ensure!(
         model.exists(),
@@ -75,6 +72,20 @@ pub async fn build_converter(
         model.display(),
     );
 
+    // The two feature models are built here, not inside each generator
+    // constructor, because that is the only place that knows both backends —
+    // and they need not agree with each other or with the generator. Each
+    // constructor is `#[cfg]`-gated, so a `--no-default-features` build simply
+    // has no arm to take and says so rather than failing to link.
+    let features_extractor = tokio::task::block_in_place(|| {
+        let content_model = build_content_encoder(features.content, &content, device)?;
+        let rmvpe_model = build_pitch_estimator(features.rmvpe, &rmvpe, device)?;
+        anyhow::Ok(rvc_core::FeatureExtractor::from_parts(
+            content_model,
+            rmvpe_model,
+        ))
+    })?;
+
     // Each arm erases into the same non-generic `Converter` — that type erasure
     // is what makes the backend a run-time choice. Annotated because a
     // `--no-default-features` build compiles every arm away and leaves nothing
@@ -84,8 +95,7 @@ pub async fn build_converter(
         Backend::Cuda => {
             let g = tokio::task::block_in_place(|| {
                 rvc_core::cuda_generator(
-                    &content,
-                    &rmvpe,
+                    features_extractor,
                     model,
                     opts.model_sr,
                     opts.speaker_id,
@@ -99,8 +109,7 @@ pub async fn build_converter(
         Backend::Wgpu => {
             let g = tokio::task::block_in_place(|| {
                 rvc_core::wgpu_generator(
-                    &content,
-                    &rmvpe,
+                    features_extractor,
                     model,
                     opts.model_sr,
                     opts.speaker_id,
@@ -114,8 +123,7 @@ pub async fn build_converter(
         Backend::Tch => {
             let g = tokio::task::block_in_place(|| {
                 rvc_core::libtorch_generator(
-                    &content,
-                    &rmvpe,
+                    features_extractor,
                     model,
                     opts.model_sr,
                     opts.speaker_id,
@@ -134,40 +142,72 @@ pub async fn build_converter(
     Ok(converter.with_denoise(denoise))
 }
 
-// ---------------------------------------------------------------------------
-// The block the `rvc-core` unit's PR replaces.
-//
-// Every generator constructor still takes the two feature-model *paths* and
-// builds an ONNX `FeatureExtractor` itself, so a Burn ContentVec or RMVPE has
-// nowhere to go on this branch — everything above it (the flags, the format
-// mapping, the fetch selection) is ready, and this is the one thing that is
-// not. Once `rvc-core` exposes
-//
-//     onnx_content_encoder(&Path)                             -> Box<dyn ContentEncoder>
-//     {cuda,libtorch,wgpu}_content_encoder(&Path, DeviceSpec)  -> Box<dyn ContentEncoder>
-//     onnx_pitch_estimator(&Path)                             -> Box<dyn PitchEstimator>
-//     {cuda,libtorch,wgpu}_pitch_estimator(&Path, DeviceSpec)  -> Box<dyn PitchEstimator>
-//
-// and the three generator constructors take a prebuilt `FeatureExtractor` in
-// place of `(&content, &rmvpe)`, this call is deleted and becomes: match each of
-// `features.content`/`features.rmvpe` to its constructor, pair them with
-// `FeatureExtractor::from_parts`, and pass the result down instead of the paths.
-// ---------------------------------------------------------------------------
-fn ensure_features_are_onnx(features: FeatureBackends) -> Result<()> {
-    for (flag, backend) in [
-        ("--content-vec-backend", features.content),
-        ("--rmvpe-backend", features.rmvpe),
-    ] {
-        anyhow::ensure!(
-            backend == Backend::Onnx,
-            "{flag} {backend} is not wired up yet: ContentVec and RMVPE run on \
-             ONNX Runtime whatever the generator does. Pass `{flag} onnx` — the \
-             generator still runs wherever `--backend` sent it. (Both flags \
-             default to `--backend`, so a `--backend {backend}` run inherits \
-             {backend} here without naming it.)"
-        );
-    }
-    Ok(())
+/// Build the content encoder on whichever backend `--content-vec-backend`
+/// resolved to.
+///
+/// Boxed rather than `impl ContentEncoder` because these arms are alternatives:
+/// two `impl Trait` returns are different opaque types, so a `match` over them
+/// needs one type, and `FeatureExtractor::from_parts` takes boxes anyway.
+fn build_content_encoder(
+    backend: Backend,
+    path: &std::path::Path,
+    device: DeviceSpec,
+) -> Result<Box<dyn rvc_core::ContentEncoder>> {
+    let encoder = match backend {
+        Backend::Onnx => rvc_core::onnx_content_encoder(path)
+            .context("failed to load ContentVec on ONNX Runtime")?,
+        #[cfg(feature = "cuda")]
+        Backend::Cuda => rvc_core::cuda_content_encoder(path, device)
+            .context("failed to load ContentVec on the CubeCL/CUDA backend")?,
+        #[cfg(feature = "tch")]
+        Backend::Tch => rvc_core::libtorch_content_encoder(path, device)
+            .context("failed to load ContentVec on the LibTorch backend")?,
+        #[cfg(feature = "wgpu")]
+        Backend::Wgpu => rvc_core::wgpu_content_encoder(path, device)
+            .context("failed to load ContentVec on the WebGPU backend")?,
+        Backend::Auto => unreachable!("resolved before this point"),
+        // Only reachable on a `--no-default-features` build.
+        #[allow(unreachable_patterns)]
+        other => return Err(other.unavailable()),
+    };
+    Ok(encoder)
+}
+
+/// Build the pitch estimator on whichever backend `--rmvpe-backend` resolved to.
+///
+/// Boxed for the same reason as [`build_content_encoder`].
+fn build_pitch_estimator(
+    backend: Backend,
+    path: &std::path::Path,
+    device: DeviceSpec,
+) -> Result<Box<dyn rvc_core::PitchEstimator>> {
+    let estimator = match backend {
+        Backend::Onnx => {
+            rvc_core::onnx_pitch_estimator(path).context("failed to load RMVPE on ONNX Runtime")?
+        }
+        #[cfg(feature = "cuda")]
+        Backend::Cuda => {
+            rvc_core::cuda_pitch_estimator(path, rvc_core::FeatureExtractor::F0_THRESHOLD, device)
+                .context("failed to load RMVPE on the CubeCL/CUDA backend")?
+        }
+        #[cfg(feature = "tch")]
+        Backend::Tch => rvc_core::libtorch_pitch_estimator(
+            path,
+            rvc_core::FeatureExtractor::F0_THRESHOLD,
+            device,
+        )
+        .context("failed to load RMVPE on the LibTorch backend")?,
+        #[cfg(feature = "wgpu")]
+        Backend::Wgpu => {
+            rvc_core::wgpu_pitch_estimator(path, rvc_core::FeatureExtractor::F0_THRESHOLD, device)
+                .context("failed to load RMVPE on the WebGPU backend")?
+        }
+        Backend::Auto => unreachable!("resolved before this point"),
+        // Only reachable on a `--no-default-features` build.
+        #[allow(unreachable_patterns)]
+        other => return Err(other.unavailable()),
+    };
+    Ok(estimator)
 }
 
 /// Resolve the ContentVec and RMVPE paths, downloading each in the weight
