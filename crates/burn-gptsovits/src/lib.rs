@@ -8,20 +8,23 @@
 //!
 //! Most of the second stage is a modified VITS, so it is assembled from
 //! `burn-vits` rather than written again; both projects descend from the same
-//! source, which is why their `state_dict` names line up.
+//! source, which is why their `state_dict` names line up. cnhubert is
+//! `burn-hubert` for the same reason one step further out: RVC's ContentVec is
+//! the same network, and two engines sharing one means it belongs in neither.
+//! It is re-exported here, so [`hubert`] reads exactly as it did when it was a
+//! module of this crate.
 //!
 //! Nothing here names a compute backend, and there are no app dependencies.
 
 mod decoder;
-mod hubert;
 mod quantizer;
 mod reference;
 mod sovits;
 mod t2s;
 mod text_encoder;
 
+pub use burn_hubert::{self as hubert, Hubert, HubertConfig};
 pub use decoder::{Decoder, DecoderConfig};
-pub use hubert::{Hubert, HubertConfig};
 pub use quantizer::{Codebook, Quantizer, QuantizerConfig, Vq};
 pub use reference::{ReferenceConfig, ReferenceEncoder};
 pub use sovits::{GPTSOVITS_V2_PERIODS, SovitsConfig, SovitsPartial, TrainForward};

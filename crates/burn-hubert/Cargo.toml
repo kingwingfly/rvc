@@ -1,0 +1,22 @@
+[package]
+name = "burn-hubert"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "The HuBERT self-supervised speech encoder in Burn, shared by GPT-SoVITS's cnhubert and RVC's ContentVec"
+
+# No `cuda`/`tch` features, unlike every sibling `burn-*` crate: those exist to
+# give a crate's *examples* a compute backend, and the weight-coverage harness for
+# this network is `burn-gptsovits`'s `examples/load`. Adding a network with an
+# example of its own is what would earn them back.
+
+[dependencies]
+burn = { version = "0.21", default-features = false, features = ["std"] }
+burn-store.workspace = true
+# Checkpoint loading, shared with every other network crate.
+burn-kit = { workspace = true, features = ["store"] }
+
+[dev-dependencies]
+burn-ndarray = "0.21"

@@ -17,6 +17,8 @@ tch = ["burn/tch"]
 [dependencies]
 burn = { version = "0.21", default-features = false, features = ["std"] }
 burn-vits.workspace = true
+# cnhubert. Its own crate because RVC's ContentVec is the same network.
+burn-hubert.workspace = true
 burn-store.workspace = true
 burn-kit = { workspace = true, features = ["store"] }
 
