@@ -1,10 +1,19 @@
-//! Auto-download and cache the shared ONNX assets (ContentVec + RMVPE) from the
+//! Auto-download and cache the shared ContentVec + RMVPE assets from the
 //! Hugging Face Hub.
 //!
-//! The trained generator (`voice.onnx`) is produced locally by the training
-//! pipeline and is **not** fetched here. Repo IDs and filenames are overridable
-//! because the exact best-maintained ONNX mirrors move over time; the defaults
-//! below are a starting point, not a guarantee.
+//! The trained generator (`voice.onnx`/`voice.safetensors`) is produced
+//! locally by the training pipeline and is **not** fetched here. Repo IDs and
+//! filenames are overridable because the exact best-maintained mirrors move
+//! over time; the defaults below are a starting point, not a guarantee.
+//!
+//! Both assets exist in **two weight formats**, ONNX and PyTorch, because the
+//! backend a caller picks decides which one it can load — ONNX Runtime reads
+//! only the former, the Burn/LibTorch and Burn/CubeCL generators only the
+//! latter. [`WeightFormat`] is how a caller says which; it is decided
+//! entirely by the caller, since this crate must not depend on `cli-kit` and
+//! so knows nothing about `--backend` or its aliases. [`fetch_contentvec`]
+//! and [`fetch_rmvpe`] fetch the file (or, for a PyTorch ContentVec, the
+//! directory) the chosen format needs.
 
 use std::path::{Path, PathBuf};
 
@@ -43,7 +52,31 @@ impl ModelRef {
     }
 }
 
+/// Which weight format a caller wants ContentVec/RMVPE fetched in.
+///
+/// This crate has no notion of "backend" — that enum lives in `cli-kit`, the
+/// one leaf every binary shares, and `cli_kit::backend` is deliberate that
+/// **cli-kit knows nothing about weight formats**: only the engine loading a
+/// file knows whether an artefact for a given backend is a single file or a
+/// directory full of them. So the mapping runs the other way: the caller (an
+/// engine crate, which does know both `Backend` and how it loads a model)
+/// turns its `Backend` into a `WeightFormat` and passes that in here, rather
+/// than hub-kit depending on cli-kit to accept a `Backend` directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeightFormat {
+    /// ONNX Runtime.
+    Onnx,
+    /// Burn on LibTorch or CubeCL/CUDA — PyTorch's own checkpoint format.
+    Torch,
+}
+
 /// Default ContentVec (768-dim, layer 12) ONNX encoder.
+///
+/// A **community** mirror (`NaruseMioShirakana/MoeSS-SUBModel`) rather than a
+/// first-party one — contrast [`default_rmvpe`] and [`fetch_contentvec`]'s
+/// `Torch` arm, both first-party, and see [`DEFAULT_WHISPER`]'s note on why
+/// that asymmetry is the main reason this toolkit ports models rather than
+/// consuming somebody's conversion of one.
 ///
 /// NOTE: verify/override for your environment — ONNX mirrors of the RVC content
 /// encoder change; this is a widely used one.
@@ -55,11 +88,58 @@ pub fn default_contentvec() -> ModelRef {
     )
 }
 
-/// Default RMVPE F0 estimator ONNX.
+/// Default RMVPE F0 estimator, in the given weight format.
+///
+/// Both formats live in the same first-party repo — `rmvpe.onnx` beside
+/// `rmvpe.pt` in `lj1995/VoiceConversionWebUI` — so selecting one is a
+/// one-word change to the filename, unlike ContentVec below.
 ///
 /// NOTE: verify/override — see comment on [`default_contentvec`].
-pub fn default_rmvpe() -> ModelRef {
-    ModelRef::new("lj1995", "VoiceConversionWebUI", "rmvpe.onnx")
+pub fn default_rmvpe(format: WeightFormat) -> ModelRef {
+    let file = match format {
+        WeightFormat::Onnx => "rmvpe.onnx",
+        WeightFormat::Torch => "rmvpe.pt",
+    };
+    ModelRef::new("lj1995", "VoiceConversionWebUI", file)
+}
+
+/// The repo and files a PyTorch ContentVec (a HuBERT checkpoint) is published
+/// as: `lj1995/VoiceConversionWebUI`'s `hubert_base/` directory. First-party,
+/// unlike the ONNX mirror [`default_contentvec`] points at — see the note
+/// there.
+const CONTENTVEC_TORCH_REPO: (&str, &str) = ("lj1995", "VoiceConversionWebUI");
+const CONTENTVEC_TORCH_FILES: [&str; 3] = [
+    "hubert_base/config.json",
+    "hubert_base/pytorch_model.bin",
+    "hubert_base/preprocessor_config.json",
+];
+
+/// Fetch ContentVec in the given format.
+///
+/// `Onnx` is [`fetch`]'s ordinary single-file case. `Torch` is not: PyTorch
+/// ContentVec is a HuBERT checkpoint, which needs its config and preprocessor
+/// alongside the weights, so there is no single [`ModelRef`] to hand back —
+/// this follows [`fetch_whisper`]/[`fetch_gptsovits`]'s multi-file shape
+/// instead and returns the directory the triple landed in.
+pub async fn fetch_contentvec(format: WeightFormat, cache_dir: &Path) -> Result<PathBuf> {
+    match format {
+        WeightFormat::Onnx => fetch(&default_contentvec(), cache_dir).await,
+        WeightFormat::Torch => {
+            let (owner, name) = CONTENTVEC_TORCH_REPO;
+            let mut dir = None;
+            for file in CONTENTVEC_TORCH_FILES {
+                let path = fetch(&ModelRef::new(owner, name, file), cache_dir).await?;
+                dir = path.parent().map(Path::to_path_buf);
+            }
+            Ok(dir.unwrap_or_else(|| cache_dir.to_path_buf()))
+        }
+    }
+}
+
+/// Fetch RMVPE in the given format. Unlike [`fetch_contentvec`], both formats
+/// are a single file, so this is [`fetch`] over [`default_rmvpe`].
+pub async fn fetch_rmvpe(format: WeightFormat, cache_dir: &Path) -> Result<PathBuf> {
+    fetch(&default_rmvpe(format), cache_dir).await
 }
 
 /// The toolkit-wide cache directory: `$VOICE_CACHE_DIR`, else `voice` under the
@@ -236,18 +316,28 @@ pub struct SharedAssets {
     pub rmvpe: PathBuf,
 }
 
-/// Fetch both shared assets, using defaults unless overridden.
+/// Fetch both shared assets, using each format's default unless overridden.
+///
+/// An explicit override is always a single file — that is what
+/// `owner/name:file` (`parse_model_ref` in `rvc-cli`) can spell — so it is
+/// fetched with plain [`fetch`] regardless of `format`; only the *default*
+/// ContentVec path can be a directory, via [`fetch_contentvec`]'s `Torch` arm.
 pub async fn fetch_shared(
     contentvec: Option<ModelRef>,
+    contentvec_format: WeightFormat,
     rmvpe: Option<ModelRef>,
+    rmvpe_format: WeightFormat,
     cache_dir: &Path,
 ) -> Result<SharedAssets> {
-    let contentvec = contentvec.unwrap_or_else(default_contentvec);
-    let rmvpe = rmvpe.unwrap_or_else(default_rmvpe);
-    Ok(SharedAssets {
-        contentvec: fetch(&contentvec, cache_dir).await?,
-        rmvpe: fetch(&rmvpe, cache_dir).await?,
-    })
+    let contentvec = match contentvec {
+        Some(r) => fetch(&r, cache_dir).await?,
+        None => fetch_contentvec(contentvec_format, cache_dir).await?,
+    };
+    let rmvpe = match rmvpe {
+        Some(r) => fetch(&r, cache_dir).await?,
+        None => fetch_rmvpe(rmvpe_format, cache_dir).await?,
+    };
+    Ok(SharedAssets { contentvec, rmvpe })
 }
 
 /// The four files a Hugging Face Whisper repo needs to be usable: the weights,
@@ -260,9 +350,11 @@ pub struct WhisperAssets {
 
 /// Default ASR model: `openai/whisper-large-v3-turbo` (809M, MIT).
 ///
-/// Unlike the ContentVec and RMVPE entries above — community ONNX exports that
-/// move over time — this is a first-party repo, which is the main reason the
+/// Unlike ContentVec's ONNX default above — a community export that moves
+/// over time — this is a first-party repo, which is the main reason the
 /// toolkit ports models rather than consuming somebody's conversion of one.
+/// RMVPE and ContentVec's *Torch* format share that property with this repo:
+/// both come from `lj1995/VoiceConversionWebUI` directly.
 pub const DEFAULT_WHISPER: (&str, &str) = ("openai", "whisper-large-v3-turbo");
 
 /// Files that must be present for `stt-core` to load a checkpoint.

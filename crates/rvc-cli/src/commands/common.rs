@@ -119,13 +119,13 @@ pub async fn resolve_feature_models(opts: &ModelOpts) -> Result<(PathBuf, PathBu
     let cache = opts.cache_dir.as_path();
     let content = match &opts.content {
         Some(p) => p.clone(),
-        None => hub_kit::fetch(&hub_kit::default_contentvec(), cache)
+        None => hub_kit::fetch_contentvec(hub_kit::WeightFormat::Onnx, cache)
             .await
             .context("failed to fetch ContentVec ONNX (override with --content)")?,
     };
     let rmvpe = match &opts.rmvpe {
         Some(p) => p.clone(),
-        None => hub_kit::fetch(&hub_kit::default_rmvpe(), cache)
+        None => hub_kit::fetch_rmvpe(hub_kit::WeightFormat::Onnx, cache)
             .await
             .context("failed to fetch RMVPE ONNX (override with --rmvpe)")?,
     };
@@ -141,7 +141,7 @@ pub async fn build_rvc_config(opts: &ModelOpts) -> Result<RvcConfig> {
         Some(p) => p.clone(),
         None => {
             tracing::info!("resolving ContentVec ONNX from Hugging Face...");
-            hub_kit::fetch(&hub_kit::default_contentvec(), cache)
+            hub_kit::fetch_contentvec(hub_kit::WeightFormat::Onnx, cache)
                 .await
                 .context("failed to fetch ContentVec ONNX (override with --content)")?
         }
@@ -151,7 +151,7 @@ pub async fn build_rvc_config(opts: &ModelOpts) -> Result<RvcConfig> {
         Some(p) => p.clone(),
         None => {
             tracing::info!("resolving RMVPE ONNX from Hugging Face...");
-            hub_kit::fetch(&hub_kit::default_rmvpe(), cache)
+            hub_kit::fetch_rmvpe(hub_kit::WeightFormat::Onnx, cache)
                 .await
                 .context("failed to fetch RMVPE ONNX (override with --rmvpe)")?
         }
