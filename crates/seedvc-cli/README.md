@@ -93,7 +93,7 @@ linear.
 ## Flags
 
 `seedvc --help` and `seedvc convert --help` list every flag with its default.
-Three are worth understanding before you turn them.
+What follows is only what a help line cannot say.
 
 **`--steps` (default 30) buys smoothness linearly and costs time linearly.** The
 sampler is explicit Euler, which is first-order accurate: doubling the steps
@@ -104,8 +104,9 @@ a Runge–Kutta rate. 4–10 steps is the fast end, 25–50 the polished one.
 away from the unconditioned one.** Raise it to follow the reference harder, at
 the cost of artefacts. Zero is not "no conditioning" — it is exactly the
 conditioned velocity with no extrapolation, and because the unconditional pass is
-then skipped entirely it **halves the work per step**. `--guidance 0 --steps 60`
-and `--guidance 0.7 --steps 30` cost about the same.
+then skipped entirely it **halves the work per step**. So it is the first knob to
+reach for when a conversion is too slow, ahead of cutting `--steps`, since it
+costs an extrapolation rather than accuracy in the solver.
 
 `--length-adjust` scales the output's duration against the source's — above 1 is
 slower, below is faster, and pitch is untouched, because the content is resampled
@@ -117,8 +118,9 @@ hard eventually puts more source behind each chunk than the content encoder's ow
 is an independent generation from fresh noise, which is why two runs of the same
 file at different seeds differ audibly even though neither is wrong.
 
-`--chunk` is the filter's stdin read size in samples and nothing more; it does
-not change what the model is shown.
+`--chunk` is how many 16 kHz samples the filter reads from stdin at a time, and
+belongs to the pipe rather than to the model — how much source a generated chunk
+covers is the window arithmetic above.
 
 ## Backends
 
@@ -127,7 +129,7 @@ time.
 
 | `--backend` | aliases | runtime | devices |
 |---|---|---|---|
-| `auto` *(default)* | | the fastest Burn backend available — LibTorch on a GPU, CubeCL/CUDA, WebGPU, LibTorch on CPU | |
+| `auto` *(default)* | | the fastest Burn backend this machine and this build have, LibTorch on a GPU first — the order is [`docs/setup.md`](../../docs/setup.md#backends-and-devices)'s | |
 | `cuda` | `burn`, `burn-cuda` | native Burn, CubeCL/CUDA | NVIDIA only |
 | `tch` | `libtorch`, `burn-tch` | native Burn, LibTorch | CUDA, MPS, Vulkan, CPU |
 | `wgpu` | `webgpu`, `burn-wgpu` | native Burn, WebGPU | any Vulkan/Metal/DX12 GPU |

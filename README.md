@@ -23,7 +23,7 @@ exporter under [`export/`](export/README.md).
 | **`rvc`** | PCM in → retimbred PCM out | `convert`, `train`, `preprocess`, `download`, `completions` |
 | **`stt`** | PCM in → text out | `convert`, `download`, `completions` |
 | **`tts`** | text in → PCM out | `convert`, `train`, `preprocess`, `download`, `completions` |
-| **`seedvc`** | PCM in → retimbred PCM out, no training | `convert`, `download`, `completions` |
+| **`seedvc`** | PCM in → retimbred PCM out, the voice taken from a reference clip | `convert`, `download`, `completions` |
 | **`voice`** | — | `voice rvc …`, `voice stt …`, `voice tts …`, `voice seedvc …`, all four unchanged |
 
 ## Install
