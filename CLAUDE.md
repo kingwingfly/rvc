@@ -481,7 +481,7 @@ Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper
 | `preprocess-kit` | the `preprocess` subcommand `rvc` and `tts` both expose: decode, slice on silence, write `<stem>_<NNN>.wav`. One definition, so the flags and the slicing cannot differ between the two engines |
 | `train-kit` | training scaffolding with no model knowledge: `Checkpoint`, `ema_update`, `accumulate`, `materialize`, `Dashboard`. Generic over the module trained, so a GAN and a cross-entropy loop share it |
 | `rpath-kit` | a **build-dependency**, not a runtime one: where each binary's `build.rs` gets the loader search order for the two linked libraries, ffmpeg and LibTorch |
-| `text-kit` | grapheme-to-phoneme: script-based language splitting, Mandarin g2p (jieba + pinyin + opencpop + tone sandhi), and GPT-SoVITS's 732-symbol table. English g2p is an embedded CMUdict over upstream's deterministic cascade; Mandarin polyphones come from `pypinyin`'s own 47k phrase dictionary. Pure Rust, no ML, no backend — so it is fully testable without weights |
+| `text-kit` | grapheme-to-phoneme: script-based language splitting, Mandarin g2p (jieba + pinyin + opencpop + tone sandhi), and GPT-SoVITS's 732-symbol table. English g2p is an embedded CMUdict over upstream's deterministic cascade; Mandarin polyphones come from `pypinyin`'s own 47k phrase dictionary; Japanese is `jpreprocess` (a pure-Rust OpenJTalk rewrite) with the dictionary supplied by the caller. Pure Rust, no ML, no backend — so it is fully testable without weights |
 | `voice-cli` | the `voice` binary: `rvc-cli`, `stt-cli`, `tts-cli` and `seedvc-cli` nested as `voice rvc …`, `voice stt`, `voice tts` and `voice seedvc` |
 
 ### Three runtimes, one path (the key abstraction)
@@ -755,8 +755,11 @@ union of per-language sets and then appends two groups *unsorted*) — off by on
 entry and the model produces confident nonsense rather than an error. Same reason
 `opencpop-strict.txt` is `include_str!`d rather than read at run time.
 
-The same table is what makes **English** cheap to add: GPT-SoVITS v2's symbol
-list already carries the ARPAbet phones, so `--language en` needs no new indices
+The same table is what makes **English and Japanese** cheap to add: GPT-SoVITS
+v2's symbol list already carries the ARPAbet phones *and* all 38 Japanese ones
+(interleaved alphabetically, because upstream builds the table with
+`sorted(set(...))`), so neither needs new indices. English `--language en`
+needs no new indices
 — only a g2p that emits them, which `english.rs` now does: an embedded CMUdict
 (125,823 entries) behind upstream's deterministic cascade. It has no neural
 out-of-vocabulary model, because Rust has no equivalent of `g2p_en`'s LSTM, so a
@@ -787,6 +790,51 @@ While porting that dictionary a live bug surfaced: the `pinyin` crate writes 绿
 `lü4` while `opencpop-strict.txt` keys its finals `lv`/`nve`, so every word
 containing 绿/女/略/律 missed the lookup and was emitted as `UNK` — a silently
 dropped syllable, not an error. The fallback now rewrites ü to v.
+
+### Japanese, and the one asset `text-kit` does not embed
+`--language ja` runs on [`jpreprocess`](https://crates.io/crates/jpreprocess)
+(BSD-3), a **pure-Rust OpenJTalk rewrite** — so it costs no C and no Python, and
+its `extract_fullcontext` emits the same HTS full-context labels that
+`pyopenjtalk.make_label(run_frontend(…))` does. `japanese.rs` therefore ports
+upstream's `pyopenjtalk_g2p_prosody` (espnet's, via `text/japanese.py`) rather
+than inventing anything: `p3` per label, unvoiced vowels lowercased, `sil` →
+`^`/`$` and `pau` → `_`, then `#`, `[` and `]` from `a1`,`a2`,`a3`,`f1` and the
+**next** label's `a2`.
+
+**`_numeric_feature_by_regex` returns `-50` when a field does not match, and that
+sentinel is load-bearing** — the `a1 == 0` and `a2 != f1` comparisons only behave
+at a sentence boundary because a missing field is a large negative rather than
+`0` or an `Option`. Substituting either changes which frames get an accent mark.
+
+**`#` is deliberately not in the 732-symbol table**, so it folds to `UNK` via
+`symbols::id()`. That is not a gap being papered over: it is bit-for-bit what
+upstream feeds the checkpoint, since `cleaner.py` maps any out-of-table phone to
+`UNK` too. `^`/`$` never reach the table at all — upstream strips them with a
+`[1:-1]`. Japanese yields `word2ph: None` like English, and upstream marks tones
+and `word2ph` as unfinished on its own side.
+
+**The dictionary is the exception to `text-kit`'s "no weights" rule, and it is
+kept outside the crate to preserve it.** NAIST-JDic is 28.7 MB, so it is a
+run-time asset fetched into the shared cache on the first Japanese run —
+`JapaneseDict::open` takes the path, and `phonemize`/`phonemize_mixed` take an
+`Option<&JapaneseDict>`. The label parsing and the prosody rules stay testable
+against hand-written label strings with no dictionary at all, which is most of
+what could go wrong. **Do not enable `jpreprocess`'s `naist-jdic` feature to
+avoid the plumbing**: that feature's `build.rs` downloads during `cargo build`,
+which is exactly the shape `crates/rvc-core/build.rs` exists to prevent for
+LibTorch. Only `tokenizer` is on.
+
+`examples/phonemize` exists because the dictionary path is the one thing
+`cargo test` cannot cover.
+
+**Bare Han follows the caller's language, and getting this wrong is silent.**
+`segment.rs` decides Japanese by the presence of kana, which is right for mixed
+text — but 東京, 日本語 and 人々 are valid in *either* language, and choosing
+Chinese regardless meant `--language ja` phonemized them as Mandarin, with a
+plausible phoneme sequence and no error anywhere. `default` now breaks that tie;
+Chinese is still the answer for every caller that did not ask for Japanese. In
+the same vein U+3005 (々) is **Han, not neutral** — upstream's
+`_japanese_characters` includes it, and as a neutral it split 人々 in two.
 
 ### Lazy parameters (`train_kit::materialize`)
 Burn allocates parameters lazily, and two things go wrong while a module is still

@@ -73,7 +73,7 @@ pub enum Lang {
     /// needs a per-character phoneme count and the English front-end has none
     /// to give, so it is fed zeros.
     En,
-    /// Japanese. No grapheme-to-phoneme front-end yet — this errors.
+    /// Japanese. Fetches a 28.7 MB dictionary on first use, into the cache.
     Ja,
 }
 

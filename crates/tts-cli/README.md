@@ -170,13 +170,20 @@ not — is [`docs/training.md`](../../docs/training.md).
 
 ## Limits
 
-**Chinese is the language that works fully.** `--language en` is intelligible but
-flatter: its front-end has no per-character phoneme count to give the prosody
-encoder, which is upstream's own behaviour. `--language ja` errors rather than
-guessing, because the wrong front-end produces fluent-sounding *wrong* audio,
-which is far harder to notice than a refusal. Mandarin readings that depend on
-grammar rather than on the word are still wrong; g2pw is the fix and is not
-written.
+**Chinese is the language that works fully.** `--language en` and `--language ja`
+are both intelligible but flatter: neither front-end has a per-character phoneme
+count to give the prosody encoder, so it is fed zeros — upstream's own behaviour
+for both. Japanese also has no tones and no `word2ph`, which upstream marks as
+unfinished too; what it does carry is the accent-phrase and pitch-movement marks
+(`#`, `[`, `]`) that its front-end derives from OpenJTalk's full-context labels.
+
+**Japanese needs a dictionary, and fetches it on first use.** NAIST-JDic is
+28.7 MB and lands in the shared cache like any other asset, so a
+Chinese-or-English user never pays for it and `tts download` does not prefetch
+it. It is *not* downloaded during `cargo build`.
+
+Mandarin readings that depend on grammar rather than on the word are still
+wrong; g2pw is the fix and is not written.
 
 Synthesis is per utterance, not streaming — `s1` finishes a line before `s2`
 renders it. The networks have no unit tests, and **weight coverage alone is not
