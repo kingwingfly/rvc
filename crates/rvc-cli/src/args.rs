@@ -49,10 +49,13 @@ pub struct ModelOpts {
     /// Generator output sample rate (40000 or 48000).
     #[arg(long, default_value_t = 48000)]
     pub model_sr: u32,
-    /// ContentVec encoder ONNX [default: auto-downloaded from Hugging Face].
+    /// ContentVec encoder: an `.onnx` file, or the directory a PyTorch one was
+    /// unpacked to [default: auto-downloaded from Hugging Face in the format
+    /// `--content-vec-backend` needs].
     #[arg(long)]
     pub content: Option<PathBuf>,
-    /// RMVPE F0 ONNX [default: auto-downloaded from Hugging Face].
+    /// RMVPE F0 estimator, `.onnx` or `.pt` [default: auto-downloaded from
+    /// Hugging Face in the format `--rmvpe-backend` needs].
     #[arg(long)]
     pub rmvpe: Option<PathBuf>,
     /// Directory the downloaded models are cached in. Shared by every engine
@@ -138,10 +141,21 @@ impl FeatureBackendOpts {
     /// contract [`Backend::resolve`] keeps and its tests assert. Substituting
     /// one the user did not ask for is how somebody ends up loading weights in
     /// the wrong format and blaming the model.
+    ///
+    /// The one value that is not passed through is `auto`, and it is not an
+    /// exception: **`--rmvpe-backend auto` means the same as leaving the flag
+    /// off**, which is what the help text promises. It cannot mean "re-derive
+    /// from the hardware", because that is the double resolution above; and it
+    /// must not be carried through as `Auto`, because `Auto` is not a runtime —
+    /// it would leave a value that matches no arm and maps to no weight format.
     pub fn resolve(self, generator: Backend) -> FeatureBackends {
+        let inherit = |chosen: Option<Backend>| match chosen {
+            None | Some(Backend::Auto) => generator,
+            Some(explicit) => explicit,
+        };
         FeatureBackends {
-            content: self.content_vec_backend.unwrap_or(generator),
-            rmvpe: self.rmvpe_backend.unwrap_or(generator),
+            content: inherit(self.content_vec_backend),
+            rmvpe: inherit(self.rmvpe_backend),
         }
     }
 }
@@ -156,9 +170,9 @@ impl FeatureBackendOpts {
 /// loading the file knows that a PyTorch ContentVec is a *directory* where the
 /// ONNX one is a single file.
 ///
-/// `auto` cannot reach here — [`FeatureBackendOpts::resolve`] has already
-/// resolved it — but it is mapped rather than panicked on, since the answer for
-/// a Burn backend is the same whichever one it turns out to be.
+/// `auto` cannot reach here — [`FeatureBackendOpts::resolve`] turns it into the
+/// generator's backend — but it is mapped rather than panicked on, since the
+/// answer for a Burn backend is the same whichever one it turns out to be.
 pub fn weight_format(backend: Backend) -> hub_kit::WeightFormat {
     match backend {
         Backend::Onnx => hub_kit::WeightFormat::Onnx,
@@ -436,10 +450,12 @@ pub struct TrainArgs {
     /// fetches nothing either: it continues from weights that already exist.
     #[arg(long)]
     pub no_pretrained: bool,
-    /// ContentVec encoder ONNX [default: auto-downloaded].
+    /// ContentVec encoder ONNX [default: auto-downloaded]. The trainer's
+    /// extractors are ONNX whichever backend trains the generator.
     #[arg(long)]
     pub content: Option<PathBuf>,
-    /// RMVPE F0 ONNX [default: auto-downloaded].
+    /// RMVPE F0 ONNX [default: auto-downloaded]. As above: ONNX, whatever
+    /// `--backend` says.
     #[arg(long)]
     pub rmvpe: Option<PathBuf>,
     #[command(flatten)]
@@ -621,6 +637,21 @@ mod tests {
             .resolve(Backend::Tch);
         assert_eq!(features.content, Backend::Tch, "content kept --backend");
         assert_eq!(features.rmvpe, Backend::Onnx);
+    }
+
+    /// `auto` is a value clap offers on both flags, so it has to mean
+    /// something: the same as leaving the flag off. It must not survive as
+    /// `Backend::Auto`, which is not a runtime — it matches no loader arm and
+    /// names no weight format, so it would silently take the Torch branch of
+    /// `weight_format` and then fail to equal `Onnx` anywhere.
+    #[test]
+    fn auto_named_out_loud_still_means_inherit() {
+        let features = convert(&["--content-vec-backend", "auto", "--rmvpe-backend", "auto"])
+            .features
+            .resolve(Backend::Onnx);
+        assert_eq!(features.content, Backend::Onnx);
+        assert_eq!(features.rmvpe, Backend::Onnx);
+        assert_eq!(weight_format(features.content), hub_kit::WeightFormat::Onnx);
     }
 
     /// Both flags take `cli_kit::Backend`, so every alias any binary accepts
