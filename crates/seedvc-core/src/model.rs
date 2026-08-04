@@ -321,14 +321,26 @@ impl<B: Backend> Model for BurnModel<B> {
             )));
         }
 
-        // `Fbank::forward` asserts on a clip too short to frame, and an assert
-        // would name the transform's invariant rather than the clip that broke it.
-        let window = FbankConfig::default().window();
-        if content.len() < window {
+        // Three filterbank frames, not one. One is all `Fbank::forward` needs —
+        // but CAMPPlus pools over time with a **Bessel-corrected** variance, and
+        // its first TDNN is stride-2, so two frames leave one behind that stride
+        // and `var` divides by `n - 1 = 0`. The result is a `NaN` style vector,
+        // and nothing downstream rejects it: it multiplies through the
+        // transformer into every output sample, so the run reports success and
+        // writes a whole file of `NaN`. Measured: a 40 ms reference gave 22016
+        // `NaN` samples, a 45 ms one gave clean audio.
+        let fbank = FbankConfig::default();
+        let (window, shift) = (fbank.window(), fbank.shift());
+        let minimum = window + 2 * shift;
+        if content.len() < minimum {
             return Err(Error::Reference(format!(
-                "the reference clip is {} samples at {CONTENT_SR} Hz, shorter than the timbre \
-                 encoder's own {window}-sample analysis window",
+                "the reference clip is {} samples at {CONTENT_SR} Hz ({:.0} ms) and the timbre \
+                 encoder needs at least {minimum} ({:.0} ms) — its statistics pooling takes a \
+                 variance over time, which needs two frames to be defined at all. A clip this \
+                 short cannot specify a speaker anyway; 1-30 s is the useful range",
                 content.len(),
+                content.len() as f64 * 1e3 / CONTENT_SR as f64,
+                minimum as f64 * 1e3 / CONTENT_SR as f64,
             )));
         }
         // `Fbank` hands back `[batch, frames, bins]` — the axis order CAMPPlus

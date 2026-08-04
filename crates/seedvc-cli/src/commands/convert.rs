@@ -43,6 +43,18 @@ pub async fn run(args: Box<ConvertArgs>) -> Result<()> {
         let out = tokio::task::block_in_place(|| converter.convert_all(&source))
             .with_context(|| format!("converting {}", input.display()))?;
 
+        // A source under one content frame has nothing for the encoder to read,
+        // so the converter correctly returns nothing. Writing that would leave a
+        // 44-byte WAV — a header and no samples — beside the real outputs, and
+        // the run would report having written it. Refuse instead: an empty file
+        // is indistinguishable from a conversion that went wrong.
+        anyhow::ensure!(
+            !out.is_empty(),
+            "{} converted to no audio at all: it is shorter than one 20 ms frame of the content \
+             encoder, so there is nothing in it to convert",
+            input.display(),
+        );
+
         // `<stem>.wav`, unlike `rvc`'s `<stem>_<model>.wav`: there is no trained
         // model to name here, and naming the reference clip instead would put a
         // path fragment nobody chose into every filename.

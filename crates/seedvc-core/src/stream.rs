@@ -354,15 +354,25 @@ impl Converter {
         let end = (((start + self.pending.len()) as f64 / self.per_frame) as usize).max(self.done);
         let frames = end - self.done;
 
-        // Only worth generating if it reaches past what the last chunk already
-        // covered; anything shorter is already in `tail`.
-        //
+        // How much of the remainder some earlier chunk already generated. The
+        // withheld `tail` is exactly the crossfade, so that is the answer —
+        // **unless there is no tail**, which means no chunk was ever produced
+        // and nothing covers anything. Reading `chunk - block` unconditionally
+        // is what made a source shorter than one crossfade convert to silence:
+        // it fell past this guard, found an empty tail, and emitted nothing
+        // while the run reported success. A 0.1 s file wrote a 44-byte WAV.
+        let covered = if self.tail.is_empty() {
+            0
+        } else {
+            self.chunk - self.block
+        };
+
         // All of what is left is fed, not just the part the frame grid covers:
         // the sub-frame remainder is content the source really has, the length
         // regulator resamples whatever it is given onto `frames` either way, and
         // feeding it is what makes this identical to the batch path's last
         // chunk rather than 10 ms short of it.
-        if frames > self.chunk - self.block && self.pending.len() >= CONTENT_STRIDE {
+        if frames > covered && self.pending.len() >= CONTENT_STRIDE {
             let wave = self.generate(self.pending.len(), frames)?;
             self.tail.clear();
             outs.push(wave);
@@ -777,5 +787,31 @@ mod tests {
         let out = converter.flush().unwrap();
         assert_eq!(out.len(), 1);
         assert!(!out[0].is_empty());
+    }
+
+    /// A stream shorter than the **crossfade** is audio too, and it used to come
+    /// out silent: `flush` asked whether the remainder reached past what the last
+    /// chunk covered without asking whether there had been a last chunk. Nothing
+    /// errored — a 0.1 s file wrote a WAV header and no samples.
+    ///
+    /// Swept rather than spot-checked, because the defect had a threshold and a
+    /// single duration either side of it proves nothing about the other. The
+    /// sweep starts at 20 ms because that is [`CONTENT_STRIDE`] — a source under
+    /// one content frame really does convert to nothing, which is the documented
+    /// floor rather than this defect.
+    #[test]
+    fn a_stream_under_one_crossfade_still_converts() {
+        for ms in [20, 25, 50, 100, 150, 200, 400] {
+            let mut converter = converter(430, StreamParams::realtime());
+            let seconds = ms as f64 / 1000.0;
+            let pushed = converter.push(&ramp(seconds)).unwrap();
+            let flushed = converter.flush().unwrap();
+            let samples: usize = pushed
+                .iter()
+                .chain(flushed.iter())
+                .map(|chunk| chunk.len())
+                .sum();
+            assert!(samples > 0, "{ms} ms of source converted to nothing at all");
+        }
     }
 }
