@@ -26,6 +26,9 @@ burn-kit = { workspace = true, features = ["store"] }
 audio-kit.workspace = true
 cli-kit.workspace = true
 anyhow.workspace = true
+# The streaming filter's output side: a `Stream` fed from the blocking worker's
+# channel, which is what `rvc-core` builds its filter out of too.
+async-stream.workspace = true
 futures.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync"] }

@@ -52,6 +52,7 @@
 use std::path::Path;
 
 use audio_kit::DecodeOptions;
+use burn_seedvc::SeedVcConfig;
 use burn_seedvc::content::WINDOW_SAMPLES;
 use burn_seedvc::flow::Sampler;
 use futures::StreamExt;
@@ -75,6 +76,54 @@ pub const CONTEXT_SECONDS: usize = 30;
 /// [`Model::convert`] rather than merely being small. So the *previous* chunk
 /// gives back a few frames to keep the last one above this, which is 0.37 s.
 const MIN_CHUNK_FRAMES: usize = 32;
+
+/// Frames the source is left after the reference has taken its share of the
+/// shared window, or the refusal when there are not enough of them.
+///
+/// Both paths ask this before anything is converted — [`convert`] once per file
+/// and [`Converter::new`](crate::stream::Converter::new) once per session — so a
+/// reference that fills the window is refused in the same words either way, and
+/// in terms of the only thing the user can do about it.
+pub(crate) fn room(cfg: &SeedVcConfig, reference: &Reference) -> Result<usize> {
+    let hop = cfg.hop_length;
+    let context = (cfg.sample_rate as usize / hop) * CONTEXT_SECONDS;
+
+    // Saturating, because this is the subtraction that underflows: `analyse`
+    // admits a reference up to the content encoder's own 30 s, which is
+    // 2584 frames — four more than the window they then have to share.
+    let room = context.saturating_sub(reference.frames);
+    if room <= OVERLAP_FRAMES + MIN_CHUNK_FRAMES {
+        return Err(Error::Input(format!(
+            "the reference is {} of the {context} mel frames the transformer sees at once \
+             ({CONTEXT_SECONDS} s at {} Hz over a hop of {hop}), leaving {room} for the source — \
+             a chunk carries {OVERLAP_FRAMES} frames of crossfade and at least \
+             {MIN_CHUNK_FRAMES} of new audio, so trim the reference",
+            reference.frames, cfg.sample_rate,
+        )));
+    }
+    Ok(room)
+}
+
+/// Blend a chunk's head over the previous chunk's held-back tail, in place.
+///
+/// **cos² equal-power**, not linear: the two fades sum to 1 exactly, so a steady
+/// signal crosses the seam unchanged where a linear pair would dip. Every chunk
+/// is an independent generation from fresh noise against the same prompt, which
+/// is what makes the choice matter — the two sides agree on timbre and content
+/// and on nothing about phase.
+///
+/// The fade is as long as `previous`, so an empty tail — the first chunk of a
+/// file or of a stream — is a no-op.
+pub(crate) fn crossfade(wave: &mut [f32], previous: &[f32]) {
+    // The saturation guards the empty tail — every first chunk — and the `max`
+    // the one-sample tail no caller produces; either would otherwise divide by
+    // zero and write `NaN` into the output rather than failing.
+    let last = previous.len().saturating_sub(1).max(1) as f32;
+    for (i, (sample, held)) in wave.iter_mut().zip(previous).enumerate() {
+        let theta = std::f32::consts::FRAC_PI_2 * i as f32 / last;
+        *sample = *sample * theta.sin().powi(2) + held * theta.cos().powi(2);
+    }
+}
 
 /// How to convert.
 #[derive(Debug, Clone, Copy)]
@@ -134,21 +183,7 @@ pub fn convert(
 ) -> Result<Vec<f32>> {
     let cfg = model.config();
     let hop = cfg.hop_length;
-    let context = (cfg.sample_rate as usize / hop) * CONTEXT_SECONDS;
-
-    // Saturating, because this is the subtraction that underflows: `analyse`
-    // admits a reference up to the content encoder's own 30 s, which is
-    // 2584 frames — four more than the window they then have to share.
-    let room = context.saturating_sub(reference.frames);
-    if room <= OVERLAP_FRAMES + MIN_CHUNK_FRAMES {
-        return Err(Error::Input(format!(
-            "the reference is {} of the {context} mel frames the transformer sees at once \
-             ({CONTEXT_SECONDS} s at {} Hz over a hop of {hop}), leaving {room} for the source — \
-             a chunk carries {OVERLAP_FRAMES} frames of crossfade and at least \
-             {MIN_CHUNK_FRAMES} of new audio, so trim the reference",
-            reference.frames, cfg.sample_rate,
-        )));
-    }
+    let room = room(cfg, reference)?;
 
     // The source's mel frame count, which upstream reads off a 22.05 kHz decode
     // of the same file. Derived from the 16 kHz length instead: the source's
@@ -189,13 +224,6 @@ pub fn convert(
     }
 
     let overlap = OVERLAP_FRAMES * hop;
-    let fades: Vec<(f32, f32)> = (0..overlap)
-        .map(|i| {
-            let theta = std::f32::consts::FRAC_PI_2 * i as f32 / (overlap - 1) as f32;
-            (theta.cos().powi(2), theta.sin().powi(2))
-        })
-        .collect();
-
     let mut rng = Rng::new(opts.seed);
     let mut out: Vec<f32> = Vec::with_capacity(total * hop);
     let mut tail: Vec<f32> = Vec::new();
@@ -224,12 +252,7 @@ pub fn convert(
             opts.sampler,
         )?;
 
-        // Blend this chunk's head over the previous chunk's held-back tail. The
-        // two fades sum to 1, so the seam is inaudible on a steady signal even
-        // though the chunks either side of it are independent generations.
-        for ((s, (fade_out, fade_in)), previous) in wave.iter_mut().zip(&fades).zip(&tail) {
-            *s = *s * fade_in + previous * fade_out;
-        }
+        crossfade(&mut wave, &tail);
 
         if last {
             out.extend_from_slice(&wave);
@@ -250,10 +273,13 @@ pub fn convert(
 /// shared: no engine depends on another engine, and fifteen lines of arithmetic
 /// is not enough model-free plumbing to earn a `*-kit` of its own. If a third
 /// engine wants it, that is the point to move it.
-struct Rng(u64);
+///
+/// [`crate::stream`] draws from one of these too, seeded the same way, which is
+/// what lets a streamed conversion and a batch one be held against each other.
+pub(crate) struct Rng(u64);
 
 impl Rng {
-    fn new(seed: u64) -> Self {
+    pub(crate) fn new(seed: u64) -> Self {
         Self(seed | 1)
     }
 
@@ -270,7 +296,7 @@ impl Rng {
     /// Box–Muller, keeping one of the two values it produces: holding the spare
     /// would make the state depend on how many draws came before, and the one
     /// property that has to hold is that the same seed gives the same noise.
-    fn next_normal(&mut self) -> f32 {
+    pub(crate) fn next_normal(&mut self) -> f32 {
         let u = self.next_f32().max(f32::MIN_POSITIVE);
         let v = self.next_f32();
         (-2.0 * u.ln()).sqrt() * (2.0 * std::f32::consts::PI * v).cos()
