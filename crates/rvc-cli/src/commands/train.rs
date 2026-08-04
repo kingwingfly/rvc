@@ -60,7 +60,7 @@ pub async fn run(args: TrainArgs) -> Result<()> {
         Some(p) => p.clone(),
         None => {
             tracing::info!("resolving ContentVec ONNX from Hugging Face...");
-            hub_kit::fetch(&hub_kit::default_contentvec(), cache)
+            hub_kit::fetch_contentvec(hub_kit::WeightFormat::Onnx, cache)
                 .await
                 .context("failed to fetch ContentVec ONNX (override with --content)")?
         }
@@ -69,7 +69,7 @@ pub async fn run(args: TrainArgs) -> Result<()> {
         Some(p) => p.clone(),
         None => {
             tracing::info!("resolving RMVPE ONNX from Hugging Face...");
-            hub_kit::fetch(&hub_kit::default_rmvpe(), cache)
+            hub_kit::fetch_rmvpe(hub_kit::WeightFormat::Onnx, cache)
                 .await
                 .context("failed to fetch RMVPE ONNX (override with --rmvpe)")?
         }
