@@ -1,10 +1,17 @@
 //! RVC v2 voice conversion — the rvc toolkit's conversion pipeline.
 //!
-//! The pipeline is three ONNX models run via `ort` (ContentVec + RMVPE +
-//! trained generator). It converts a source voice's **timbre** to the target
-//! while preserving content and pitch — which is exactly why breathy/expressive
-//! speech survives: it lives in the content and F0 streams, not the timbre
-//! the generator replaces.
+//! The pipeline is three models — ContentVec, RMVPE and the trained generator —
+//! and **each picks its runtime independently**: ONNX Runtime via `ort`, or Burn
+//! on LibTorch, CubeCL/CUDA or WebGPU. They need not agree, which is what
+//! `--content-vec-backend` and `--rmvpe-backend` exist to express. It converts a
+//! source voice's **timbre** to the target while preserving content and pitch —
+//! which is exactly why breathy/expressive speech survives: it lives in the
+//! content and F0 streams, not the timbre the generator replaces.
+//!
+//! The one configuration that is *not* three independent choices is all-ONNX:
+//! [`RvcModel`] fuses the three into a single pipeline, which is why
+//! [`FeatureExtractor`] and [`Generator`] are composed separately for every
+//! other combination.
 //!
 //! Audio crosses every boundary as mono `f32`, and the conversion path is
 //! [`futures::Stream`]-in → [`futures::Stream`]-out ([`convert::convert_stream`]),

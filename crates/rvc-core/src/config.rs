@@ -59,7 +59,13 @@ impl Default for GeneratorIo {
     }
 }
 
-/// Paths to the three ONNX models the pipeline needs.
+/// Paths to the three ONNX graphs the **fused** pure-ORT pipeline needs.
+///
+/// Deliberately all-or-nothing, and that is why it is not the general shape:
+/// [`RvcModel`](crate::RvcModel) is one pipeline built from all three at once,
+/// so it cannot describe an ONNX generator whose RMVPE runs on LibTorch. Any
+/// mixed configuration composes a [`FeatureExtractor`](crate::FeatureExtractor)
+/// and a [`Generator`](crate::Generator) separately instead.
 #[derive(Debug, Clone)]
 pub struct ModelPaths {
     /// ContentVec / HuBERT encoder (`vec-768-layer-12.onnx`).

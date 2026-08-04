@@ -1,8 +1,9 @@
 //! Reusable content + F0 feature extraction.
 //!
 //! The trainer needs exactly the analysis features the inference path derives:
-//! per-frame ContentVec content vectors and an RMVPE F0 contour. This wraps the
-//! same two ONNX sessions so training and inference share one implementation.
+//! per-frame ContentVec content vectors and an RMVPE F0 contour. This pairs one
+//! [`ContentEncoder`] with one [`PitchEstimator`] so training and inference
+//! share a single implementation — whichever runtime each of the two is on.
 
 use std::path::Path;
 
@@ -97,8 +98,8 @@ impl FeatureExtractor {
 
     /// Extract content vectors and F0 from a mono **16 kHz** `f32` buffer.
     ///
-    /// Runs the whole buffer through the ONNX models in one pass — fine for
-    /// short clips, but long audio can exceed GPU memory. Use
+    /// Runs the whole buffer through both models in one pass — fine for short
+    /// clips, but long audio can exceed GPU memory on any backend. Use
     /// [`Self::extract_aligned`] for arbitrary-length input.
     pub fn extract(&mut self, wav16k: &[f32]) -> Result<Features> {
         let content = self.content.extract(wav16k)?;
