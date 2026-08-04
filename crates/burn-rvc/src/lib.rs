@@ -11,14 +11,21 @@
 //! - [`ResidualCouplingBlock`] — `flow`.
 //! - [`GeneratorNsf`] — `dec` (NSF-HiFiGAN decoder).
 //!
+//! [`ContentVec`] joins them as the *input* side: the content encoder whose
+//! frames `enc_p` consumes. It is a HuBERT checkpoint, so the network itself
+//! lives in `burn-hubert` — shared with GPT-SoVITS's cnhubert — and this crate
+//! contributes only RVC's readout of it.
+//!
 //! The model is generic over the Burn [`Backend`](burn::tensor::backend::Backend).
 
 mod config;
+mod contentvec;
 mod generator;
 mod synthesizer;
 mod text_encoder;
 
 pub use config::{RVC_V2_PERIODS, SynthesizerConfig};
+pub use contentvec::ContentVec;
 pub use generator::{GeneratorNsf, SourceModule};
 pub use synthesizer::{Synthesizer, TrainForward};
 pub use text_encoder::TextEncoder;
