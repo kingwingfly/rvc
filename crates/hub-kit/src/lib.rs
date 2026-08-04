@@ -681,6 +681,46 @@ fn missing(what: &str, dir: &Path) -> HubError {
 mod tests {
     use super::*;
 
+    /// `default_rmvpe`'s whole job is a one-word filename change on the same
+    /// first-party repo — this pins both words.
+    #[test]
+    fn default_rmvpe_selects_the_right_file_per_format() {
+        let onnx = default_rmvpe(WeightFormat::Onnx);
+        assert_eq!(onnx.owner, "lj1995");
+        assert_eq!(onnx.name, "VoiceConversionWebUI");
+        assert_eq!(onnx.file, "rmvpe.onnx");
+
+        let torch = default_rmvpe(WeightFormat::Torch);
+        assert_eq!(torch.owner, "lj1995");
+        assert_eq!(torch.name, "VoiceConversionWebUI");
+        assert_eq!(torch.file, "rmvpe.pt");
+    }
+
+    /// The pre-existing ONNX answer must be untouched by adding `WeightFormat`
+    /// beside it — every existing call site depends on this exact repo/file.
+    #[test]
+    fn default_contentvec_is_unchanged_by_the_weight_format_addition() {
+        let cv = default_contentvec();
+        assert_eq!(cv.owner, "NaruseMioShirakana");
+        assert_eq!(cv.name, "MoeSS-SUBModel");
+        assert_eq!(cv.file, "vec-768-layer-12.onnx");
+    }
+
+    /// The PyTorch ContentVec directory: first-party repo, three files, the
+    /// same triple `fetch_contentvec`'s `Torch` arm loops over.
+    #[test]
+    fn contentvec_torch_repo_and_files_are_the_hubert_base_triple() {
+        assert_eq!(CONTENTVEC_TORCH_REPO, ("lj1995", "VoiceConversionWebUI"));
+        assert_eq!(
+            CONTENTVEC_TORCH_FILES,
+            [
+                "hubert_base/config.json",
+                "hubert_base/pytorch_model.bin",
+                "hubert_base/preprocessor_config.json",
+            ]
+        );
+    }
+
     /// A fake environment, so precedence is tested without `set_var` racing the
     /// other tests in this binary.
     fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<std::ffi::OsString> + use<> {
