@@ -101,26 +101,36 @@ impl common::Job for LoadContentVec {
             println!("    MISSING {name}  ({why})");
         }
 
-        // `final_proj` is v1's readout and `masked_spec_embed` is SpecAugment's
-        // mask token; both are in the file and read by nothing at inference. The
-        // LayerNorms are a reporting artefact — `burn-store` applies them under
-        // Burn's `gamma`/`beta` names and still counts the originals unconsumed.
-        let expected = |k: &str| {
-            k.starts_with("final_proj.")
-                || k == "masked_spec_embed"
-                || k.ends_with("layer_norm.weight")
-                || k.ends_with("layer_norm.bias")
+        // Every unused tensor is accounted for by name rather than by a total,
+        // because the whole value of this check is that a *new* one stands out.
+        // `final_proj` is RVC v1's ninth-layer readout and `masked_spec_embed` is
+        // SpecAugment's mask token — both in the file, both read by nothing at
+        // inference. The LayerNorms are a reporting artefact: `burn-store`
+        // applies them under Burn's `gamma`/`beta` names and still counts the
+        // originals unconsumed.
+        let class = |k: &str| {
+            if k.starts_with("final_proj.") {
+                "final_proj (v1's readout)"
+            } else if k == "masked_spec_embed" {
+                "masked_spec_embed (SpecAugment)"
+            } else if k.ends_with("layer_norm.weight") || k.ends_with("layer_norm.bias") {
+                "LayerNorm (applied as gamma/beta)"
+            } else {
+                "UNACCOUNTED"
+            }
         };
-        let (known, real): (Vec<_>, Vec<_>) = res.unused.iter().partition(|k| expected(k));
-        println!(
-            "unused  : {} ({} expected — v1's final_proj, the mask token, the \
-             renamed LayerNorms; {} genuinely unused)",
-            res.unused.len(),
-            known.len(),
-            real.len()
-        );
-        for name in &real {
-            println!("    UNUSED {name}");
+        println!("unused  : {}", res.unused.len());
+        let mut counts: std::collections::BTreeMap<&str, Vec<&String>> = Default::default();
+        for name in &res.unused {
+            counts.entry(class(name)).or_default().push(name);
+        }
+        for (why, names) in &counts {
+            println!("    {:3}  {why}", names.len());
+            if *why == "UNACCOUNTED" {
+                for name in names {
+                    println!("         {name}");
+                }
+            }
         }
         println!("errors  : {}", res.errors.len());
         for e in &res.errors {

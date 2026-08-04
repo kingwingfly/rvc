@@ -378,10 +378,20 @@ impl<B: Backend> Hubert<B> {
 
     /// Load a Hugging Face `pytorch_model.bin`.
     ///
-    /// The state dict is at the root, with no wrapping key. One remap: upstream
-    /// wraps the positional convolution's parameters in a `conv` submodule, and
-    /// flattening it here keeps [`PosConv`] a single struct rather than adding a
-    /// level that exists only to carry a name.
+    /// The state dict is at the root, with no wrapping key. The first remap is
+    /// upstream's doing: it wraps the positional convolution's parameters in a
+    /// `conv` submodule, and flattening it here keeps [`PosConv`] a single
+    /// struct rather than adding a level that exists only to carry a name.
+    ///
+    /// **The other two are PyTorch's, and which spelling a checkpoint uses is a
+    /// property of the torch version that saved it rather than of the model.**
+    /// `torch.nn.utils.weight_norm` wrote `weight_g`/`weight_v`;
+    /// `torch.nn.utils.parametrizations.weight_norm`, which supersedes it,
+    /// writes `parametrizations.weight.original0`/`original1` for the same two
+    /// tensors in the same order. `chinese-hubert-base` is the old spelling and
+    /// RVC's ContentVec the new one, so both are accepted — and getting the
+    /// pairing backwards is caught rather than absorbed, since `g` is
+    /// `[1, 1, kernel]` against `v`'s `[channels, channels / groups, kernel]`.
     ///
     /// Two entries are legitimately unused. `masked_spec_embed` is SpecAugment's
     /// mask token, which only exists while the SSL model itself is trained. And
@@ -392,10 +402,20 @@ impl<B: Backend> Hubert<B> {
         &mut self,
         path: impl AsRef<std::path::Path>,
     ) -> Result<burn_store::ApplyResult, Box<dyn std::error::Error>> {
-        let remaps = [(
-            r"^encoder\.pos_conv_embed\.conv\.",
-            "encoder.pos_conv_embed.",
-        )];
+        let remaps = [
+            (
+                r"^encoder\.pos_conv_embed\.conv\.",
+                "encoder.pos_conv_embed.",
+            ),
+            (
+                r"^encoder\.pos_conv_embed\.parametrizations\.weight\.original0$",
+                "encoder.pos_conv_embed.weight_g",
+            ),
+            (
+                r"^encoder\.pos_conv_embed\.parametrizations\.weight\.original1$",
+                "encoder.pos_conv_embed.weight_v",
+            ),
+        ];
         burn_kit::store::load_pytorch_into::<B, _>(self, path.as_ref(), None, &remaps)
     }
 }
