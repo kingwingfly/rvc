@@ -175,10 +175,11 @@ mod tests {
 
     /// `anlmdn` — the de-hiss engine `rvc-core` ships — must **preserve** wanted
     /// content, which is the whole reason it's chosen over spectral subtraction
-    /// for ASMR. Its hiss *removal* is signal-dependent (it keys off the
-    /// broadband self-similarity of real breath/whisper texture, so it can't be
-    /// exercised by a synthetic tone) and is covered by manual evaluation; here
-    /// we lock in that a structured signal passes through at ~unity energy.
+    /// for soft, breathy material. Its hiss *removal* is signal-dependent (it
+    /// keys off the broadband self-similarity of real breath/whisper texture,
+    /// so it can't be exercised by a synthetic tone) and is covered by manual
+    /// evaluation; here we lock in that a structured signal passes through at
+    /// ~unity energy.
     #[test]
     fn anlmdn_preserves_content() {
         let sr = 48_000u32;

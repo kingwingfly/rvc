@@ -248,7 +248,7 @@ mel loss plateauing or oscillating in the back half — audible as muffled
 - **SNR clip weighting** (`--snr-weight`, RVC, default uniform). Biases which
   clip a window is drawn from by `snr^alpha`, where `snr` is the clip's
   *noise-floor* SNR — p75 frame-RMS over p10 frame-RMS, a ratio and never
-  absolute loudness, so a soft-but-clean ASMR clip still scores high and the
+  absolute loudness, so a soft-but-clean clip still scores high and the
   breathy passages the slicer works to preserve are not penalised.
 
 ## Never clobbering a trained voice

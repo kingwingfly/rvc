@@ -34,9 +34,8 @@ pub struct PreprocessArgs {
     #[arg(long, alias = "model-sr", default_value_t = 48000)]
     pub sr: u32,
     /// Energy floor in dBFS: audio quieter than this counts as between-sentence
-    /// dead-air. ASMR users can lower it (e.g. -50) to keep the very softest
-    /// passages — energy is used only to find silent gaps, never to gate quiet
-    /// content.
+    /// dead-air. Lower it (e.g. -50) to keep the very softest passages —
+    /// energy is used only to find silent gaps, never to gate quiet content.
     #[arg(long, default_value_t = -40.0)]
     pub silence_db: f32,
     /// Minimum silent-gap length (seconds) that counts as a sentence boundary.

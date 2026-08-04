@@ -296,7 +296,7 @@ let n  = up.len().min(feats.f0.len());        // align to F0 length
 RMVPE estimates the fundamental frequency $F_0$ — the pitch — for each frame,
 and marks frames as *voiced* or *unvoiced* (silence / breath has no pitch). It
 is prized for staying accurate on noisy, expressive, or quiet material, which
-matters enormously for ASMR-style corpora full of soft phonation.
+matters enormously for quiet, close-mic corpora full of soft phonation.
 
 Pitch feeds the model in *two* forms, and understanding why is worth a moment:
 
@@ -493,8 +493,8 @@ sine[j] = (phase * 2.0 * PI).sin() * SINE_AMP;
 
 Voiced frames get the sine; unvoiced frames get low-level Gaussian noise
 (breath). The only learnable part of the source is a single `l_linear`
-projection feeding a `tanh`. This is precisely why *breathy, unvoiced ASMR
-content survives*: unvoiced frames are handled explicitly by the noise branch,
+projection feeding a `tanh`. This is precisely why *breathy, unvoiced speech
+survives*: unvoiced frames are handled explicitly by the noise branch,
 not discarded.
 
 == A note on dimensions (v2, 48 kHz)
@@ -752,7 +752,7 @@ handing $G$ a little room to catch up.
 Finally, corpus clips are not equally clean. `--snr-weight` biases sampling toward
 the clips with a lower noise floor, weighting each by $"SNR"^alpha$. Crucially the
 score is a *signal-to-noise ratio* — a clip's loud-percentile level over its
-noise-floor level — and *not loudness*, so a soft, breathy ASMR take still scores
+noise-floor level — and *not loudness*, so a soft, breathy take still scores
 high and is never penalised for being quiet. This steers away from hiss while
 keeping the very content the corpus exists to capture. (Contrast §10, which removes
 between-sentence *silence*; this weights whole clips by *noise*.)

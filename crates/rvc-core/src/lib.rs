@@ -3,8 +3,8 @@
 //! The pipeline is three ONNX models run via `ort` (ContentVec + RMVPE +
 //! trained generator). It converts a source voice's **timbre** to the target
 //! while preserving content and pitch — which is exactly why breathy/expressive
-//! vocalizations survive: they live in the content and F0 streams, not the
-//! timbre the generator replaces.
+//! speech survives: it lives in the content and F0 streams, not the timbre
+//! the generator replaces.
 //!
 //! Audio crosses every boundary as mono `f32`, and the conversion path is
 //! [`futures::Stream`]-in → [`futures::Stream`]-out ([`convert::convert_stream`]),

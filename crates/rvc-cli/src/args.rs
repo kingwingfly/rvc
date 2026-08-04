@@ -170,7 +170,7 @@ impl FilterArgs {
 pub struct DenoiseOpts {
     /// Remove steady background hiss from the output (ffmpeg `anlmdn`
     /// non-local-means de-noise, run in-process, tuned to preserve the soft
-    /// broadband texture of ASMR/breathy content).
+    /// broadband texture of quiet, breathy content).
     #[arg(long)]
     pub denoise: bool,
     /// De-hiss strength: raise to remove more hiss, lower if soft/breathy

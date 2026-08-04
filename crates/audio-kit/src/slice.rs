@@ -2,7 +2,7 @@
 //!
 //! Splits a mono `f32` recording into voiced `[start, end)` sample ranges by
 //! removing *between-sentence dead-air only*. This is a clean-room RMS slicer
-//! written for ASMR corpora, where soft breathy content is low-energy but
+//! written for quiet, breathy corpora, where soft content is low-energy but
 //! wanted — so energy is used **solely** to locate long silent gaps between
 //! sentences, never to gate quiet-but-present sound.
 //!
@@ -21,8 +21,8 @@
 /// Tuning knobs for [`slice`]. All durations are in seconds.
 #[derive(Debug, Clone, Copy)]
 pub struct SliceOptions {
-    /// Energy floor in dBFS. A frame quieter than this counts as silence. ASMR
-    /// users can lower it (e.g. `-50`) to keep the very softest passages.
+    /// Energy floor in dBFS. A frame quieter than this counts as silence.
+    /// Lower it (e.g. `-50`) to keep the very softest passages.
     pub silence_db: f32,
     /// Minimum length of a silent gap (seconds) for it to be a cut point.
     /// Shorter gaps are treated as internal pauses and kept inside the clip, so

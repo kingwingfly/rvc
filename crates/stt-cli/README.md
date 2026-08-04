@@ -136,7 +136,7 @@ ffmpeg -v quiet -i take.mp3 -f f32le -ar 16000 -ac 1 - | stt --format jsonl
 **A soft, close-mic recording.** Keep the quiet passages and be slower to cut:
 
 ```sh
-ffmpeg -v quiet -i asmr.mp3 -f f32le -ar 16000 -ac 1 - \
+ffmpeg -v quiet -i soft-take.mp3 -f f32le -ar 16000 -ac 1 - \
   | stt --silence-db=-50 --min-silence 0.8 --language zh --format jsonl
 ```
 
