@@ -22,6 +22,29 @@ pub const DEFAULT_CHUNK: usize = 160_000;
 /// RMVPE voicing threshold used across the toolkit.
 const F0_THRESHOLD: f32 = 0.03;
 
+/// Build the ONNX ContentVec encoder from a `.onnx` file.
+///
+/// The peer of `burn_features`' `cuda_content_encoder` and friends, and boxed
+/// for the same reason: the caller picks one of several constructors in a
+/// `match` and every arm has to yield the same type. This one is not behind a
+/// feature, because ONNX Runtime is not optional in this crate.
+pub fn onnx_content_encoder(path: &Path) -> Result<Box<dyn ContentEncoder>> {
+    Ok(Box::new(OnnxContentEncoder::new(build_session(path)?)))
+}
+
+/// Build the ONNX RMVPE pitch estimator from a `.onnx` file.
+///
+/// Uses [`FeatureExtractor::F0_THRESHOLD`], so every runtime in the toolkit
+/// draws the voiced/unvoiced line in the same place — which matters more than
+/// it looks, since a frame below it comes out as 0 and 0 is what switches the
+/// generator to the noise branch that renders breath.
+pub fn onnx_pitch_estimator(path: &Path) -> Result<Box<dyn PitchEstimator>> {
+    Ok(Box::new(OnnxPitchEstimator::new(
+        build_session(path)?,
+        F0_THRESHOLD,
+    )))
+}
+
 /// Content vectors and F0 for one clip, sampled on the analysis frame grid.
 pub struct Features {
     /// Time-major content features, `[T][768]`.
@@ -50,11 +73,8 @@ impl FeatureExtractor {
     /// exactly this pair. Anything else goes through [`Self::from_parts`].
     pub fn load(content_onnx: &Path, rmvpe_onnx: &Path) -> Result<Self> {
         Ok(Self::from_parts(
-            Box::new(OnnxContentEncoder::new(build_session(content_onnx)?)),
-            Box::new(OnnxPitchEstimator::new(
-                build_session(rmvpe_onnx)?,
-                F0_THRESHOLD,
-            )),
+            onnx_content_encoder(content_onnx)?,
+            onnx_pitch_estimator(rmvpe_onnx)?,
         ))
     }
 
