@@ -251,6 +251,26 @@ pub async fn load_models(args: &TtsArgs) -> Result<tts_core::Synthesizer> {
         }
     };
 
+    // Fetched only when the run is actually Japanese: the NAIST-JDic archive is
+    // 28.7 MB, and a Chinese-or-English user must never pay for it. This is the
+    // first place that knows both the language and the cache directory, which is
+    // why the dictionary is opened here rather than inside `text-kit`.
+    let japanese = match args.language {
+        Lang::Ja => {
+            tracing::info!("resolving the Japanese dictionary...");
+            let dir = hub_kit::fetch_naist_jdic(&args.cache_dir)
+                .await
+                .context("failed to fetch the Japanese (NAIST-JDic) dictionary")?;
+            Some(text_kit::JapaneseDict::open(&dir).with_context(|| {
+                format!(
+                    "failed to open the Japanese dictionary at {}",
+                    dir.display()
+                )
+            })?)
+        }
+        _ => None,
+    };
+
     tokio::task::block_in_place(|| {
         load(
             ModelPaths {
@@ -261,6 +281,7 @@ pub async fn load_models(args: &TtsArgs) -> Result<tts_core::Synthesizer> {
                 tuned: args.s1.is_some() || args.s2.is_some(),
             },
             prosody,
+            japanese,
             args.backend,
             args.device,
         )

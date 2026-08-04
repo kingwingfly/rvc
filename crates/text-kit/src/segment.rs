@@ -6,9 +6,11 @@
 //! split here is by **script**, which is what actually distinguishes zh from ja
 //! from en in practice and needs no model.
 //!
-//! Latin runs go to English and Han runs to Chinese. Japanese is decided by the
-//! presence of kana, because a Japanese sentence is nearly always mixed kana and
-//! kanji — a run of bare Han characters is Chinese.
+//! Latin runs go to English. Japanese is decided by the presence of kana,
+//! because a Japanese sentence is nearly always mixed kana and kanji. Han with
+//! **no** kana beside it is genuinely ambiguous — 東京 and 日本語 are valid in
+//! either language — so the caller's `default` breaks the tie, and that means
+//! Chinese for everyone who did not ask for Japanese.
 
 /// A language this crate can phonemize.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +70,10 @@ fn script(c: char) -> Script {
     match c as u32 {
         // CJK Unified Ideographs, plus Extension A and the compatibility block.
         0x4E00..=0x9FFF | 0x3400..=0x4DBF | 0xF900..=0xFAFF => Script::Han,
+        // U+3005, the iteration mark (々). Upstream's `_japanese_characters`
+        // includes it; without this it falls to `Neutral` and a word like 人々
+        // splits around it.
+        0x3005 => Script::Han,
         // Hiragana and katakana, and the halfwidth katakana forms.
         0x3040..=0x30FF | 0x31F0..=0x31FF | 0xFF66..=0xFF9D => Script::Kana,
         _ if c.is_ascii_alphabetic() => Script::Latin,
@@ -84,7 +90,17 @@ fn script(c: char) -> Script {
 pub fn split(text: &str, default: Language) -> Vec<Run> {
     // Kana anywhere makes the Han in the same text Japanese: Japanese mixes the
     // two constantly, whereas Chinese has no kana at all.
+    //
+    // **With no kana to go on, `default` decides.** Han is genuinely ambiguous —
+    // 東京, 日本語 and 人々 are all valid in either language — so guessing
+    // Chinese regardless would phonemize a caller's explicitly Japanese line as
+    // Mandarin, confidently and silently. That is the same failure the `Ja` arm
+    // of `phonemize` refuses to make by falling back, so it must not be made
+    // here either. Chinese remains the answer whenever the caller did not say
+    // Japanese, which is every existing caller.
     let han_language = if text.chars().any(|c| script(c) == Script::Kana) {
+        Language::Ja
+    } else if default == Language::Ja {
         Language::Ja
     } else {
         Language::Zh
@@ -120,6 +136,31 @@ pub fn split(text: &str, default: Language) -> Vec<Run> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bare_han_follows_the_caller_when_they_asked_for_japanese() {
+        // Han with no kana is ambiguous, so `default` breaks the tie. Getting
+        // this wrong is silent: 東京 would come out as Mandarin `dong jing`
+        // with a plausible phoneme sequence and no error anywhere.
+        let ja = split("東京", Language::Ja);
+        assert_eq!(ja.len(), 1);
+        assert_eq!(ja[0].language, Language::Ja);
+
+        // …and still Chinese for every caller who did not ask for Japanese,
+        // which is the existing behaviour and the common case.
+        let zh = split("東京", Language::Zh);
+        assert_eq!(zh[0].language, Language::Zh);
+        assert_eq!(split("東京", Language::En)[0].language, Language::Zh);
+    }
+
+    #[test]
+    fn the_iteration_mark_stays_inside_its_word() {
+        // U+3005 is Han, not neutral: upstream's `_japanese_characters`
+        // includes it, and treating it as neutral splits 人々 in two.
+        let runs = split("人々", Language::Ja);
+        assert_eq!(runs.len(), 1, "人々 should be one run, got {runs:?}");
+        assert_eq!(runs[0].text, "人々");
+    }
 
     fn split_codes(text: &str) -> Vec<(&'static str, String)> {
         split(text, Language::Zh)

@@ -161,7 +161,7 @@ impl Synthesizer {
         reference: &Reference,
         opts: &SynthOptions,
     ) -> Result<Vec<f32>> {
-        let phonemes = text_kit::phonemize_mixed(text, opts.language)?;
+        let phonemes = text_kit::phonemize_mixed(text, opts.language, self.japanese.as_ref())?;
         if phonemes.phones.is_empty() {
             return Ok(Vec::new());
         }

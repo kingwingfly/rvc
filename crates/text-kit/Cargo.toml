@@ -14,4 +14,8 @@ jieba-rs = "0.10"
 # Per-character Mandarin readings: the fallback for what no phrase covers. The
 # phrase table is data, under `data/phrases.txt`.
 pinyin = "0.11"
+# Japanese: HTS full-context labels, the same ones upstream parses out of
+# pyopenjtalk. The dictionary is supplied by the caller, so this crate stays
+# testable with no weights at all.
+jpreprocess.workspace = true
 thiserror.workspace = true

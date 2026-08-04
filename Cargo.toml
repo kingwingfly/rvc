@@ -122,6 +122,13 @@ hf-hub = { version = "1.0", features = ["rustls-tls"] }
 # is a direct dependency on what is being linked anyway rather than a second
 # stack. Named here so nothing depends on `hf-hub`'s features to compile.
 reqwest = "0.13"
+# Japanese g2p: a pure-Rust OpenJTalk rewrite (BSD-3), so `--language ja` needs
+# no C and no Python. Its `naist-jdic` feature is deliberately NOT enabled -- that
+# feature's build.rs downloads a 28.7 MB dictionary during `cargo build`, the
+# exact shape `rvc-core/build.rs` exists to prevent for LibTorch. The dictionary
+# is a run-time asset fetched into the shared cache instead.
+jpreprocess = { version = "0.15", default-features = false, features = ["tokenizer"] }
+
 flate2 = "1"
 tar = "0.4"
 

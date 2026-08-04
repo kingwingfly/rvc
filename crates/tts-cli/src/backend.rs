@@ -42,6 +42,7 @@ pub struct ModelPaths<'a> {
 pub fn load(
     paths: ModelPaths<'_>,
     prosody: Option<Box<dyn ProsodyEncoder>>,
+    japanese: Option<text_kit::JapaneseDict>,
     backend: Backend,
     device: burn_kit::DeviceSpec,
 ) -> Result<Synthesizer> {
@@ -108,7 +109,7 @@ pub fn load(
         #[allow(unreachable_patterns)]
         other => return Err(other.unavailable()),
     };
-    Ok(Synthesizer::new(engine, prosody))
+    Ok(Synthesizer::new(engine, prosody, japanese))
 }
 
 /// Whether `dir` holds an ONNX export beside (or instead of) the checkpoints.

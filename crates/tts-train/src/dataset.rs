@@ -139,7 +139,10 @@ pub fn prepare<B: Backend>(
             continue;
         }
 
-        let phonemes = text_kit::phonemize_mixed(text, language)?;
+        let phonemes = // `None`: the trainer has no Japanese dictionary threaded through
+        // yet, so a Japanese corpus errors here rather than being phonemized
+        // as something else. Synthesis has one; training is the gap.
+        text_kit::phonemize_mixed(text, language, None)?;
         if phonemes.phones.is_empty() {
             tracing::warn!("{} produced no phonemes; skipped", text_path.display());
             continue;

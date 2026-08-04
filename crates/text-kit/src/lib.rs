@@ -94,11 +94,14 @@ impl Phonemes {
 }
 
 /// Phonemize text known to be in one language.
-pub fn phonemize(text: &str, language: Language) -> Result<Phonemes> {
+pub fn phonemize(text: &str, language: Language, ja: Option<&JapaneseDict>) -> Result<Phonemes> {
     match language {
         Language::Zh => Ok(chinese::phonemize(text)),
         Language::En => Ok(english::phonemize(text)),
-        Language::Ja => Err(TextError::Unsupported("Japanese")),
+        // `ja` is threaded rather than opened here because the dictionary is
+        // 28.7 MB: a caller that never sees Japanese must never pay for it, and
+        // only the caller knows whether it will.
+        Language::Ja => japanese::phonemize(text, ja),
     }
 }
 
@@ -107,13 +110,17 @@ pub fn phonemize(text: &str, language: Language) -> Result<Phonemes> {
 /// The corpus this toolkit targets is mixed Chinese and English, so this rather
 /// than [`phonemize`] is the normal entry point. `default` decides runs that
 /// carry no script information.
-pub fn phonemize_mixed(text: &str, default: Language) -> Result<Phonemes> {
+pub fn phonemize_mixed(
+    text: &str,
+    default: Language,
+    ja: Option<&JapaneseDict>,
+) -> Result<Phonemes> {
     let mut phones = Vec::new();
     let mut word2ph: Option<Vec<usize>> = Some(Vec::new());
     let mut normalized = String::new();
 
     for run in split(text, default) {
-        let part = phonemize(&run.text, run.language)?;
+        let part = phonemize(&run.text, run.language, ja)?;
         phones.extend(part.phones);
         normalized.push_str(&part.normalized);
         // One run without per-character counts makes the whole result's counts
@@ -139,12 +146,12 @@ mod tests {
     fn an_unwritten_front_end_refuses_rather_than_guessing() {
         // Running Japanese through the English path would produce fluent-sounding
         // wrong audio, which is far harder to notice than an error.
-        assert!(phonemize("こんにちは", Language::Ja).is_err());
+        assert!(phonemize("こんにちは", Language::Ja, None).is_err());
     }
 
     #[test]
     fn ids_address_the_symbol_table() {
-        let out = phonemize("你好", Language::Zh).unwrap();
+        let out = phonemize("你好", Language::Zh, None).unwrap();
         let ids = out.ids();
         assert_eq!(ids.len(), out.phones.len());
         assert!(ids.iter().all(|&i| i < SYMBOLS.len()));
@@ -155,7 +162,7 @@ mod tests {
         // The corpus this toolkit targets mixes the two constantly. Sending the
         // whole line to one front-end drops the other language's characters
         // silently, which reads as the model swallowing a word.
-        let out = phonemize_mixed("你好world", Language::Zh).unwrap();
+        let out = phonemize_mixed("你好world", Language::Zh, None).unwrap();
         assert_eq!(out.phones[..4], ["n", "i2", "h", "ao3"]);
         assert_eq!(out.phones[4..], ["W", "ER1", "L", "D"]);
         // One run without per-character counts makes the whole result's counts
@@ -166,7 +173,7 @@ mod tests {
     #[test]
     fn every_phoneme_of_a_mixed_line_is_in_the_models_vocabulary() {
         for text in ["我用 ChatGPT 写了 3 行代码。", "今天 the weather is 很好!"] {
-            let out = phonemize_mixed(text, Language::Zh).unwrap();
+            let out = phonemize_mixed(text, Language::Zh, None).unwrap();
             assert!(!out.phones.is_empty(), "{text} produced nothing");
             for p in &out.phones {
                 assert_ne!(
