@@ -2,7 +2,8 @@
 
 All five binaries find their dependencies the same way, take the same
 `--backend` and `--device` spellings, and cache downloaded models in the same
-place.
+place. Driving them *live* — the sample rate at each end of a pipe, playback,
+virtual microphones — is [`realtime.md`](realtime.md).
 
 - [Requirements](#requirements)
 - [ffmpeg](#ffmpeg)
@@ -18,7 +19,7 @@ place.
 | | needed by | how it is found |
 |---|---|---|
 | **ffmpeg 8.1** | everyone — decode, resample and PCM I/O | linked at build time; found automatically at run time |
-| **ONNX Runtime** | any `--backend onnx` path, plus `rvc`'s feature extraction and `tts`'s prosody encoder — `seedvc` never touches it | dlopened on first use from `ORT_DYLIB_PATH` |
+| **ONNX Runtime** | any `--backend onnx` path, plus `tts`'s prosody encoder — `seedvc` never touches it | dlopened on first use from `ORT_DYLIB_PATH` |
 | **LibTorch 2.9.0** | optional — only `--backend tch` | linked at build time; found automatically at run time |
 
 **Neither machine-learning runtime is bundled or downloaded.**
@@ -49,11 +50,23 @@ export ORT_DYLIB_PATH=/absolute/path/to/libonnxruntime.so   # if not installed s
 
 The CUDA execution provider is tried first, then CPU.
 
-How much it matters depends on the engine: `rvc` runs ContentVec and RMVPE
-through it on *every* path, so it is required there; `stt` needs it only for
-`--backend onnx`; for `tts` its absence downgrades the prosody encoder to zeros
-with a warning rather than failing; `seedvc` has no ONNX path at all, since
-nothing exports Seed-VC. Each engine's README says which applies.
+How much it matters depends on the engine: `stt` and `rvc` need it only where
+something is actually running on it; for `tts` its absence downgrades the prosody
+encoder to zeros with a warning rather than failing; `seedvc` has no ONNX path at
+all, since nothing exports Seed-VC. Each engine's README says which applies.
+
+**`rvc` used to be the exception and no longer is.** It runs three models — a
+generator, ContentVec and RMVPE — and until ContentVec and RMVPE were ported to
+Burn the last two went through ONNX Runtime on every path, native generator
+included, which made this a hard requirement for the engine as a whole. Each of
+the three now chooses its runtime separately (see
+[Backends and devices](#backends-and-devices)). Note what that does *not* change:
+`ort` is still a non-optional dependency of `rvc-core`, so there is no `onnx`
+feature to drop and the crate always links it. What changes is when the library
+is *opened* — it is dlopened on first use, and a run with all three models on
+Burn has no first use. That last step follows from how the sessions are built
+rather than from a measurement; treat it as untested until someone runs `rvc` on
+a machine with no `libonnxruntime.so` at all.
 
 ## LibTorch
 
@@ -117,9 +130,9 @@ cargo build --release -p stt-cli --no-default-features --features cuda,tch,wgpu
 ```
 
 `stt-cli` and `tts-cli` have `cuda`, `tch`, `wgpu` and `onnx`; `rvc-cli` has the
-first three only, because ONNX Runtime is not optional there — ContentVec and
-RMVPE run on it on every path, native backends included. `seedvc-cli` has the
-first three for the opposite reason: it never uses ONNX Runtime at all.
+first three only, because `rvc-core` depends on `ort` unconditionally and so
+there is nothing to gate. `seedvc-cli` has the first three for the opposite
+reason: it never uses ONNX Runtime at all.
 `voice-cli` re-declares the same four names and forwards each to the engines
 that have it, so one `--no-default-features --features cuda` line means the same
 thing for every binary.
@@ -168,6 +181,29 @@ artefact on disk that could decide otherwise.
 Training is always Burn — ONNX Runtime has no training path at all — so a
 `train` subcommand takes the same flag minus `onnx`.
 
+### One flag per model, where an engine runs more than one
+
+`--backend` names the runtime for the model an engine is *about*. An engine that
+runs several can give each its own flag, and `rvc` is the one that does:
+`--content-vec-backend` and `--rmvpe-backend` take exactly the spellings above,
+default to whatever `--backend` resolved to, and are independent of it and of
+each other — so an ONNX generator with a LibTorch F0 estimator is a real
+configuration rather than an accident. `--content-vec-backend auto` means
+*inherit*, which is the same as leaving the flag off.
+
+**A runtime and a weight format are not the same choice, and the second follows
+from the first.** ONNX Runtime and Burn read different files, so picking a
+backend picks which file gets downloaded: `rmvpe.onnx` against `rmvpe.pt`, and a
+single ContentVec `.onnx` against a `hubert_base/` **directory** of weights,
+config and preprocessor. That is why `rvc download` takes `--backend` too — it
+has no model file to inspect, and prefetching the wrong format leaves the first
+real run downloading anyway.
+
+The defaults, the exceptions and the escape hatches for a mirror this does not
+know about are in
+[`crates/rvc-cli/README.md`](../crates/rvc-cli/README.md), which is where a
+flag's behaviour belongs.
+
 ## Where models are stored
 
 Two kinds of weight are downloaded, and they land in different places because
@@ -189,6 +225,10 @@ So a machine that sets none of them caches in **`~/.cache/voice`**.
 `-h` always tells you where a given machine will put them. **A shared asset never lands in an
 output directory**, so pointing two runs at two output folders does not fetch
 Whisper twice.
+
+Both weight formats of ContentVec and RMVPE are inference assets, so both land in
+that same cache and neither goes to `pretrained/`. Switching backends therefore
+adds a download rather than replacing one, and the copies coexist.
 
 Every engine will fetch what it needs on its first run, and each has a
 `download` subcommand that does it up front instead — `rvc download`,
