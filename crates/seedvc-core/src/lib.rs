@@ -5,13 +5,15 @@
 //! same binary converts into any voice you can produce a recording of, and there
 //! is no `train` subcommand anywhere in the crate.
 //!
-//! The reference conditions the transformer **twice**, which is the part worth
-//! knowing before reading any of this:
+//! The reference conditions the transformer **three ways**, which is the part
+//! worth knowing before reading any of this:
 //!
 //! - as a **timbre vector**, a Kaldi filterbank of the clip through CAMPPlus;
 //! - as a **mel prefix** the output is generated *after*, in context — so the
 //!   transformer is asked to continue the reference rather than to imitate it,
-//!   and the prompt-length prefix has to be sliced back off afterwards.
+//!   and the prompt-length prefix has to be sliced back off afterwards;
+//! - as its own **length-regulated content**, prepended to the source's, so the
+//!   prompt it is asked to continue is one whose audio and content agree.
 //!
 //! Everything downstream of that is the same shape `rvc-core` has: a
 //! [`Converter`] that owns the model and turns a `futures::Stream` of source PCM
@@ -40,5 +42,6 @@ pub use backend::load;
 /// unchanged, and a caller should not need `burn-seedvc` in its manifest to name
 /// two numbers.
 pub use burn_seedvc::flow::Sampler;
+pub use convert::{ConvertOptions, convert, convert_path};
 pub use error::{Error, Result};
 pub use model::{BurnModel, CONTENT_SR, Model, ModelPaths, Reference};
