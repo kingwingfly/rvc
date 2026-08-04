@@ -22,6 +22,8 @@ use crate::config::{CONTENT_DIM, ConvertParams};
 use crate::dsp::{f0_to_coarse, shift_pitch};
 use crate::error::{Result, VcError};
 use crate::features::{DEFAULT_CHUNK, FeatureExtractor};
+// See `burn_features`: every user of these is behind a compute-backend feature.
+#[cfg(any(feature = "cuda", feature = "tch", feature = "wgpu"))]
 use burn_kit::{DeviceSpec, guard_init};
 
 /// A loaded native-Burn conversion pipeline on the compute backend `B`.

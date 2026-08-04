@@ -16,10 +16,11 @@
 //! # What is *not* here
 //!
 //! Neither the RMVPE mel front end nor the salience → Hz decode. Both are pure
-//! Rust already (`mel::RmvpeMel`, `dsp::rmvpe_decode`), backend-agnostic, and shared
-//! with the ONNX path — so the two runtimes cannot disagree about anything
-//! outside the network itself, which is what makes comparing their F0 a test of
-//! the port rather than of the front end.
+//! Rust already (`mel::RmvpeMel`, `dsp::rmvpe_decode`), backend-agnostic, and
+//! shared with the ONNX path — so the two runtimes cannot disagree about
+//! anything outside the network itself, which is what makes comparing their F0
+//! a test of the port rather than of the front end. `examples/f0_runtimes` is
+//! that comparison.
 
 use std::path::Path;
 
@@ -32,6 +33,9 @@ use crate::config::RMVPE_BINS;
 use crate::dsp::rmvpe_decode;
 use crate::error::{Result, VcError};
 use crate::mel::RmvpeMel;
+// Only the concrete constructors below name a device, and every one of them is
+// behind a compute-backend feature — so `--features burn` alone must not warn.
+#[cfg(any(feature = "cuda", feature = "tch", feature = "wgpu"))]
 use burn_kit::{DeviceSpec, guard_init};
 
 /// RMVPE on the Burn compute backend `B`, yielding an F0 (Hz) contour at 100 Hz.
@@ -85,15 +89,16 @@ impl<B: Backend> PitchEstimator for BurnPitchEstimator<B> {
     /// Estimate the F0 (Hz) contour from a mono 16 kHz `f32` buffer.
     ///
     /// The frame count is deliberately **not** aligned here, where
-    /// `f0::OnnxPitchEstimator` reflect-pads to a
-    /// multiple of 32 by hand: `Rmvpe::forward` pads and trims itself, because
-    /// the multiple-of-32 requirement is a property of that network's five
-    /// halvings rather than of any caller. It pads with **zeros**, which is
-    /// upstream's `F.pad(..., mode="constant")` and therefore what the published
-    /// weights were run with; the ONNX path's reflect padding is the one that
-    /// diverges from upstream. Both trim afterwards, so the two runtimes can
-    /// differ only over the last ≤ 31 frames and only by what leaks in through
-    /// the convolution stack's receptive field.
+    /// `f0::OnnxPitchEstimator` reflect-pads to a multiple of 32 by hand:
+    /// `Rmvpe::forward` pads and trims itself, because the multiple-of-32
+    /// requirement is a property of that network's five halvings rather than of
+    /// any caller. It pads with **zeros**, which is upstream's
+    /// `F.pad(..., mode="constant")` and therefore what the published weights
+    /// were run with; the ONNX path's reflect padding is the one that diverges
+    /// from upstream. Both trim afterwards, so the two runtimes can differ only
+    /// over the last ≤ 31 frames — and, because the GRU's reverse half carries
+    /// the end of the sequence back to its start, by however much that reaches
+    /// the earlier ones.
     fn extract(&mut self, wav16k: &[f32]) -> Result<Vec<f32>> {
         let (n_mels, time, data) = self.mel.compute(wav16k);
         if time == 0 {

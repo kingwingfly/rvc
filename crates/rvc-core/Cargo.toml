@@ -32,6 +32,13 @@ tch = ["burn", "burn/tch", "dep:tch", "burn-kit/tch"]
 # fallback — and the only Burn backend that runs on AMD/Intel/Apple GPUs.
 wgpu = ["burn", "burn/wgpu", "burn-kit/wgpu"]
 
+# The cross-runtime F0 check. `required-features` rather than a `#[cfg]` inside
+# it: an example that silently compiles to nothing when the backend it exists to
+# exercise is absent is an example nobody notices has stopped running.
+[[example]]
+name = "f0_runtimes"
+required-features = ["tch"]
+
 [dependencies]
 audio-kit.workspace = true
 # Device selection: shared with every engine so `auto` cannot mean two things.
