@@ -102,7 +102,9 @@ Three tiers, and the names say which is which.
 | crate | role |
 |-------|------|
 | `burn-vits` | the VITS blocks RVC and GPT-SoVITS share — attention, WaveNet, flow, posterior encoder, ResBlock1, discriminators — plus the family's losses and its differentiable STFT |
-| `burn-rvc` | what is RVC's alone: the NSF source module, the 768-dim content encoder, the synthesizer wiring |
+| `burn-rvc` | what is RVC's alone: the NSF source module, the 768-dim content encoder, the synthesizer wiring, and ContentVec's readout of `burn-hubert` |
+| `burn-hubert` | the HuBERT SSL encoder, shared by two engines — GPT-SoVITS calls it cnhubert, RVC's ContentVec is the same network with other weights |
+| `burn-rmvpe` | the RMVPE pitch network: log-mel in, cents salience out, so `rvc`'s F0 estimator runs on Burn as well as ONNX Runtime |
 | `burn-whisper` | the Whisper network; loads HF safetensors unchanged |
 | `burn-gptsovits` | the GPT-SoVITS network: cnhubert, the quantiser, `s2` (SoVITS) and `s1` (T2S) |
 | `burn-seedvc` | the Seed-VC network: the diffusion transformer and its flow-matching sampler, the length regulator, the CAMPPlus timbre encoder, BigVGAN. **GPL-3.0 is this crate's doing** |
