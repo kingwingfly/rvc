@@ -98,9 +98,8 @@ pub fn split(text: &str, default: Language) -> Vec<Run> {
     // of `phonemize` refuses to make by falling back, so it must not be made
     // here either. Chinese remains the answer whenever the caller did not say
     // Japanese, which is every existing caller.
-    let han_language = if text.chars().any(|c| script(c) == Script::Kana) {
-        Language::Ja
-    } else if default == Language::Ja {
+    let kana = text.chars().any(|c| script(c) == Script::Kana);
+    let han_language = if kana || default == Language::Ja {
         Language::Ja
     } else {
         Language::Zh
