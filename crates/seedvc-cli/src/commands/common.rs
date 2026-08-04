@@ -43,46 +43,52 @@ pub struct Paths {
 /// is also the only way to be explicit about *which* file is which — the reason
 /// `seedvc_paths` has to guess from names at all.
 pub async fn resolve_paths(opts: &ModelOpts) -> Result<Paths> {
-    // Matched rather than fetched-then-overridden so that a fully specified run
-    // touches no network and needs no cache directory to exist: a user who was
-    // handed the weights should not have a download attempted behind their back.
-    //
-    // A *partial* override still fetches all four, because `fetch_seedvc` is
-    // all-or-nothing and the upstream filenames it fetches by are private to
-    // `hub-kit`. Reaching past it would mean writing those names down a second
-    // place for them to drift from, which costs more than the one redundant
-    // download it would save.
-    Ok(
-        match (
-            &opts.checkpoint,
-            &opts.campplus,
-            &opts.bigvgan,
-            &opts.content,
-        ) {
-            (Some(checkpoint), Some(campplus), Some(bigvgan), Some(content)) => Paths {
-                checkpoint: checkpoint.clone(),
-                campplus: campplus.clone(),
-                bigvgan: bigvgan.clone(),
-                content: content.join(WHISPER_WEIGHTS),
-            },
-            _ => {
-                let fetched = hub_kit::fetch_seedvc(&opts.cache_dir).await.context(
-                    "failed to fetch the Seed-VC models (name weights you already hold with \
-                     --checkpoint, --campplus, --bigvgan and --content)",
-                )?;
-                Paths {
-                    checkpoint: opts.checkpoint.clone().unwrap_or(fetched.checkpoint),
-                    campplus: opts.campplus.clone().unwrap_or(fetched.campplus),
-                    bigvgan: opts.bigvgan.clone().unwrap_or(fetched.bigvgan),
-                    content: opts
-                        .content
-                        .clone()
-                        .unwrap_or(fetched.whisper)
-                        .join(WHISPER_WEIGHTS),
-                }
-            }
-        },
-    )
+    // Each resolved on its own, so a flag suppresses exactly the download it
+    // replaces and no more. Naming all four therefore touches no network and
+    // needs no cache directory to exist — a user who was handed the weights
+    // should not have a download attempted behind their back — and naming one of
+    // them saves that one file rather than nothing.
+    let context = "(name weights you already hold with --checkpoint, --campplus, --bigvgan \
+                   and --content)";
+    let checkpoint = match &opts.checkpoint {
+        Some(p) => p.clone(),
+        None => hub_kit::fetch_seedvc_checkpoint(&opts.cache_dir)
+            .await
+            .with_context(|| format!("failed to fetch the Seed-VC checkpoint {context}"))?,
+    };
+    let campplus = match &opts.campplus {
+        Some(p) => p.clone(),
+        None => hub_kit::fetch_campplus(&opts.cache_dir)
+            .await
+            .with_context(|| format!("failed to fetch the CAMPPlus timbre encoder {context}"))?,
+    };
+    let bigvgan = match &opts.bigvgan {
+        Some(p) => p.clone(),
+        // The config half is dropped: nothing reads it, and it is fetched at all
+        // only so a hand-assembled directory can be identified by `hub-kit`.
+        None => {
+            hub_kit::fetch_bigvgan(&opts.cache_dir)
+                .await
+                .with_context(|| format!("failed to fetch the BigVGAN vocoder {context}"))?
+                .0
+        }
+    };
+    let content = match &opts.content {
+        Some(p) => p.clone(),
+        None => {
+            hub_kit::fetch_whisper(Some(hub_kit::SEEDVC_WHISPER), &opts.cache_dir)
+                .await
+                .with_context(|| format!("failed to fetch the Whisper content encoder {context}"))?
+                .dir
+        }
+    };
+
+    Ok(Paths {
+        checkpoint,
+        campplus,
+        bigvgan,
+        content: content.join(WHISPER_WEIGHTS),
+    })
 }
 
 /// Load the model, analyse the reference, and build the converter around both.
@@ -99,6 +105,10 @@ pub async fn build_converter(
     convert: ConvertOptions,
 ) -> Result<Converter> {
     let reference = opts.reference()?;
+    // Asked before the fetch, not after: `load` checks this again, but by then a
+    // cold cache has already spent a gigabyte on a backend that was never going
+    // to run. The two calls are the same function, so they cannot disagree.
+    seedvc_core::backend::resolve(backend)?;
     let paths = resolve_paths(opts).await?;
 
     // Four checkpoints and roughly a gigabyte of tensors, all of it synchronous:

@@ -468,30 +468,48 @@ pub struct SeedVcPaths {
 /// deliberately no [`fetch_pretrained`] counterpart: Seed-VC is zero-shot, a
 /// reference clip is the entire speaker specification, so nothing here is ever a
 /// warm-start base for a fine-tune.
+/// The four are also fetchable one at a time — [`fetch_seedvc_checkpoint`],
+/// [`fetch_campplus`], [`fetch_bigvgan`] and [`fetch_whisper`] — which is what a
+/// caller holding some of the weights already should use. This composes them.
 pub async fn fetch_seedvc(cache_dir: &Path) -> Result<SeedVcPaths> {
-    let (owner, name) = DEFAULT_SEEDVC;
-    let checkpoint = fetch(&ModelRef::new(owner, name, SEEDVC_FILE), cache_dir).await?;
-
-    let (owner, name) = DEFAULT_CAMPPLUS;
-    let campplus = fetch(&ModelRef::new(owner, name, CAMPPLUS_FILE), cache_dir).await?;
-
-    let (owner, name) = DEFAULT_BIGVGAN;
-    let bigvgan = fetch(&ModelRef::new(owner, name, BIGVGAN_FILE), cache_dir).await?;
-    // Its hyper-parameters. **Nothing reads this today** — `seedvc-core` builds
-    // the vocoder from `BigVganConfig::v2_22khz_80band_256x()`, a preset named
-    // after this very repo, so the two cannot disagree while the repo is pinned.
-    // It is fetched anyway because it is what identifies the vocoder in a
-    // hand-assembled directory, and because a second preset would make parsing
-    // it the honest answer.
-    let bigvgan_config = fetch(&ModelRef::new(owner, name, "config.json"), cache_dir).await?;
-
+    let (bigvgan, bigvgan_config) = fetch_bigvgan(cache_dir).await?;
     Ok(SeedVcPaths {
-        checkpoint,
-        campplus,
+        checkpoint: fetch_seedvc_checkpoint(cache_dir).await?,
+        campplus: fetch_campplus(cache_dir).await?,
         bigvgan,
         bigvgan_config,
         whisper: fetch_whisper(Some(SEEDVC_WHISPER), cache_dir).await?.dir,
     })
+}
+
+/// Seed-VC's own checkpoint: the transformer and the length regulator.
+///
+/// Separately fetchable for the reason all four are: someone who was handed one
+/// of these files should not be made to download the other three to use it, and
+/// the upstream filename lives here rather than in every caller.
+pub async fn fetch_seedvc_checkpoint(cache_dir: &Path) -> Result<PathBuf> {
+    let (owner, name) = DEFAULT_SEEDVC;
+    fetch(&ModelRef::new(owner, name, SEEDVC_FILE), cache_dir).await
+}
+
+/// The timbre encoder, from a different project's release (28 MB).
+pub async fn fetch_campplus(cache_dir: &Path) -> Result<PathBuf> {
+    let (owner, name) = DEFAULT_CAMPPLUS;
+    fetch(&ModelRef::new(owner, name, CAMPPLUS_FILE), cache_dir).await
+}
+
+/// The vocoder's generator and its `config.json`, in that order.
+///
+/// Both, because the config is what identifies the vocoder in a hand-assembled
+/// directory. **Nothing parses it today** — `seedvc-core` builds the vocoder from
+/// `BigVganConfig::v2_22khz_80band_256x()`, a preset named after this very repo,
+/// so the two cannot disagree while the repo is pinned. A second preset would
+/// make reading it the honest answer.
+pub async fn fetch_bigvgan(cache_dir: &Path) -> Result<(PathBuf, PathBuf)> {
+    let (owner, name) = DEFAULT_BIGVGAN;
+    let weights = fetch(&ModelRef::new(owner, name, BIGVGAN_FILE), cache_dir).await?;
+    let config = fetch(&ModelRef::new(owner, name, "config.json"), cache_dir).await?;
+    Ok((weights, config))
 }
 
 /// Locate the same four inside one hand-assembled directory.

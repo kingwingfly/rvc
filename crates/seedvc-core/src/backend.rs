@@ -16,6 +16,34 @@ use cli_kit::Backend;
 use crate::error::{Error, Result};
 use crate::model::{Model, ModelPaths};
 
+/// Settle `auto` and refuse what this engine cannot run.
+///
+/// Split out of [`load`] so a caller can ask **before** resolving paths: the
+/// refusal costs nothing, while the fetch behind it is a gigabyte, and a cold
+/// cache would otherwise download the whole model in order to reject the backend
+/// afterwards. Callers that hold the weights already lose nothing by skipping it
+/// — [`load`] asks the same question again.
+pub fn resolve(backend: Backend) -> Result<Backend> {
+    // `false`, and not because the export is merely absent: there is no ONNX
+    // export of Seed-VC anywhere, so nothing on disk could ever resolve `auto`
+    // to ONNX Runtime. The same argument training passes for the same reason.
+    let backend = backend.resolve(false);
+    // Not "unsupported yet" and not a build-time absence — which is why this is
+    // not one of the `#[cfg]`ed arms in `load`: no exporter for Seed-VC exists,
+    // and Burn imports ONNX graphs without being able to emit one, so no
+    // `--features` and no rebuild would make it work. `export/` is where that
+    // would change.
+    if backend == Backend::Onnx {
+        return Err(Error::Device(
+            "Seed-VC has no ONNX export — `export/` mirrors RVC and GPT-SoVITS only, and Burn \
+             reads ONNX graphs without being able to write one. Run it on a Burn backend \
+             (`--backend auto|cuda|tch|wgpu`)"
+                .into(),
+        ));
+    }
+    Ok(backend)
+}
+
 /// Load the four checkpoints onto the chosen backend.
 ///
 /// Naming a backend this build has no code for is an error with a reason; only
@@ -26,23 +54,7 @@ pub fn load(
     backend: Backend,
     device: DeviceSpec,
 ) -> Result<Box<dyn Model>> {
-    // `false`, and not because the export is merely absent: there is no ONNX
-    // export of Seed-VC anywhere, so nothing on disk could ever resolve `auto`
-    // to ONNX Runtime. The same argument training passes for the same reason.
-    let backend = backend.resolve(false);
-    // Refused before anything is announced, let alone read. Not "unsupported
-    // yet" and not a build-time absence — which is why this is not one of the
-    // `#[cfg]`ed arms below: no exporter for Seed-VC exists, and Burn imports
-    // ONNX graphs without being able to emit one, so no `--features` and no
-    // rebuild would make it work. `export/` is where that would change.
-    if backend == Backend::Onnx {
-        return Err(Error::Device(
-            "Seed-VC has no ONNX export — `export/` mirrors RVC and GPT-SoVITS only, and Burn \
-             reads ONNX graphs without being able to write one. Run it on a Burn backend \
-             (`--backend auto|cuda|tch|wgpu`)"
-                .into(),
-        ));
-    }
+    let backend = resolve(backend)?;
     tracing::info!("loading Seed-VC ({backend}, device {device})");
 
     macro_rules! burn_model {
