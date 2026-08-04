@@ -40,12 +40,15 @@ async fn main() -> Result<()> {
             Some(TtsCommand::Train(a)) => Some(a.as_ref()),
             _ => None,
         }),
+        // No arm for `seedvc`: it is zero-shot, so it has no trainer and no
+        // dashboard to route stderr around.
         _ => rvc_cli::init_logging(None),
     }
     match cli.command {
         Command::Rvc(c) => rvc_cli::run::<Cli>(*c).await,
         Command::Stt(c) => stt_cli::run::<Cli>(*c).await,
         Command::Tts(c) => tts_cli::run::<Cli>(*c).await,
+        Command::SeedVc(c) => seedvc_cli::run::<Cli>(*c).await,
         Command::Completions(a) => cli_kit::completions(a, Cli::command()),
     }
 }

@@ -1,6 +1,6 @@
-# Setup — shared by `rvc`, `stt`, `tts` and `voice`
+# Setup — shared by `rvc`, `stt`, `tts`, `seedvc` and `voice`
 
-All four binaries find their dependencies the same way, take the same
+All five binaries find their dependencies the same way, take the same
 `--backend` and `--device` spellings, and cache downloaded models in the same
 place.
 
@@ -18,7 +18,7 @@ place.
 | | needed by | how it is found |
 |---|---|---|
 | **ffmpeg 8.1** | everyone — decode, resample and PCM I/O | linked at build time; found automatically at run time |
-| **ONNX Runtime** | any `--backend onnx` path, plus `rvc`'s feature extraction and `tts`'s prosody encoder | dlopened on first use from `ORT_DYLIB_PATH` |
+| **ONNX Runtime** | any `--backend onnx` path, plus `rvc`'s feature extraction and `tts`'s prosody encoder — `seedvc` never touches it | dlopened on first use from `ORT_DYLIB_PATH` |
 | **LibTorch 2.9.0** | optional — only `--backend tch` | linked at build time; found automatically at run time |
 
 **Neither machine-learning runtime is bundled or downloaded.**
@@ -52,7 +52,8 @@ The CUDA execution provider is tried first, then CPU.
 How much it matters depends on the engine: `rvc` runs ContentVec and RMVPE
 through it on *every* path, so it is required there; `stt` needs it only for
 `--backend onnx`; for `tts` its absence downgrades the prosody encoder to zeros
-with a warning rather than failing. Each engine's README says which applies.
+with a warning rather than failing; `seedvc` has no ONNX path at all, since
+nothing exports Seed-VC. Each engine's README says which applies.
 
 ## LibTorch
 
@@ -96,10 +97,11 @@ LD_LIBRARY_PATH=$PWD/libtorch/lib cargo test --workspace
 export ORT_DYLIB_PATH=/usr/lib/libonnxruntime.so
 export LIBTORCH=$PWD/libtorch        # omit to build without the tch backend
 
-cargo build --release                # all four binaries
+cargo build --release                # all five binaries
 cargo build --release -p rvc-cli     # just `rvc`
 cargo build --release -p stt-cli     # just `stt`
 cargo build --release -p tts-cli     # just `tts`
+cargo build --release -p seedvc-cli  # just `seedvc`
 cargo build --release -p voice-cli   # just `voice`
 ```
 
@@ -116,7 +118,11 @@ cargo build --release -p stt-cli --no-default-features --features cuda,tch,wgpu
 
 `stt-cli` and `tts-cli` have `cuda`, `tch`, `wgpu` and `onnx`; `rvc-cli` has the
 first three only, because ONNX Runtime is not optional there — ContentVec and
-RMVPE run on it on every path, native backends included.
+RMVPE run on it on every path, native backends included. `seedvc-cli` has the
+first three for the opposite reason: it never uses ONNX Runtime at all.
+`voice-cli` re-declares the same four names and forwards each to the engines
+that have it, so one `--no-default-features --features cuda` line means the same
+thing for every binary.
 
 Naming a backend that was not compiled in is an error that says so, and nothing
 else changes.
@@ -148,6 +154,11 @@ WebGPU both have one.
 **Naming a backend or device that is not available is an error with a reason,
 never a silent fallback.** Only `auto` substitutes.
 
+`onnx` is the one row that is not on every binary: `seedvc` refuses it, because
+no export of Seed-VC exists and Burn reads ONNX graphs without being able to
+write one. Its `auto` therefore resolves by hardware alone, there being no
+artefact on disk that could decide otherwise.
+
 Training is always Burn — ONNX Runtime has no training path at all — so a
 `train` subcommand takes the same flag minus `onnx`.
 
@@ -157,11 +168,12 @@ Two kinds of weight are downloaded, and they land in different places because
 different things read them.
 
 **Inference assets** — ContentVec, RMVPE, Whisper, the prosody encoder,
-cnhubert, `s1*.ckpt` and `s2G*.pth` — are shared across runs and projects, so
-they go to a **cache**, resolved in this order:
+cnhubert, `s1*.ckpt`, `s2G*.pth`, and Seed-VC's four networks — are shared
+across runs and projects, so they go to a **cache**, resolved in this order:
 
 1. `--cache-dir`,
-2. `RVC_CACHE_DIR` / `STT_CACHE_DIR` / `TTS_CACHE_DIR`, per engine,
+2. `RVC_CACHE_DIR` / `STT_CACHE_DIR` / `TTS_CACHE_DIR` / `SEEDVC_CACHE_DIR`, per
+   engine,
 3. `VOICE_CACHE_DIR`, for all of them at once,
 4. `voice` under the XDG cache root — `$XDG_CACHE_HOME` when that names an
    absolute path, otherwise `~/.cache/voice`.
@@ -174,15 +186,17 @@ Whisper twice.
 
 Every engine will fetch what it needs on its first run, and each has a
 `download` subcommand that does it up front instead — `rvc download`,
-`stt download`, `tts download`. Each prints the paths it filled, which are what
-that engine's `--model`/`--models` flags take, so this is also how a machine
-that will be offline later is set up.
+`stt download`, `tts download`, `seedvc download`. Each prints the paths it
+filled, which are what that engine's own weight flags take, so this is also how a
+machine that will be offline later is set up. There is deliberately no top-level
+`voice download`: naming the engine is what says whose gigabytes are being spent.
 
 **Training warm-start bases** — RVC's `f0G48k.pth`/`f0D48k.pth` and
 GPT-SoVITS's `s2D*.pth` — are shared in the same way, so they go to
 `pretrained/` inside that cache, flat under their upstream names so you can drop
 in a copy you already have. They are fetched only when a fine-tune wants one;
-`--no-pretrained` and `--resume` fetch nothing.
+`--no-pretrained` and `--resume` fetch nothing. `seedvc` has none at all: it is
+zero-shot, so nothing it downloads is ever a training input.
 
 **An output directory only ever holds what a run produced** — its weights, its
 `checkpoint/` best family, and the dashboard's `train.log`.

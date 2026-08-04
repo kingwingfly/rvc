@@ -8070,6 +8070,7 @@ dependencies = [
  "cli-kit",
  "rpath-kit",
  "rvc-cli",
+ "seedvc-cli",
  "stt-cli",
  "tokio",
  "tts-cli",

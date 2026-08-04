@@ -15,6 +15,10 @@ generator backends** — ONNX Runtime (`ort`), and native Burn on either LibTorc
 (`burn-tch`, ~9x faster), CubeCL/CUDA or WebGPU — and training is native Rust/Burn
 on any of the three.
 
+`seedvc` is the fourth engine and does the same job on opposite terms: **a
+1–30 s reference clip is the whole speaker specification, so there is nothing to
+train** (see **Seed-VC, and why the whole workspace is GPL-3.0**).
+
 ### Three rules that are easy to break silently
 
 **No Python.** Not for users, not for developers, not for setup. New models are
@@ -31,10 +35,11 @@ Runtime, which this toolkit treats as a supported deployment target (see **Which
 runtime a model gets, and why**). What keeps the rule intact is that it stays a
 maintainer's build-time tool: no user, no test and no training run invokes it.
 
-**One binary per engine, plus `voice`.** `rvc`, `stt` and `tts` each stand alone
-and pull in only what they use — installing `stt` costs none of the RVC stack, and
-its `onnx` feature is opt-out, so a Burn-only `stt` links no ORT at all.
-`voice` is the *integration*: it depends on `rvc-cli`, `stt-cli` and `tts-cli`
+**One binary per engine, plus `voice`.** `rvc`, `stt`, `tts` and `seedvc` each
+stand alone and pull in only what they use — installing `stt` costs none of the
+RVC stack, and its `onnx` feature is opt-out, so a Burn-only `stt` links no ORT
+at all. `voice` is the *integration*: it depends on `rvc-cli`, `stt-cli`,
+`tts-cli` and `seedvc-cli`
 **as libraries**, so an argument is defined exactly once and never
 copied between binaries. Every `*-cli` crate is therefore a lib **and** a bin,
 and each exports one clap type that its own `main` flattens and `voice` nests —
@@ -51,11 +56,15 @@ synthesis are siblings. Anything two of them need moves to a neutral crate first
 are for everything that is not streaming:
 `rvc convert|train|preprocess|download|completions`,
 `tts convert|train|preprocess|download|completions`,
-`stt convert|download|completions`. `stt` and `tts` were already this shape;
+`stt convert|download|completions`,
+`seedvc convert|download|completions`. `stt` and `tts` were already this shape;
 `rvc` reached it by promoting `rvc serve` to the bare invocation. **`convert` is
-the batch counterpart of the bare invocation on all three** — same engine, files
+the batch counterpart of the bare invocation on all four** — same engine, files
 instead of a pipe — which is why it is spelled identically everywhere rather than
-`transcribe`, `synthesize` and `convert`.
+`transcribe`, `synthesize` and `convert`. `seedvc` was born this shape, and its
+missing subcommands say something rather than being unfinished: no `train`
+because it is zero-shot, and no `preprocess` because a corpus is what a trainer
+eats.
 
 That is a deliberate promotion rather than a deletion. Streaming is the *primary*
 mode of a Unix filter — it is the thing the whole `futures::Stream` pipeline
@@ -81,6 +90,12 @@ The corollary is that **`voice` nests, it never renames.** `voice tts train`, no
 subcommand added to `tts` appears under `voice tts` with no edit to `voice-cli`
 at all. A hyphenated name is the tell that someone flattened a level by hand.
 
+One exception to reading a hyphen that way, and it is the reverse case: clap
+names a subcommand by kebab-casing its variant, so `Command::SeedVc` would
+render as `voice seed-vc` while the binary is `seedvc`. The variant therefore
+carries `#[command(name = "seedvc")]`. That is a rename **back** to the engine's
+own name, which is the rule rather than an exception to it.
+
 **Every engine has a `download`, and it fetches exactly what a default bare
 invocation would fetch on demand** — no more, so a synthesis-only user is never
 charged for the `s2` discriminator, and no less, so the first real run needs no
@@ -96,8 +111,9 @@ are being spent: `voice stt download`.
 Split by **who reads the file**, because the two kinds have opposite lifetimes:
 
 - **Inference assets** (ContentVec, RMVPE, Whisper, the prosody encoder,
-  cnhubert, `s1*.ckpt`, `s2G*.pth`) are shared across every run on the machine,
-  so they go to a cache: `--cache-dir` → `{RVC,STT,TTS}_CACHE_DIR` →
+  cnhubert, `s1*.ckpt`, `s2G*.pth`, Seed-VC's four networks) are shared across
+  every run on the machine,
+  so they go to a cache: `--cache-dir` → `{RVC,STT,TTS,SEEDVC}_CACHE_DIR` →
   `VOICE_CACHE_DIR` → `voice` under the XDG cache root, which is
   `$XDG_CACHE_HOME` when absolute and `~/.cache` otherwise. The resolved path is
   a **computed clap default**, so `-h` prints where this machine will actually
@@ -158,7 +174,8 @@ Three tiers, and the name says which tier a crate is in:
   like `burn_dinov3`), holding no app dependencies and naming no compute backend.
 - **`<engine>-core` / `<engine>-cli`** — one engine each, all the same shape:
   `rvc-core`+`rvc-train`+`rvc-cli`, `stt-core`+`stt-cli`,
-  `tts-core`+`tts-train`+`tts-cli`.
+  `tts-core`+`tts-train`+`tts-cli`, `seedvc-core`+`seedvc-cli` (no `-train`,
+  and its absence is the engine's defining property rather than a gap).
 
 **`voice-` is reserved for the top.** It marks the integration, so a crate that
 an engine depends on must never be named `voice-*` — that is why the shared
@@ -171,7 +188,7 @@ once grew ninety lines of engine manual:
 - **`README.md`** is an *index*: what `voice` is, the pipeline, which binary to
   install, one build block, links out. No engine documentation, ever — if a
   passage names a flag, it belongs in an engine README.
-- **`docs/setup.md`** is everything that is true of all four binaries at once:
+- **`docs/setup.md`** is everything that is true of all five binaries at once:
   ffmpeg, ORT and LibTorch, the build, the `--backend`/`--device` table, and
   where downloaded models land. It exists because that material was previously
   written once in `crates/rvc-cli/README.md` and linked from the other two — which
@@ -192,7 +209,8 @@ once grew ninety lines of engine manual:
   cannot say what two crates share. **A flag's default belongs in the engine
   README, not here** — this page explains the mechanism, the README drives it.
 - **`docs/*.typ`** are the long-form architecture papers, one per network —
-  `rvc-architecture`, `gptsovits-architecture`, `whisper-architecture` — for
+  `rvc-architecture`, `gptsovits-architecture`, `whisper-architecture`,
+  `seedvc-architecture` — for
   *reviewing* a port rather than using it: what each block computes, what every
   loss term is for, why the training loop has the shape it does. Typst sources
   with the rendered PDF committed beside them, so reading needs no toolchain;
@@ -208,7 +226,7 @@ once grew ninety lines of engine manual:
 export ORT_DYLIB_PATH=/usr/lib/libonnxruntime.so
 export LIBTORCH=$PWD/libtorch   # must be exactly 2.9.0 (what tch 0.22 targets)
 
-cargo build                     # all four binaries: `rvc`, `stt`, `tts`, `voice`
+cargo build                     # all five binaries: `rvc`, `stt`, `tts`, `seedvc`, `voice`
 cargo build --release -p rvc-cli   # just `rvc`, optimised
 
 # `cargo build` (dev) is the right default even for running models: the profile
@@ -355,12 +373,15 @@ Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper
 | `tts-core` | speech synthesis: reference analysis, `s1` sampling with a KV cache, `s2` decode, and the ONNX prosody encoder behind a trait. **Two runtimes**, the same shape `stt-core` uses: `Engine` is the whole boundary, so `Synthesizer` is not generic and the backend is a constructor call rather than a type parameter. `--backend onnx` runs the whole stack — cnhubert, the quantiser, `ref_enc`, `s1` and `s2` — off four exported graphs, and `auto` picks it when the model directory holds an export |
 | `tts-train` | fine-tuning GPT-SoVITS. `s1` is plain next-token cross-entropy over `T2s::forward_prompt_all` — one model, one optimizer, one loss, so unlike `rvc-train` the number means something on its own. `s2` is the other half: an adversarial VITS loop over `burn-vits`'s shared discriminators, inheriting `rvc-train`'s loss family (mel-L1 ×45, KL ×1, feature matching ×2, LSGAN) rather than inventing one, with GPT-SoVITS's five discriminator periods `[2,3,5,7,11]` against RVC's eight. Verified on 13 clips: mel falls 26.6 → 18.2 over two epochs on GPU and on CPU alike. `--stage s1|s2|both` prepares the corpus exactly once — preparation is the expensive half — and each stage writes its own checkpoint family. A corpus is `<stem>.wav` + `<stem>.txt` pairs, and `stt` is how the transcripts get written |
 | `tts-cli` | lib **and** the `tts` binary |
-| `cli-kit` | logging, shell completions, and the shared `--backend`/`--device`/`--cache-dir` flags — one enum and one alias set for all four binaries, so the spellings cannot drift apart again |
+| `burn-seedvc` | the Seed-VC network: the diffusion transformer and its flow-matching sampler, the length regulator, CAMPPlus, BigVGAN. **The crate the workspace's GPL-3.0 comes from** — see its own section below |
+| `seedvc-core` | zero-shot voice conversion: `reference` (one clip → timbre vector + mel prefix + length-regulated content), `convert` (the chunk arithmetic and the equal-power crossfade), the streaming `Converter`, and the Burn backends behind one `Model` trait — the shape `stt-core` and `tts-core` use, so the backend is a constructor call rather than a type parameter. **No `-train` sibling, and no ONNX arm**: `--backend onnx` is refused with a reason, since nothing exports Seed-VC |
+| `seedvc-cli` | lib **and** the `seedvc` binary: the bare invocation streams, plus `convert`, `download`, `completions` |
+| `cli-kit` | logging, shell completions, and the shared `--backend`/`--device`/`--cache-dir` flags — one enum and one alias set for all five binaries, so the spellings cannot drift apart again |
 | `preprocess-kit` | the `preprocess` subcommand `rvc` and `tts` both expose: decode, slice on silence, write `<stem>_<NNN>.wav`. One definition, so the flags and the slicing cannot differ between the two engines |
 | `train-kit` | training scaffolding with no model knowledge: `Checkpoint`, `ema_update`, `accumulate`, `materialize`, `Dashboard`. Generic over the module trained, so a GAN and a cross-entropy loop share it |
 | `rpath-kit` | a **build-dependency**, not a runtime one: where each binary's `build.rs` gets the loader search order for the two linked libraries, ffmpeg and LibTorch |
 | `text-kit` | grapheme-to-phoneme: script-based language splitting, Mandarin g2p (jieba + pinyin + opencpop + tone sandhi), and GPT-SoVITS's 732-symbol table. English g2p is an embedded CMUdict over upstream's deterministic cascade; Mandarin polyphones come from `pypinyin`'s own 47k phrase dictionary. Pure Rust, no ML, no backend — so it is fully testable without weights |
-| `voice-cli` | the `voice` binary: `rvc-cli`, `stt-cli` and `tts-cli` nested as `voice rvc …`, `voice stt` and `voice tts` |
+| `voice-cli` | the `voice` binary: `rvc-cli`, `stt-cli`, `tts-cli` and `seedvc-cli` nested as `voice rvc …`, `voice stt`, `voice tts` and `voice seedvc` |
 
 ### Three runtimes, one path (the key abstraction)
 Everything downstream of the generator is shared: the same `FeatureExtractor`, the
@@ -463,6 +484,12 @@ the cheaper answer:
   ONNX Runtime as well — `alongside` Burn, never instead of it. `tts` is therefore
   the first engine to reach the target in full: every model it uses runs either
   way, and tuning stays on Burn.
+- Seed-VC is the one engine with **no** ONNX path, and it is the second asymmetry
+  rather than an omission: no export exists, and Burn cannot write one. So
+  `seedvc-core`'s loader refuses `--backend onnx` before it reads a file, with a
+  message saying *why* — a user told "not compiled in" goes looking for a feature
+  flag that cannot exist. `export/` is where that would change, and adding it
+  means another clean-room mirror beside `rvc_infer.py`.
 
 **This reverses an earlier position on purpose, so do not "restore" it.** The old
 plan was to port `rvc-core`'s ContentVec and RMVPE to Burn *in order to* drop
@@ -657,7 +684,9 @@ UVR5→PyMSS separation, FCPE as a pitch option, CUDA graphs, single-GPU without
 DDP, the WebUI rewrite — is packaging and never reaches a tensor we own.
 
 ### Seed-VC, and why the whole workspace is GPL-3.0 (`burn-seedvc`)
-The port in progress. Seed-VC converts a voice **without training on it** — a
+The fourth engine — `burn-seedvc` ported, `seedvc-core` and `seedvc-cli` wiring
+it into a binary that `voice` nests. Seed-VC converts a voice **without training
+on it** — a
 1–30 s reference clip is the entire speaker specification, where `rvc` and
 `tts` each want a fine-tune. That is why it sits beside them rather than
 replacing them, and it is the answer to "is there something more advanced than
@@ -715,6 +744,43 @@ order to `StyleEncoder::forward`. Everything from the diffusion transformer
 onward is **22.05 kHz**, where `Spectral` *is* exact, for BigVGAN as well as for
 Seed-VC. Every one of those pairings has matching frame counts and 80 bands, so
 substituting one for another runs happily and computes something else.
+
+**That mean subtraction is upstream's *call site*, not its encoder**, and it is
+the reason `fbank`'s `forward` does it rather than `campplus.rs`. A port written
+by reading the model is faithful and still wrong: CAMPPlus's own module never
+normalises, so the step lives in whatever code assembles its input, and
+inference passes an already-normalised filterbank in. The failure is silent —
+the embedding starts keying on the recording's channel rather than on the
+speaker, which looks like a mediocre conversion and not like a bug. It was
+dropped twice in one week while this engine was being built, which is why it now
+sits inside the front end that cannot be used without it.
+
+**The reference and the source share one window, and nothing warns.**
+`max_context_window` is `22050 / 256 * 30` = **2580** mel frames — integer
+division first, so it is not 2584 — and the reference's mel prefix comes out of
+the same 2580 the source chunk does. A 25 s reference (the cap
+`seedvc_core::reference::REFERENCE_SECONDS` applies) is 2153 of them and leaves
+under 5 s per chunk; 5 s of reference leaves nearly 25. So **a longer reference
+buys a saturating timbre vector and costs source per chunk.**
+`seedvc_core::convert` states that arithmetic in its error rather than reporting
+whatever symptom it produces, because trimming the clip is the only thing the
+user can do about it, and the subtraction underflows rather than failing if
+nobody checks it.
+
+**The engine's `download` fetches from four repos, not one.** `tts` has a single
+snapshot directory; here the checkpoint (`Plachta/Seed-VC`) holds only the
+transformer and the length regulator, and the timbre encoder
+(`funasr/campplus`), the vocoder (`nvidia/bigvgan_v2_22khz_80band_256x`, weights
+*and* its `config.json`, from which the band count and upsampling rates are
+read) and the content encoder (`openai/whisper-small`) are three other projects'
+releases used unmodified. All four are inference assets, so all four go to the
+shared cache and there is no `pretrained/` counterpart — a warm-start base is a
+training input, and this engine has no training.
+
+**`examples/load` now collides four ways.** `burn-rvc`, `burn-whisper`,
+`burn-gptsovits` and `burn-seedvc` each have one, so cargo's "output filename
+collision" warning names four crates rather than two. It is the hazard the next
+section describes, not noise.
 
 ### The shared target directory is unsafe for concurrent worktrees
 `target/debug/examples/<name>` is **not** hashed per worktree, so two checkouts

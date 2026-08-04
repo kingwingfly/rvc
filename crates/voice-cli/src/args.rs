@@ -2,8 +2,9 @@
 //!
 //! No engine's flags are defined here. Each `*-cli` crate exports the whole of
 //! its own command tree — [`rvc_cli::args::RvcCli`], [`stt_cli::SttCli`],
-//! [`tts_cli::TtsCli`] — and this file only nests them, so `voice rvc convert`
-//! and `rvc convert` are one definition worn two ways.
+//! [`tts_cli::TtsCli`], [`seedvc_cli::SeedVcCli`] — and this file only nests
+//! them, so `voice rvc convert` and `rvc convert` are one definition worn two
+//! ways.
 //!
 //! There is deliberately no top-level asset command. There used to be a `voice
 //! models`, which announced itself as fetching "shared model assets" and in
@@ -14,6 +15,7 @@
 use clap::{Parser, Subcommand};
 use rvc_cli::args::{CompletionsArgs, RvcCli};
 
+use seedvc_cli::SeedVcCli;
 use stt_cli::SttCli;
 use tts_cli::TtsCli;
 
@@ -39,6 +41,13 @@ pub enum Command {
     /// Speech synthesis: text on stdin, f32le mono PCM on stdout; `train`,
     /// `preprocess` and `download` beside it.
     Tts(Box<TtsCli>),
+    /// Zero-shot voice conversion: f32le mono PCM @16 kHz on stdin, converted
+    /// PCM @22.05 kHz on stdout; `convert` and `download` beside it. The voice
+    /// comes from a reference clip, so there is no `train`.
+    // Named explicitly because clap's kebab-case default would spell this
+    // variant `seed-vc`, and the subcommand has to be the binary's own name.
+    #[command(name = "seedvc")]
+    SeedVc(Box<SeedVcCli>),
     /// Print a shell completion script (bash, zsh, fish, powershell, elvish).
     Completions(CompletionsArgs),
 }

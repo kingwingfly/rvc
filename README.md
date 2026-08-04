@@ -21,19 +21,20 @@ exporter under [`export/`](export/README.md).
 | | the bare invocation | subcommands |
 |---|---|---|
 | **`rvc`** | PCM in → retimbred PCM out | `convert`, `train`, `preprocess`, `download`, `completions` |
-| **`stt`** | PCM in → text out | `download`, `completions` |
-| **`tts`** | text in → PCM out | `train`, `preprocess`, `download`, `completions` |
-| **`voice`** | — | `voice rvc …`, `voice stt …`, `voice tts …`, all three unchanged |
+| **`stt`** | PCM in → text out | `convert`, `download`, `completions` |
+| **`tts`** | text in → PCM out | `convert`, `train`, `preprocess`, `download`, `completions` |
+| **`seedvc`** | PCM in → retimbred PCM out, no training | `convert`, `download`, `completions` |
+| **`voice`** | — | `voice rvc …`, `voice stt …`, `voice tts …`, `voice seedvc …`, all four unchanged |
 
 ## Install
 
 ```sh
 export LIBTORCH=$PWD/libtorch      # 2.9.0; omit to build without the tch backend
-cargo build --release              # all four binaries
+cargo build --release              # all five binaries
 cargo build --release -p stt-cli   # or just one
 ```
 
-ONNX Runtime, LibTorch and ffmpeg are found the same way by all four binaries:
+ONNX Runtime, LibTorch and ffmpeg are found the same way by all five binaries:
 
 **→ [`docs/setup.md`](docs/setup.md)**
 
@@ -44,14 +45,20 @@ ONNX Runtime, LibTorch and ffmpeg are found the same way by all four binaries:
 | **`rvc`** — voice conversion (RVC v2) | **works**, inference + native training | [crates/rvc-cli/README.md](crates/rvc-cli/README.md) |
 | **`stt`** — speech recognition (Whisper large-v3-turbo) | **works**, Burn **or** ONNX Runtime | [crates/stt-cli/README.md](crates/stt-cli/README.md) |
 | **`tts`** — speech synthesis (GPT-SoVITS v2) | **works**, inference + `s1` and `s2` fine-tuning | [crates/tts-cli/README.md](crates/tts-cli/README.md) |
+| **`seedvc`** — zero-shot voice conversion (Seed-VC) | inference; a reference clip replaces training entirely | [crates/seedvc-cli/README.md](crates/seedvc-cli/README.md) |
 | **`translate`** | not started; pipe to any external tool meanwhile | — |
 
 Each engine's README has the rest — every flag, which weights are fetched and
 from where, and its fine-tuning loop.
 
-**`--backend` is a run-time choice on every engine**: all three engines run under ONNX
-Runtime or under native Burn on LibTorch, CubeCL/CUDA or WebGPU, in one binary,
-with one set of spellings. Fine-tuning is always Burn.
+`rvc` and `seedvc` do the same job on opposite terms: `rvc` learns one voice from
+a corpus and renders it very well, `seedvc` takes any voice from a 1–30 s clip
+and renders it adequately with nothing trained at all.
+
+**`--backend` is a run-time choice on every engine**: `rvc`, `stt` and `tts` run
+under ONNX Runtime or under native Burn on LibTorch, CubeCL/CUDA or WebGPU, in
+one binary, with one set of spellings; `seedvc` is Burn-only, because nothing
+exports Seed-VC to ONNX. Fine-tuning is always Burn.
 
 ## Documentation
 
@@ -63,6 +70,7 @@ READMEs and [`docs/setup.md`](docs/setup.md):
 | [`docs/rvc-architecture.typ`](docs/rvc-architecture.typ) | RVC v2 — the VITS-derived synthesizer, the NSF source module, the adversarial objective |
 | [`docs/gptsovits-architecture.typ`](docs/gptsovits-architecture.typ) | GPT-SoVITS v2 — cnhubert, the semantic quantiser, `s1` (text → tokens) and `s2` (tokens → waveform) |
 | [`docs/whisper-architecture.typ`](docs/whisper-architecture.typ) | Whisper large-v3-turbo — the log-mel front-end, the encoder/decoder stack, KV-cached greedy decoding |
+| [`docs/seedvc-architecture.typ`](docs/seedvc-architecture.typ) | Seed-VC — flow matching, in-context conditioning on a reference clip, and why it needs no training |
 | [`docs/training.md`](docs/training.md) | every training loop in the toolkit: the shared objective, `train-kit`, warm-start, devices |
 
 The architecture papers are written for *reviewing and maintaining a port*
@@ -95,6 +103,7 @@ Three tiers, and the names say which is which.
 | `burn-rvc` | what is RVC's alone: the NSF source module, the 768-dim content encoder, the synthesizer wiring |
 | `burn-whisper` | the Whisper network; loads HF safetensors unchanged |
 | `burn-gptsovits` | the GPT-SoVITS network: cnhubert, the quantiser, `s2` (SoVITS) and `s1` (T2S) |
+| `burn-seedvc` | the Seed-VC network: the diffusion transformer and its flow-matching sampler, the length regulator, the CAMPPlus timbre encoder, BigVGAN. **GPL-3.0 is this crate's doing** |
 
 **Engines**, one `-core` and one `-cli` apiece, all the same shape:
 
@@ -103,6 +112,7 @@ Three tiers, and the names say which is which.
 | `rvc-core` + `rvc-train` + `rvc-cli` | voice conversion → binary `rvc` |
 | `stt-core` + `stt-cli` | speech recognition → binary `stt` |
 | `tts-core` + `tts-train` + `tts-cli` | speech synthesis → binary `tts` |
+| `seedvc-core` + `seedvc-cli` | zero-shot voice conversion → binary `seedvc`; no `-train`, and that is the point |
 | `voice-cli` | the integration → binary `voice` |
 
 Two rules keep it that way. **No engine depends on another engine** — anything
