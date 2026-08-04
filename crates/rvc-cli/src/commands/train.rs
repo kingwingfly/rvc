@@ -9,7 +9,7 @@
 use anyhow::{Context, Result};
 use rvc_train::{TrainRequest, TrainSettings};
 
-use crate::args::{Backend, TrainArgs};
+use crate::args::{Backend, TrainArgs, weight_format};
 
 /// The Burn backend a `--backend` choice names, rejecting the one that cannot
 /// train.
@@ -37,6 +37,12 @@ pub async fn run(args: TrainArgs) -> Result<()> {
     // Before anything is fetched: a backend that cannot train should not cost a
     // model download first.
     let backend = train_backend(args.backend)?;
+    // ONNX unless `--content-vec-backend`/`--rmvpe-backend` say otherwise, and
+    // they may only say ONNX for now — `TrainArgs::feature_backends` explains
+    // why the trainer is the one command whose feature default is not
+    // `--backend`. Resolved here so the fetches below name a format rather than
+    // hard-coding one.
+    let features = args.feature_backends()?;
 
     // The dashboard runs only on a real terminal; otherwise plain logs. This
     // must match main.rs's decision to route logs off stderr.
@@ -59,19 +65,22 @@ pub async fn run(args: TrainArgs) -> Result<()> {
     let content = match &args.content {
         Some(p) => p.clone(),
         None => {
-            tracing::info!("resolving ContentVec ONNX from Hugging Face...");
-            hub_kit::fetch_contentvec(hub_kit::WeightFormat::Onnx, cache)
+            tracing::info!(
+                "resolving ContentVec ({}) from Hugging Face...",
+                features.content
+            );
+            hub_kit::fetch_contentvec(weight_format(features.content), cache)
                 .await
-                .context("failed to fetch ContentVec ONNX (override with --content)")?
+                .context("failed to fetch ContentVec (override the path with --content)")?
         }
     };
     let rmvpe = match &args.rmvpe {
         Some(p) => p.clone(),
         None => {
-            tracing::info!("resolving RMVPE ONNX from Hugging Face...");
-            hub_kit::fetch_rmvpe(hub_kit::WeightFormat::Onnx, cache)
+            tracing::info!("resolving RMVPE ({}) from Hugging Face...", features.rmvpe);
+            hub_kit::fetch_rmvpe(weight_format(features.rmvpe), cache)
                 .await
-                .context("failed to fetch RMVPE ONNX (override with --rmvpe)")?
+                .context("failed to fetch RMVPE (override the path with --rmvpe)")?
         }
     };
 

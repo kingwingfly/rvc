@@ -3,20 +3,30 @@
 
 use anyhow::Result;
 
-use crate::args::DownloadArgs;
+use crate::args::{DownloadArgs, weight_format};
 use crate::commands::common::parse_model_ref;
 
 pub async fn run(a: DownloadArgs) -> Result<()> {
     let content = a.content.as_deref().map(parse_model_ref).transpose()?;
     let rmvpe = a.rmvpe.as_deref().map(parse_model_ref).transpose()?;
 
-    // `rvc download` has no `--content-vec-backend`/`--rmvpe-backend` of its
-    // own yet, so it prefetches what a default bare invocation would: ONNX.
+    // Prefetching is only worth anything if it fetches the files the next run
+    // will actually load, so this resolves the backends exactly as a conversion
+    // does. There is no `-m` here, so `auto` has no weights to inspect and
+    // resolves on hardware alone — `--backend onnx` is how a user with an
+    // `.onnx` generator says so.
+    let features = a.features.resolve(a.backend.resolve(false));
+    tracing::info!(
+        "fetching ContentVec for {} and RMVPE for {}",
+        features.content,
+        features.rmvpe
+    );
+
     let assets = hub_kit::fetch_shared(
         content,
-        hub_kit::WeightFormat::Onnx,
+        weight_format(features.content),
         rmvpe,
-        hub_kit::WeightFormat::Onnx,
+        weight_format(features.rmvpe),
         &a.cache_dir,
     )
     .await?;
