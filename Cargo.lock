@@ -6459,6 +6459,7 @@ name = "seedvc-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-stream",
  "audio-kit",
  "burn",
  "burn-kit",

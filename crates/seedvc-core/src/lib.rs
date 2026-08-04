@@ -45,3 +45,4 @@ pub use burn_seedvc::flow::Sampler;
 pub use convert::{ConvertOptions, convert, convert_path};
 pub use error::{Error, Result};
 pub use model::{BurnModel, CONTENT_SR, Model, ModelPaths, Reference};
+pub use stream::{Converter, StreamParams, convert_stream};
