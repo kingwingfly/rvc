@@ -12,7 +12,6 @@ pub mod download;
 pub mod train;
 
 use anyhow::Result;
-use clap::CommandFactory;
 
 pub use args::{TtsArgs, TtsCli, TtsCommand};
 pub use cli_kit::Backend;
@@ -21,11 +20,10 @@ pub use train::{Stage, TrainArgs};
 
 /// Run one synthesis invocation.
 ///
-/// `C` is the binary's own top-level command tree — the one `completions`
-/// should describe, which is `tts` for the standalone tool and `voice` when
-/// nested. It stays a type parameter so nothing but the `completions` arm pays
-/// for building it.
-pub async fn run<C: CommandFactory>(cli: TtsCli) -> Result<()> {
+/// Not generic over the hosting binary: it used to take one so the `completions`
+/// arm could build that binary's command tree, and `completions` now belongs to
+/// the binary rather than to the engine.
+pub async fn run(cli: TtsCli) -> Result<()> {
     match cli.command {
         // Synthesising is the whole engine, so it is the bare invocation;
         // everything else is a subcommand beside it.
@@ -34,7 +32,6 @@ pub async fn run<C: CommandFactory>(cli: TtsCli) -> Result<()> {
         Some(TtsCommand::Train(a)) => train::run(*a).await,
         Some(TtsCommand::Preprocess(a)) => preprocess_kit::run(a).await,
         Some(TtsCommand::Download(a)) => download::run(a).await,
-        Some(TtsCommand::Completions(a)) => cli_kit::completions(a, C::command()),
     }
 }
 

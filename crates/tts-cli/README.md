@@ -9,7 +9,8 @@ Runtimes, drivers and ffmpeg: [`docs/setup.md`](../../docs/setup.md). What the
 networks compute:
 [`docs/gptsovits-architecture.pdf`](../../docs/gptsovits-architecture.pdf).
 Build it with `cargo build --release -p tts-cli`. Every command below is also
-`voice tts …` — same code, same flags.
+`voice tts …` — same code, same flags. The exception is `completions`, which
+describes a binary rather than an engine: use `voice completions` there.
 
 ## Commands
 

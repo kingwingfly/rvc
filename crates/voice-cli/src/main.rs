@@ -45,10 +45,10 @@ async fn main() -> Result<()> {
         _ => rvc_cli::init_logging(None),
     }
     match cli.command {
-        Command::Rvc(c) => rvc_cli::run::<Cli>(*c).await,
-        Command::Stt(c) => stt_cli::run::<Cli>(*c).await,
-        Command::Tts(c) => tts_cli::run::<Cli>(*c).await,
-        Command::SeedVc(c) => seedvc_cli::run::<Cli>(*c).await,
+        Command::Rvc(c) => rvc_cli::run(*c).await,
+        Command::Stt(c) => stt_cli::run(*c).await,
+        Command::Tts(c) => tts_cli::run(*c).await,
+        Command::SeedVc(c) => seedvc_cli::run(*c).await,
         Command::Completions(a) => cli_kit::completions(a, Cli::command()),
     }
 }

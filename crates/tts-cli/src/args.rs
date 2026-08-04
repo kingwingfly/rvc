@@ -18,7 +18,6 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand, ValueEnum};
-use cli_kit::CompletionsArgs;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tts_core::{OUTPUT_SR, SampleOptions, SynthOptions};
 
@@ -41,6 +40,13 @@ pub struct TtsCli {
     pub command: Option<TtsCommand>,
 }
 
+/// What this engine can do, and nothing about the executable that hosts it.
+///
+/// **`completions` is not a member, on purpose.** A completion script describes
+/// one binary, so a nested `voice tts completions` could only ever emit
+/// `voice`'s — which is exactly what it used to do. Each `main.rs` flattens this
+/// enum into its own and adds `Completions` beside it, so the standalone binary
+/// keeps the subcommand and `voice` grows only one, at its top level.
 #[derive(Debug, Subcommand)]
 pub enum TtsCommand {
     /// Speak text files, one WAV per file.
@@ -55,8 +61,6 @@ pub enum TtsCommand {
     Preprocess(PreprocessArgs),
     /// Prefetch the weights synthesis needs, so the first run is offline.
     Download(DownloadArgs),
-    /// Print a shell completion script (bash, zsh, fish, powershell, elvish).
-    Completions(CompletionsArgs),
 }
 
 /// Which language front-end to phonemize with.

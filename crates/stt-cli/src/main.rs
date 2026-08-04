@@ -9,20 +9,47 @@
 //! Logs go to **stderr** so stdout carries only transcripts.
 
 use anyhow::Result;
-use clap::Parser;
-use stt_cli::SttCli;
+use clap::{CommandFactory, Parser, Subcommand};
+use cli_kit::CompletionsArgs;
+use stt_cli::args::SttArgs;
+use stt_cli::{SttCli, SttCommand};
 
 /// stt — speech recognition: f32le mono PCM @16 kHz on stdin, text on stdout.
 #[derive(Debug, Parser)]
 #[command(name = "stt", version, about)]
 struct Cli {
     #[command(flatten)]
-    stt: SttCli,
+    transcribe: SttArgs,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+/// The engine's own subcommands, plus the one that belongs to this binary.
+///
+/// `completions` is here rather than in [`SttCommand`] because a completion
+/// script describes an executable: under `voice` the executable is `voice`, and
+/// a nested `voice stt completions` could only emit `voice`'s script while
+/// appearing to offer `stt`'s.
+#[derive(Debug, Subcommand)]
+enum Command {
+    #[command(flatten)]
+    Engine(SttCommand),
+    /// Print a shell completion script (bash, zsh, fish, powershell, elvish).
+    Completions(CompletionsArgs),
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     cli_kit::init_logging(None);
-    stt_cli::run::<Cli>(cli.stt).await
+    let command = match cli.command {
+        Some(Command::Completions(a)) => return cli_kit::completions(a, Cli::command()),
+        Some(Command::Engine(c)) => Some(c),
+        None => None,
+    };
+    stt_cli::run(SttCli {
+        transcribe: cli.transcribe,
+        command,
+    })
+    .await
 }

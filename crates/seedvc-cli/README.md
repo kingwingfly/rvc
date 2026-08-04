@@ -17,7 +17,8 @@ Runtimes, drivers and ffmpeg: [`docs/setup.md`](../../docs/setup.md). What the
 six networks compute:
 [`docs/seedvc-architecture.pdf`](../../docs/seedvc-architecture.pdf). Build it
 with `cargo build --release -p seedvc-cli`. Every command below is also
-`voice seedvc …` — same code, same flags.
+`voice seedvc …` — same code, same flags. The exception is `completions`, which
+describes a binary rather than an engine: use `voice completions` there.
 
 ## Commands
 
@@ -31,9 +32,8 @@ with `cargo build --release -p seedvc-cli`. Every command below is also
 Logs go to stderr, so stdout is only ever samples.
 
 **`-r/--reference` is required by both conversion paths, but clap does not
-enforce it** — the shared options are flattened beside `download` and
-`completions`, which want no reference at all, so marking it required would
-demand one of them too. A missing `-r` is therefore an error at the start of the
+enforce it** — the shared options are flattened beside `download`, which wants
+no reference at all, so marking it required would demand one of it too. A missing `-r` is therefore an error at the start of the
 run rather than a usage message, and it says what a reference is for.
 
 ```sh

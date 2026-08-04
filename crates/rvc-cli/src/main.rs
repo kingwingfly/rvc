@@ -13,8 +13,8 @@
 //! weights so they don't corrupt the display.
 
 use anyhow::Result;
-use clap::Parser;
-use rvc_cli::args::{RvcCli, RvcCommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use rvc_cli::args::{CompletionsArgs, FilterArgs, RvcCli, RvcCommand};
 
 /// rvc — RVC voice conversion: f32le mono PCM @16 kHz on stdin, converted PCM
 /// on stdout.
@@ -22,15 +22,40 @@ use rvc_cli::args::{RvcCli, RvcCommand};
 #[command(name = "rvc", version, about)]
 struct Cli {
     #[command(flatten)]
-    rvc: RvcCli,
+    filter: FilterArgs,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+/// The engine's own subcommands, plus the one that belongs to this binary.
+///
+/// `completions` is here rather than in [`RvcCommand`] because a completion
+/// script describes an executable: under `voice` the executable is `voice`, and
+/// a nested `voice rvc completions` could only emit `voice`'s script while
+/// appearing to offer `rvc`'s.
+#[derive(Debug, Subcommand)]
+enum Command {
+    #[command(flatten)]
+    Engine(RvcCommand),
+    /// Print a shell completion script (bash, zsh, fish, powershell, elvish).
+    Completions(CompletionsArgs),
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    rvc_cli::init_logging(match &cli.rvc.command {
-        Some(RvcCommand::Train(a)) => Some(a.as_ref()),
+    rvc_cli::init_logging(match &cli.command {
+        Some(Command::Engine(RvcCommand::Train(a))) => Some(a.as_ref()),
         _ => None,
     });
-    rvc_cli::run::<Cli>(cli.rvc).await
+    let command = match cli.command {
+        Some(Command::Completions(a)) => return cli_kit::completions(a, Cli::command()),
+        Some(Command::Engine(c)) => Some(c),
+        None => None,
+    };
+    rvc_cli::run(RvcCli {
+        filter: cli.filter,
+        command,
+    })
+    .await
 }

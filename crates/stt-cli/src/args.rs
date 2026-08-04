@@ -21,7 +21,6 @@
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand, ValueEnum};
-use cli_kit::CompletionsArgs;
 use futures::StreamExt;
 use std::path::PathBuf;
 use stt_core::{DecodeOptions, TranscribeOptions};
@@ -42,14 +41,19 @@ pub struct SttCli {
     pub command: Option<SttCommand>,
 }
 
+/// What this engine can do, and nothing about the executable that hosts it.
+///
+/// **`completions` is not a member, on purpose.** A completion script describes
+/// one binary, so a nested `voice stt completions` could only ever emit
+/// `voice`'s — which is exactly what it used to do. Each `main.rs` flattens this
+/// enum into its own and adds `Completions` beside it, so the standalone binary
+/// keeps the subcommand and `voice` grows only one, at its top level.
 #[derive(Debug, Subcommand)]
 pub enum SttCommand {
     /// Transcribe audio files to `<stem>.txt` (or `.jsonl`) in a directory.
     Convert(crate::convert::ConvertArgs),
     /// Prefetch the weights recognition needs, so the first run is offline.
     Download(DownloadArgs),
-    /// Print a shell completion script (bash, zsh, fish, powershell, elvish).
-    Completions(CompletionsArgs),
 }
 
 /// What a default `stt` run would fetch on demand, fetched up front instead.

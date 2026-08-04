@@ -7,7 +7,8 @@ Runtime — behind one command that reads raw PCM on stdin and writes transcript
 on stdout. No Python, at run time or at install time.
 
 Every flag below is also `voice stt …`, from this crate as a library rather than
-a copy of its arguments.
+a copy of its arguments. The exception is `completions`, which describes a binary
+rather than an engine: use `voice completions` there.
 
 ## Install
 

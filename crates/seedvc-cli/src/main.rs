@@ -13,20 +13,45 @@
 //! `voice seedvc …` hosts the same command tree, from this crate as a library.
 
 use anyhow::Result;
-use clap::Parser;
-use seedvc_cli::SeedVcCli;
+use clap::{CommandFactory, Parser, Subcommand};
+use seedvc_cli::args::{CompletionsArgs, FilterArgs, SeedVcCli, SeedVcCommand};
 
 /// seedvc — convert a voice into the voice of a reference clip, with no training.
 #[derive(Debug, Parser)]
 #[command(name = "seedvc", version, about)]
 struct Cli {
     #[command(flatten)]
-    seedvc: SeedVcCli,
+    filter: FilterArgs,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+/// The engine's own subcommands, plus the one that belongs to this binary.
+///
+/// `completions` is here rather than in [`SeedVcCommand`] because a completion
+/// script describes an executable: under `voice` the executable is `voice`, and
+/// a nested `voice seedvc completions` could only emit `voice`'s script while
+/// appearing to offer `seedvc`'s.
+#[derive(Debug, Subcommand)]
+enum Command {
+    #[command(flatten)]
+    Engine(SeedVcCommand),
+    /// Print a shell completion script (bash, zsh, fish, powershell, elvish).
+    Completions(CompletionsArgs),
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     seedvc_cli::init_logging();
-    seedvc_cli::run::<Cli>(cli.seedvc).await
+    let command = match cli.command {
+        Some(Command::Completions(a)) => return cli_kit::completions(a, Cli::command()),
+        Some(Command::Engine(c)) => Some(c),
+        None => None,
+    };
+    seedvc_cli::run(SeedVcCli {
+        filter: cli.filter,
+        command,
+    })
+    .await
 }

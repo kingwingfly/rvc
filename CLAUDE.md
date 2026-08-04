@@ -57,7 +57,9 @@ are for everything that is not streaming:
 `rvc convert|train|preprocess|download|completions`,
 `tts convert|train|preprocess|download|completions`,
 `stt convert|download|completions`,
-`seedvc convert|download|completions`. `stt` and `tts` were already this shape;
+`seedvc convert|download|completions` — where `completions` is the binary's and
+not the engine's, so it is the one that does **not** appear under `voice` (see
+below). `stt` and `tts` were already this shape;
 `rvc` reached it by promoting `rvc serve` to the bare invocation. **`convert` is
 the batch counterpart of the bare invocation on all four** — same engine, files
 instead of a pipe — which is why it is spelled identically everywhere rather than
@@ -95,6 +97,27 @@ names a subcommand by kebab-casing its variant, so `Command::SeedVc` would
 render as `voice seed-vc` while the binary is `seedvc`. The variant therefore
 carries `#[command(name = "seedvc")]`. That is a rename **back** to the engine's
 own name, which is the rule rather than an exception to it.
+
+### `completions` belongs to the binary, not to the engine
+It is the one subcommand in the list above that is **not** part of any engine's
+clap type, and the reason is that a completion script describes *an executable*.
+`<E>Command` therefore stops at the engine's own verbs, and each `main.rs`
+flattens that enum into a private one that adds `Completions` beside it —
+`#[command(flatten)]` on a subcommand variant, which is what makes this cost one
+enum per binary rather than a second definition of anything.
+
+**This is a correction, so do not undo it by moving the variant back.** While
+`Completions` sat in the shared enum, every engine grew a nested copy under
+`voice`, and `voice rvc completions bash` emitted a script beginning `_voice()`
+— `run` was generic over the hosting binary precisely so that arm could build
+`voice`'s tree, so the nested subcommand advertised `rvc`'s completions and
+produced `voice`'s. Four spellings of one script, three of them lies. Now
+`voice completions` is the only one, `rvc completions` still emits `_rvc()`, and
+`run` needs no type parameter at all — the generic existed only for that arm.
+
+The rule generalises: **anything true of the executable rather than of the engine
+goes in `main.rs`.** A future `--version` banner or a self-update command is the
+same shape.
 
 **Every engine has a `download`, and it fetches exactly what a default bare
 invocation would fetch on demand** — no more, so a synthesis-only user is never

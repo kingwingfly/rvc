@@ -9,17 +9,15 @@ pub mod args;
 pub mod commands;
 
 use anyhow::Result;
-use clap::CommandFactory;
 
 use args::{RvcCli, RvcCommand, TrainArgs};
 
 /// Run one voice-conversion invocation.
 ///
-/// `C` is the binary's own top-level command tree — the one `completions`
-/// should describe, which is `rvc` for the standalone tool and `voice` when
-/// nested. It stays a type parameter so nothing but the `completions` arm pays
-/// for building it.
-pub async fn run<C: CommandFactory>(cli: RvcCli) -> Result<()> {
+/// Not generic over the hosting binary: it used to take one so the `completions`
+/// arm could build that binary's command tree, and `completions` now belongs to
+/// the binary rather than to the engine.
+pub async fn run(cli: RvcCli) -> Result<()> {
     match cli.command {
         // Converting a stream is the whole engine, so it is the bare
         // invocation; everything else is a subcommand beside it.
@@ -28,7 +26,6 @@ pub async fn run<C: CommandFactory>(cli: RvcCli) -> Result<()> {
         Some(RvcCommand::Train(a)) => commands::train::run(*a).await,
         Some(RvcCommand::Preprocess(a)) => preprocess_kit::run(a).await,
         Some(RvcCommand::Download(a)) => commands::download::run(a).await,
-        Some(RvcCommand::Completions(a)) => cli_kit::completions(a, C::command()),
     }
 }
 

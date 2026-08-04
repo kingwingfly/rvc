@@ -11,9 +11,13 @@ use clap::{Args, Subcommand};
 
 pub use cli_kit::{Backend, CompletionsArgs};
 
-/// The whole of the `seedvc` command tree, defined once and worn two ways: the
+/// The whole of the `seedvc` **engine**, defined once and worn two ways: the
 /// `seedvc` binary flattens it at its top level, `voice` nests it under a
 /// `seedvc` subcommand.
+///
+/// `completions` is deliberately not in here — it describes the *binary* being
+/// completed, not the engine, so each `main` adds it beside this. See
+/// [`SeedVcCommand`].
 #[derive(Debug, Args)]
 pub struct SeedVcCli {
     #[command(flatten)]
@@ -22,6 +26,13 @@ pub struct SeedVcCli {
     pub command: Option<SeedVcCommand>,
 }
 
+/// What this engine can do, and nothing about the executable that hosts it.
+///
+/// **`completions` is not a member, on purpose.** A completion script describes
+/// one binary, so a nested `voice seedvc completions` could only ever emit
+/// `voice`'s — which is exactly what it used to do. Each `main.rs` flattens this
+/// enum into its own and adds `Completions` beside it, so the standalone binary
+/// keeps the subcommand and `voice` grows only one, at its top level.
 #[derive(Debug, Subcommand)]
 pub enum SeedVcCommand {
     /// Convert audio files into the reference's voice (WAV output).
@@ -30,8 +41,6 @@ pub enum SeedVcCommand {
     Convert(Box<ConvertArgs>),
     /// Prefetch the weights a conversion needs, so the first run is offline.
     Download(DownloadArgs),
-    /// Print a shell completion script (bash, zsh, fish, powershell, elvish).
-    Completions(CompletionsArgs),
 }
 
 /// Where the four networks come from, and which voice to convert into.

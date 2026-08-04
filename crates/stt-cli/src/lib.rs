@@ -10,7 +10,6 @@ pub mod backend;
 pub mod convert;
 
 use anyhow::Result;
-use clap::CommandFactory;
 
 pub use args::{Format, SttArgs, SttCli, SttCommand};
 pub use cli_kit::Backend;
@@ -18,17 +17,15 @@ pub use convert::ConvertArgs;
 
 /// Run one recognition invocation.
 ///
-/// `C` is the binary's own top-level command tree — the one `completions`
-/// should describe, which is `stt` for the standalone tool and `voice` when
-/// nested. It stays a type parameter so nothing but the `completions` arm pays
-/// for building it.
-pub async fn run<C: CommandFactory>(cli: SttCli) -> Result<()> {
+/// Not generic over the hosting binary: it used to take one so the `completions`
+/// arm could build that binary's command tree, and `completions` now belongs to
+/// the binary rather than to the engine.
+pub async fn run(cli: SttCli) -> Result<()> {
     match cli.command {
         // Transcribing is the whole engine, so it is the bare invocation;
         // everything else is a subcommand beside it.
         None => args::transcribe(cli.transcribe).await,
         Some(SttCommand::Convert(a)) => convert::run(a).await,
         Some(SttCommand::Download(a)) => args::download(a).await,
-        Some(SttCommand::Completions(a)) => cli_kit::completions(a, C::command()),
     }
 }

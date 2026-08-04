@@ -8,7 +8,8 @@ or native Burn; training runs on any Burn backend.
 Runtimes, drivers and ffmpeg: [`docs/setup.md`](../../docs/setup.md). What the
 network computes: [`docs/rvc-architecture.pdf`](../../docs/rvc-architecture.pdf).
 Build it with `cargo build --release -p rvc-cli`. Every command below is also
-`voice rvc …` — same code, same flags.
+`voice rvc …` — same code, same flags. The exception is `completions`, which
+describes a binary rather than an engine: use `voice completions` there.
 
 ## Commands
 

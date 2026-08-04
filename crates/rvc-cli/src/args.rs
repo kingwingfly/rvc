@@ -19,6 +19,13 @@ pub struct RvcCli {
     pub command: Option<RvcCommand>,
 }
 
+/// What this engine can do, and nothing about the executable that hosts it.
+///
+/// **`completions` is not a member, on purpose.** A completion script describes
+/// one binary, so a nested `voice rvc completions` could only ever emit
+/// `voice`'s — which is exactly what it used to do. Each `main.rs` flattens this
+/// enum into its own and adds `Completions` beside it, so the standalone binary
+/// keeps the subcommand and `voice` grows only one, at its top level.
 #[derive(Debug, Subcommand)]
 pub enum RvcCommand {
     /// Batch-convert audio files into the target timbre (WAV output).
@@ -31,8 +38,6 @@ pub enum RvcCommand {
     Preprocess(PreprocessArgs),
     /// Prefetch the weights a conversion needs, so the first run is offline.
     Download(DownloadArgs),
-    /// Print a shell completion script (bash, zsh, fish, powershell, elvish).
-    Completions(CompletionsArgs),
 }
 
 /// Shared options for locating the three ONNX models.
