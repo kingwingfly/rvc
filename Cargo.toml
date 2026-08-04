@@ -36,7 +36,7 @@ edition = "2024"
 # "or any later version" statement, and -only is the reading that is valid
 # either way.
 license = "GPL-3.0-only"
-repository = "https://github.com/kingwingfly/asmr"
+repository = "https://github.com/kingwingfly/voice"
 rust-version = "1.85"
 
 [workspace.dependencies]

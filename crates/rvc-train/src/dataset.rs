@@ -28,7 +28,7 @@ pub struct Clip {
     pub frames: usize,
     /// Noise-floor SNR (linear): the clip's loud-percentile frame RMS over its
     /// quiet-percentile (noise-floor) frame RMS. A *ratio*, so a soft-but-clean
-    /// ASMR clip still scores high — unlike a loudness measure, which would
+    /// take still scores high — unlike a loudness measure, which would
     /// penalise exactly the breathy passages we want to keep. Used only for
     /// optional SNR-weighted sampling ([`clip_weights`]).
     pub snr: f32,

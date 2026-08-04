@@ -2,18 +2,20 @@
 //! `anlmdn` non-local-means de-noiser (in-process via libavfilter, not a
 //! subprocess).
 //!
-//! ASMR is the hard case: the content itself (breaths, whispers, mouth sounds)
-//! is soft and *broadband* — spectrally indistinguishable from steady hiss — so
-//! a spectral-subtraction de-noiser (`afftdn`) that keys off level/frequency
-//! muffles the very texture we want to keep. `anlmdn` instead averages each
-//! short patch of audio with *self-similar* patches found nearby in time:
-//! stationary hiss looks the same everywhere and averages away, while the
-//! ever-changing breath texture has few close matches and survives intact.
+//! Soft, close-mic speech is the hard case: the content itself (breaths,
+//! whispers, mouth sounds) is soft and *broadband* — spectrally
+//! indistinguishable from steady hiss — so a spectral-subtraction de-noiser
+//! (`afftdn`) that keys off level/frequency muffles the very texture we want
+//! to keep. `anlmdn` instead averages each short patch of audio with
+//! *self-similar* patches found nearby in time: stationary hiss looks the same
+//! everywhere and averages away, while the ever-changing breath texture has
+//! few close matches and survives intact.
 //!
-//! On an ASMR-like breath-over-hiss signal this removes ~75 % of the hiss while
-//! preserving content energy and high-frequency "crispness" to within ~1 %,
-//! with none of the warbly musical-noise `afftdn` leaves behind — and it runs
-//! ~12× faster than realtime, so the streaming filter stays realtime.
+//! On a breath-over-hiss signal typical of soft, close-mic speech this removes
+//! ~75 % of the hiss while preserving content energy and high-frequency
+//! "crispness" to within ~1 %, with none of the warbly musical-noise `afftdn`
+//! leaves behind — and it runs ~12× faster than realtime, so the streaming
+//! filter stays realtime.
 //!
 //! The heavy lifting lives in [`audio_kit::AudioFilter`]; this is a thin,
 //! streaming wrapper that keeps the same `process`/`flush`/`reset` shape the
@@ -23,9 +25,9 @@
 
 use audio_kit::AudioFilter;
 
-/// Tunable de-hiss settings. Defaults are tuned for ASMR (`strength` is the one
-/// knob most worth touching: raise it for more hiss removal, lower it if soft
-/// texture starts to smear).
+/// Tunable de-hiss settings. Defaults are tuned for soft, breathy content
+/// (`strength` is the one knob most worth touching: raise it for more hiss
+/// removal, lower it if soft texture starts to smear).
 #[derive(Debug, Clone, Copy)]
 pub struct DenoiseParams {
     /// `anlmdn` strength `s`: higher removes more hiss but eventually smears the

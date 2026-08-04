@@ -11,8 +11,9 @@
 //!
 //! Pass `--denoise` to strip steady background hiss from the output — ffmpeg's
 //! `anlmdn` non-local-means de-noiser applied in-process (via libavfilter),
-//! tuned to preserve the soft broadband texture of ASMR/breathy content. For a
-//! different chain, denoise downstream with the `ffmpeg` binary instead, e.g.:
+//! tuned to preserve the soft broadband texture of quiet, breathy content. For
+//! a different chain, denoise downstream with the `ffmpeg` binary instead,
+//! e.g.:
 //!
 //! ```sh
 //! ... | rvc -m voice.onnx --model-sr 48000 \
