@@ -72,6 +72,8 @@ READMEs and [`docs/setup.md`](docs/setup.md):
 | [`docs/whisper-architecture.typ`](docs/whisper-architecture.typ) | Whisper large-v3-turbo — the log-mel front-end, the encoder/decoder stack, KV-cached greedy decoding |
 | [`docs/seedvc-architecture.typ`](docs/seedvc-architecture.typ) | Seed-VC — flow matching, in-context conditioning on a reference clip, and why it needs no training |
 | [`docs/training.md`](docs/training.md) | every training loop in the toolkit: the shared objective, `train-kit`, warm-start, devices |
+| [`docs/realtime.md`](docs/realtime.md) | driving the engines live: sample rates, ffmpeg capture and playback, virtual microphones and OBS, and the latency each engine costs |
+| [`docs/roadmap.md`](docs/roadmap.md) | what is not built yet — `translate`, Seed-VC export and training, a native audio backend — and what each would cost |
 
 The architecture papers are written for *reviewing and maintaining a port*
 rather than for driving the CLI. The convention is a [Typst](https://typst.app)
