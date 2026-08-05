@@ -107,7 +107,7 @@ def slaney_filterbank(n_mels: int) -> torch.Tensor:
 
 
 class LogMel(nn.Module):
-    """`[batch, 480000]` at 16 kHz → `[batch, 80, 3000]`.
+    """`[batch, samples]` at 16 kHz → `[batch, 80, 3000]`.
 
     Framing, windowing and the DFT fused into two convolutions rather than a
     `torch.stft` call. That is not a stylistic preference — it mirrors
@@ -131,6 +131,20 @@ class LogMel(nn.Module):
         self.register_buffer("filters", slaney_filterbank(n_mels))
 
     def forward(self, audio: torch.Tensor) -> torch.Tensor:
+        # A window is always the full 30 s, exactly as `content.rs`'s `log_mel`
+        # pads it: the encoder's positional table is 1500 frames wide and it was
+        # trained on padded windows, so zero padding is what it expects rather
+        # than an accommodation for short input. The padding also makes the
+        # output **identical on every frame** whatever the input length — the
+        # encoder's attention is global over the window, so a call on a short
+        # clip would otherwise attend over a different key set than a call on a
+        # full one, and differ in the first frame rather than the last.
+        samples = audio.shape[-1]
+        if samples < WINDOW_SAMPLES:
+            audio = F.pad(audio, (0, WINDOW_SAMPLES - samples))
+        elif samples > WINDOW_SAMPLES:
+            audio = audio[:, :WINDOW_SAMPLES]
+
         # `torch.stft(center=True)`: reflect padding of half the FFT size, so
         # frame `t` is centred on sample `t * hop` rather than half a hop later.
         x = F.pad(audio.unsqueeze(1), (MEL_N_FFT // 2, MEL_N_FFT // 2), mode="reflect")
@@ -235,6 +249,11 @@ class ContentEncoder(nn.Module):
     Holds the log-mel front end beside the network because the two are one
     interface — the encoder is only correct on mel computed exactly this way,
     and separating them is how a caller ends up feeding it the other mel.
+
+    Mirrors the Rust `ContentEncoder` **exactly**: the window padding lives in
+    [`LogMel`] and [`forward`] keeps the leading `samples / 320 + 1` frames, so
+    a call on any clip gives the Burn port's answer. [`full_window`] is the one
+    divergence, and it exists for [`Graph`]'s sake.
     """
 
     def __init__(self, cfg: WhisperConfig | None = None) -> None:
@@ -244,6 +263,20 @@ class ContentEncoder(nn.Module):
         self.encoder = AudioEncoder(cfg)
 
     def forward(self, audio: torch.Tensor) -> torch.Tensor:
+        # The Rust `ContentEncoder::forward` slice, verbatim: run the padded
+        # window, then drop the frames that describe nothing but padding.
+        features = self.encoder(self.log_mel(audio))
+        frames = min(audio.shape[-1] // CONTENT_STRIDE + 1, features.shape[1])
+        return features[:, :frames]
+
+    def full_window(self, audio: torch.Tensor) -> torch.Tensor:
+        """The whole 30 s window, `[batch, 1500, 768]`, un-sliced.
+
+        What the exported graph computes, and only that. [`Graph`] calls this
+        rather than [`forward`], because the slice above is a function of the
+        sample count — data the graph is not allowed to see. For the graph's
+        fixed `[1, 480000]` input the slice would in any case be a no-op.
+        """
         return self.encoder(self.log_mel(audio))
 
 
@@ -297,13 +330,15 @@ class Graph(nn.Module):
     **Static in every axis, and that is what sidesteps Whisper's fixed window
     rather than fighting it.** Whisper's positional table is 1500 frames wide
     and the weights were trained on padded 30 s windows, so the graph always
-    computes the whole window and always returns all 1500 frames. `content.rs`
-    additionally slices to `min(samples / 320 + 1, 1500)` — the frames that
-    describe real audio rather than the padding — but that bound is a function
-    of the *sample count*, which a static graph does not have. So the host pads
-    the clip up to 480 000 samples on the way in and takes the leading
-    `samples / 320 + 1` frames on the way out, the same host-side arithmetic
-    that carries the length regulator's gather indices and the Euler loop.
+    computes the whole window and always returns all 1500 frames — the forward
+    here is [`ContentEncoder.full_window`], deliberately not the mirror's
+    [`ContentEncoder.forward`]. `content.rs`'s `forward` additionally slices to
+    `min(samples / 320 + 1, 1500)` — the frames that describe real audio rather
+    than the padding — but that bound is a function of the *sample count*, which
+    a static graph does not have. So the host pads the clip up to 480 000
+    samples on the way in and takes the leading `samples / 320 + 1` frames on
+    the way out, the same host-side arithmetic that carries the length
+    regulator's gather indices and the Euler loop.
 
     A clip longer than 30 s is the host's problem too: upstream chunks it with a
     5 s overlap and stitches the features, and `content.rs` truncates instead.
@@ -318,7 +353,7 @@ class Graph(nn.Module):
         self.encoder = encoder
 
     def forward(self, audio: torch.Tensor) -> torch.Tensor:
-        return self.encoder(audio)
+        return self.encoder.full_window(audio)
 
     def dummy(self) -> tuple[torch.Tensor, ...]:
         return (torch.randn(1, WINDOW_SAMPLES) * 0.1,)
@@ -365,7 +400,8 @@ def read_wav(path: str) -> tuple[list[float], int]:
             if (fmt, bits) == (3, 32):
                 frames = list(struct.unpack(f"<{len(raw) // 4}f", raw[: len(raw) // 4 * 4]))
             elif (fmt, bits) == (1, 16):
-                frames = [s / 32768.0 for s in struct.unpack(f"<{len(raw) // 2}h", raw)]
+                n = len(raw) // 2
+                frames = [s / 32768.0 for s in struct.unpack(f"<{n}h", raw[: n * 2])]
             else:
                 raise ValueError(f"{path}: unsupported WAV format {fmt} at {bits} bits")
             ch = max(channels, 1)
@@ -423,8 +459,10 @@ def main() -> None:
     weights, clip = sys.argv[1], sys.argv[2]
 
     source, source_sr = read_wav(clip)
-    print(f"clip    : {clip} — {len(source)} samples at {source_sr} Hz "
-          f"({len(source) / source_sr:.2f} s)")
+    print(
+        f"clip    : {clip} — {len(source)} samples at {source_sr} Hz "
+        f"({len(source) / source_sr:.2f} s)"
+    )
 
     # The same recording, resampled twice to two different rates. Not
     # redundancy: 16 kHz is Whisper's analysis rate and 22 050 Hz is the
@@ -434,8 +472,10 @@ def main() -> None:
 
     model = ContentEncoder().eval()
     result = load_encoder(model, load_file(weights))
-    print(f"\nencoder : applied {len(result['applied'])}, missing "
-          f"{len(result['missing'])}, errors {len(result['errors'])}")
+    print(
+        f"\nencoder : applied {len(result['applied'])}, missing "
+        f"{len(result['missing'])}, errors {len(result['errors'])}"
+    )
     for name in result["missing"]:
         print(f"    MISSING {name}")
     for why in result["errors"]:
@@ -443,18 +483,21 @@ def main() -> None:
     print(f"          unused  {len(result['unused'])} — the decoder half, deleted upstream too")
     assert not result["missing"] and not result["errors"], "the encoder is not fully covered"
 
-    # What `Graph` does not do, spelled out: pad to the fixed window, then keep
-    # the frames that describe real audio. Both halves are the host's, and both
-    # are one line, which is the argument for leaving them out of the graph.
-    padded = F.pad(content_wav[:WINDOW_SAMPLES], (0, max(0, WINDOW_SAMPLES - len(content_wav))))
+    # The graph returns the full 30 s window — that is its static contract — so
+    # the frame the host keeps is the `min(samples / 320 + 1, 1500)` slice
+    # `content.rs` folds into `forward`. `LogMel` pads the clip to the window
+    # internally, mirroring the Rust; the host-side pad exists only in the
+    # runtime, where a graph cannot see how long the audio was.
     with torch.no_grad():
-        full = Graph(model)(padded.unsqueeze(0))
+        full = Graph(model)(content_wav.unsqueeze(0))
     frames = min(len(content_wav) // CONTENT_STRIDE + 1, full.shape[1])
     features = full[:, :frames]
 
-    print(f"content : {list(features.shape)} at {CONTENT_SR // CONTENT_STRIDE} Hz — "
-          f"graph gave {list(full.shape)}, host kept {frames} "
-          f"({len(content_wav)} samples / {CONTENT_STRIDE} + 1)")
+    print(
+        f"content : {list(features.shape)} at {CONTENT_SR // CONTENT_STRIDE} Hz — "
+        f"graph gave {list(full.shape)}, host kept {frames} "
+        f"({len(content_wav)} samples / {CONTENT_STRIDE} + 1)"
+    )
     assert torch.isfinite(features).all(), "content features are not finite"
     print(f"          finite, mean {features.mean():.4f}, peak |x| {features.abs().max():.4f}")
 
@@ -463,8 +506,10 @@ def main() -> None:
     # padding of `(n_fft - hop) / 2` yields and what the Burn example asserts.
     mel_frames = len(mel_wav) // 256
     print(f"\nmel     : {mel_frames} frames at 86.13 Hz ({len(mel_wav)} samples / 256)")
-    print(f"\nratio   : {mel_frames} mel frames to {frames} content frames "
-          f"({mel_frames / frames:.3f}x) — what the length regulator has to close")
+    print(
+        f"\nratio   : {mel_frames} mel frames to {frames} content frames "
+        f"({mel_frames / frames:.3f}x) — what the length regulator has to close"
+    )
 
 
 if __name__ == "__main__":
