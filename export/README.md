@@ -76,6 +76,71 @@ make, and the one that catches a wrong mask or a wrong position offset.
   therefore do not produce identical waveforms even at one seed: `s1` samples,
   and a logit that differs in the last bit can change a token.
 
+## Seed-VC
+
+```sh
+uv run --project export python export/export_seedvc.py \
+    models/seedvc  models/seedvc/onnx
+```
+
+The first argument is a directory holding the four released checkpoints — the
+Seed-VC checkpoint (`DiT_seed_v2_uvit_whisper_small_wavenet_bigvgan_pruned.pth`),
+`campplus_cn_common.bin` from `funasr/campplus`, `bigvgan_generator.pt` from
+`nvidia/bigvgan_v2_22khz_80band_256x`, and whisper-small's `model.safetensors` —
+each matched by what identifies it rather than by its full upstream name, so a
+cache, a clone or a hand-made copy all work. The second is where the six graphs
+are written. `--dit`/`--campplus`/`--bigvgan`/`--content` name any of the four
+checkpoints directly, and `--only content|style|mel|regulator|dit|bigvgan`
+re-exports one of the graphs, which is what you want after re-downloading a
+single network.
+
+The six graph contracts:
+
+```
+content.onnx    : audio [1,480000] f32 → content [1,1500,768] f32       (static)
+style.onnx      : audio [1,S] f32      → style [1,192] f32
+mel.onnx        : audio [1,S] f32      → mel [1,80,S/256] f32
+regulator.onnx  : content [1,C,768] f32, picks [T] i64 → cond [1,T,512] f32
+dit.onnx        : x [B,80,T] f32, prompt_x [B,80,T] f32, t [B] f32,
+                  style [B,192] f32, cond [B,T,512] f32 → v [B,80,T] f32
+bigvgan.onnx    : mel [1,80,T] f32     → audio [1,1,256T] f32
+```
+
+Every dynamic axis is declared `Dim.DYNAMIC`; `content.onnx` is the one graph
+with none, because whisper-small's encoder is trained on padded 30 s windows and
+always returns all 1500 frames — the host pads on the way in and slices on the
+way out, exactly as `content.rs` does. `dit.onnx`'s batch axis is dynamic on
+purpose: classifier-free guidance stacks the conditioned and unconditional
+inputs as batch 2 in a single call, which is how `flow.rs` pays for one forward
+pass instead of two. Everything else traces one clip.
+
+`dit.onnx` and `regulator.onnx` are built from the same checkpoint — the
+transformer and the length regulator are the two things `Plachta/Seed-VC` holds.
+The exporter reads the 440 MB file once and applies each graph's remap set.
+Weight-norm is not folded: the transformer and the WaveNet keep their
+`weight_g`/`weight_v` parameters and ONNX Runtime constant-folds the
+reconstruction at session init, which is simpler than folding in Python and
+what the two modules were written for. Only BigVGAN's plain convolutions, whose
+checkpoint stores the pair, are folded by the exporter.
+
+### What the export was checked against
+
+<!-- wave 3 will fill this in -->
+
+### Not covered
+
+- **Training.** Seed-VC is zero-shot — a reference clip is the whole speaker
+  specification — so there is nothing to fine-tune and no training graph to
+  export. The flow-matching Euler loop stays on the host in `seedvc-core`,
+  identically for any runtime.
+- **Anything but batch 1**, except `dit`'s classifier-free-guidance pair, which
+  is exactly batch 2 and is what the graph's dynamic batch axis exists for.
+- **`net.style_encoder.*` and `net.vq.*`**, the two fossil subtrees of the
+  Seed-VC checkpoint that upstream's `build_model` never assembles — inference
+  builds a *separate* CAM++ from `campplus_cn_common.bin` for the timbre vector,
+  and this preset is not discrete, so the length regulator's codebook is never
+  indexed. The exporter reads straight past both.
+
 ## Notes
 
 Both exporters use PyTorch's modern **dynamo** ONNX exporter
