@@ -19,7 +19,7 @@ virtual microphones — is [`realtime.md`](realtime.md).
 | | needed by | how it is found |
 |---|---|---|
 | **ffmpeg 8.1** | everyone — decode, resample and PCM I/O | linked at build time; found automatically at run time |
-| **ONNX Runtime** | any `--backend onnx` path, plus `tts`'s prosody encoder — `seedvc` never touches it | dlopened on first use from `ORT_DYLIB_PATH` |
+| **ONNX Runtime** | any `--backend onnx` path, plus `tts`'s prosody encoder and `seedvc`'s six exported graphs | dlopened on first use from `ORT_DYLIB_PATH` |
 | **LibTorch 2.9.0** | optional — only `--backend tch` | linked at build time; found automatically at run time |
 
 **Neither machine-learning runtime is bundled or downloaded.**
@@ -173,10 +173,11 @@ WebGPU both have one.
 **Naming a backend or device that is not available is an error with a reason,
 never a silent fallback.** Only `auto` substitutes.
 
-`onnx` is the one row that is not on every binary: `seedvc` refuses it, because
-no export of Seed-VC exists and Burn reads ONNX graphs without being able to
-write one. Its `auto` therefore resolves by hardware alone, there being no
-artefact on disk that could decide otherwise.
+`seedvc` is the one engine whose ONNX path is a bundle rather than a single
+file — it wants `--onnx <dir>` pointing at the six graphs
+`export/export_seedvc.py` writes. `auto` resolves to ONNX Runtime when
+`--onnx` is set, and by hardware otherwise; `--backend onnx` without
+`--onnx` is refused with a reason rather than falling back.
 
 Training is always Burn — ONNX Runtime has no training path at all — so a
 `train` subcommand takes the same flag minus `onnx`.
