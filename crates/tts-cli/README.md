@@ -136,9 +136,9 @@ reference text.
 ```sh
 tts preprocess raw/*.mp3 -o corpus/ --sr 32000
 
-# `stt` reads f32le mono 16 kHz on stdin, so ffmpeg decodes into it.
-fd -e wav . corpus -j 1 -x sh -c \
-  'ffmpeg -v quiet -i "$1" -f f32le -ar 16000 -ac 1 - | stt > "$2"' _ {} {.}.txt
+# `stt convert` loads the model once and reuses it across every file —
+# a loop pays Whisper's load time per file, which is why the subcommand exists.
+stt convert corpus/*.wav -o corpus/
 
 tts train corpus/ -o models/mine --stage both --epochs 10
 tts -r clip.wav -t "<transcript>" \
