@@ -1,5 +1,4 @@
-"""Convert Seed-VC's four checkpoints to the six ONNX graphs a future
-`seedvc --backend onnx` would run.
+"""Convert Seed-VC's four checkpoints to the six ONNX graphs `seedvc --onnx <dir>` runs.
 
 Usage:
     uv run --project export python export/export_seedvc.py <models-dir> <out-dir>
@@ -43,12 +42,14 @@ import onnx
 import torch
 from safetensors.torch import load_file
 
-from seedvc_infer import bigvgan
-from seedvc_infer import campplus
-from seedvc_infer import content
-from seedvc_infer import dit
-from seedvc_infer import length_regulator
-from seedvc_infer import spectral
+from seedvc_infer import (
+    bigvgan,
+    campplus,
+    content,
+    dit,
+    length_regulator,
+    spectral,
+)
 
 # The remaps `Dit::load_pytorch`, `InterpolateRegulator::load_pytorch`,
 # `CamPPlus::load_pytorch` and `BigVgan::load_pytorch` apply, in the same order.
