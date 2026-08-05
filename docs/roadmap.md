@@ -15,11 +15,11 @@ already taken and the traps behind them. A choice that has been *made* belongs
 there; a choice still open belongs here.
 
 - [`translate` — the missing pipeline stage](#translate--the-missing-pipeline-stage)
-- [Seed-VC to ONNX](#seed-vc-to-onnx)
 - [`seedvc train`](#seedvc-train)
 - [A native audio-device backend](#a-native-audio-device-backend)
 - [g2pw — Mandarin's syntactic polyphones](#g2pw--mandarins-syntactic-polyphones)
 - [ContentVec and RMVPE, both ways](#contentvec-and-rmvpe-both-ways)
+- [The duplicated `session()` builder](#the-duplicated-session-builder)
 - [The RVC 2.3 mel floor](#the-rvc-23-mel-floor)
 
 ## `translate` — the missing pipeline stage
@@ -55,61 +55,16 @@ document context to translate well. If it wants context, it is the first engine
 whose bare invocation cannot be a pure line filter, and that deserves a decision
 rather than a default.
 
-## Seed-VC to ONNX
-
-`seedvc` is the only engine with **no** ONNX path, and
-[`CLAUDE.md`](../CLAUDE.md) is explicit that this is an asymmetry rather than an
-omission: Burn imports ONNX graphs and cannot emit one, so a model reaches ONNX
-Runtime only through [`export/`](../export/README.md). `seedvc-core`'s loader
-therefore refuses `--backend onnx` before it reads a file, with a message saying
-*why* — a user told "not compiled in" goes looking for a feature flag that cannot
-exist.
-
-*Why it cannot be borrowed.* There is no public ONNX Seed-VC to point at. The
-Hugging Face model index carries 27 Seed-VC repositories and every one of them is
-PyTorch; `onnx-community` has never touched the model. So the export has to be
-written here or not exist.
-
-*What it needs.* Another clean-room torch mirror beside
-[`rvc_infer.py`](../export/rvc_infer.py) and
-[`gptsovits_infer.py`](../export/gptsovits_infer.py) — mirroring the Burn layout,
-never importing upstream — plus the exporter that drives it. That is roughly
-1300 lines against seven Burn modules:
-
-| module | lines |
-|---|---|
-| `dit.rs` | 841 |
-| `bigvgan.rs` | 735 |
-| `campplus.rs` | 724 |
-| `fbank.rs` | 423 |
-| `content.rs` | 379 |
-| `length_regulator.rs` | 225 |
-| `wavenet.rs` | 187 |
-
-and six graphs: content, style, mel, regulator, dit-velocity and BigVGAN.
-
-*The trap to know before starting.* **`Spectral` and `Fbank` run on Burn inside
-`BurnModel` today**, so they are part of the model rather than host-side
-preprocessing, and they must be *traced into the graphs* rather than assumed to
-be somebody else's problem. Getting that wrong produces an export that runs and
-is fed the wrong front end — and
-[`CLAUDE.md`](../CLAUDE.md) records that the three front ends here have matching
-frame counts and band counts, so substituting one for another computes something
-else without failing. CAMPPlus's mean subtraction is upstream's *call site* and
-not its encoder, which is exactly the kind of step a naive trace drops.
-
-*What it buys.* Deployment where ORT is the only runtime available, which is the
-reason `export/` gains scope rather than losing it. It buys no training path —
-ONNX Runtime cannot train — so this is orthogonal to the entry below.
-
 ## `seedvc train`
 
 **Seed-VC is fine-tunable.** The engine README's "there is nothing to train" is
 about *zero-shot inference* and stays true — a reference clip really is the whole
 speaker specification at inference time — but upstream ships a `train.py`, and a
 fine-tune on a target domain is a real quality lever. `seedvc-core` having no
-`-train` sibling is currently presented as the engine's defining property; if
-this is built, that framing has to be revised rather than quietly contradicted.
+`-train` sibling is currently presented as the engine's defining property — the
+`onnx` arm the exporter batch added does not touch that framing, since ONNX
+Runtime cannot train either; if this is built, that framing has to be revised
+rather than quietly contradicted.
 
 *What upstream does.* `build_model` (`commons.py`) constructs exactly two things,
 `cfm` and `length_regulator`, and those are the only two optimised. It
@@ -236,6 +191,25 @@ for the result.
 into a `burn-hubert` of its own — two engines would then depend on it, and **no
 engine may depend on another engine**, so the shared code has to move to a
 neutral crate first. That is a naming and layering job, not a modelling one.
+
+## The duplicated `session()` builder
+
+**The six-line CUDA-then-CPU session builder now exists in four engines.**
+`session()` — `Session::builder()` with CUDA first and CPU as the fallback — is
+the shape every ONNX path here converges on, and `seedvc-core`'s copy is the
+fourth: `stt-core`, `rvc-core` and `tts-core` each carry their own, and they are
+not shared because no engine may depend on another engine.
+
+*What it costs.* Four definitions of one ordering decision. The execution-provider
+list already had to be right in three places; it now has to be right in four, and
+a change — a new provider, a preference order that stops being correct — is a
+four-file diff that any one of the four can silently miss.
+
+*What the fix looks like.* Lifting it into `cli-kit`, which already owns
+`Backend` and is the crate the docs list as safe for anything to depend on,
+turning four copies into one call. Four is the count at which the extraction pays
+for itself: at three, the shared home is an indirection for its own sake; at
+four, a provider change is already a four-file diff.
 
 ## The RVC 2.3 mel floor
 
