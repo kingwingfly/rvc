@@ -129,20 +129,23 @@ time.
 
 | `--backend` | aliases | runtime | devices |
 |---|---|---|---|
-| `auto` *(default)* | | the fastest Burn backend this machine and this build have, LibTorch on a GPU first — the order is [`docs/setup.md`](../../docs/setup.md#backends-and-devices)'s | |
+| `auto` *(default)* | | `--onnx` names an export → `onnx`, else the fastest Burn backend this machine and this build have, LibTorch on a GPU first — the order is [`docs/setup.md`](../../docs/setup.md#backends-and-devices)'s | |
 | `cuda` | `burn`, `burn-cuda` | native Burn, CubeCL/CUDA | NVIDIA only |
+| `onnx` | | ONNX Runtime, over the six graphs `export/export_seedvc.py` writes | |
 | `tch` | `libtorch`, `burn-tch` | native Burn, LibTorch | CUDA, MPS, Vulkan, CPU |
 | `wgpu` | `webgpu`, `burn-wgpu` | native Burn, WebGPU | any Vulkan/Metal/DX12 GPU |
 
-**There is no `onnx` here, and it is not a missing feature flag.** Nothing
-exports Seed-VC — [`export/`](../../export/README.md) mirrors RVC and GPT-SoVITS
-only, and Burn reads ONNX graphs without being able to write one — so
-`--backend onnx` fails immediately with that reason rather than falling back. No
-rebuild changes it.
+**There is an `onnx` here, and it is behind a flag rather than a default.**
+[`export/export_seedvc.py`](../../export/README.md) writes the six graphs —
+`content`, `style`, `mel`, `regulator`, `dit`, `bigvgan` — and `--onnx <dir>`
+points `--backend onnx` at them. The graphs exist only where that exporter put
+them, so `--backend onnx` with no `--onnx` fails immediately with a reason naming
+the missing directory rather than falling back. No rebuild changes that.
 
-Unlike the other engines `auto` here resolves by hardware alone: there is no
-artefact on disk that could decide it. Naming a backend or device that is not
-available is an **error with a reason**, never a silent fallback.
+Unlike the other engines `auto` here resolves by hardware alone — unless `--onnx`
+names a bundle, which is the one artefact on disk that could decide it. Naming a
+backend or device that is not available is an **error with a reason**, never a
+silent fallback.
 
 `--device auto|cpu|gpu|gpu:N|mps|vulkan` picks *which* device inside the chosen
 backend (`cuda`/`cuda:N` are accepted spellings of `gpu`). The spellings are
@@ -154,7 +157,10 @@ identical on all five binaries — see
 path converted **7.79 s of audio in 10.9 s**. The cost is 30 transformer
 evaluations per chunk plus, at any positive guidance, a second evaluation for the
 unconditional branch; `--guidance 0` and a lower `--steps` are the two knobs that
-move it.
+move it. The ONNX Runtime path has no measured number on this machine yet — the
+six graphs and their runtime landed together and nothing was timed before this
+page was written — so that figure is `--backend tch`'s profile only, and an
+`--onnx` comparison is an open measurement rather than a known speed.
 
 ## Recipes
 
@@ -216,6 +222,10 @@ opens every one of them. `--checkpoint`, `--campplus`, `--bigvgan` and
 `--content` name weights you already hold instead — the last of those takes the
 Whisper **directory**, since its `config.json` and the vocoder's share a name and
 a flat layout would hand each loader the other's.
+
+`--onnx <dir>` is the exception to all four: it names a bundle of the six
+exported graphs, whose weights are baked in at export time, so a conversion that
+runs on ONNX Runtime neither fetches nor reads any of these repos.
 
 Converted audio goes where you point stdout, or under `convert` into `-o`, and
 nothing else is written.

@@ -2,12 +2,13 @@
 
 Convert this toolkit's Burn models to ONNX for deployment with ONNX Runtime.
 
-This is the **only** Python in the toolkit — a small, standalone `python` project managed by `uv`. 
-It depends on neither the RVC-Project nor the GPT-SoVITS repository: `rvc_infer.py`
-and `gptsovits_infer.py` are clean-room torch reimplementations of the two
-inference paths, each mirroring its Burn module layout (`burn-rvc`,
-`burn-gptsovits` + `burn-vits`) so the trained weights load with a direct key
-mapping — `Linear` weights transposed, weight-norm folded.
+This is the **only** Python in the toolkit — a small, standalone `python` project managed by `uv`.
+It depends on none of the upstream projects — RVC-Project, GPT-SoVITS or
+Plachta/Seed-VC: `rvc_infer.py`, `gptsovits_infer.py` and the `seedvc_infer/`
+package are clean-room torch reimplementations of the three inference paths, each
+mirroring its Burn module layout (`burn-rvc`, `burn-gptsovits` + `burn-vits`,
+`burn-seedvc`) so the trained weights load with a direct key mapping — `Linear`
+weights transposed, weight-norm folded.
 
 It exists because Burn can *import* ONNX but cannot *emit* it. A model
 fine-tuned here (`rvc train`, `tts train`) reaches ONNX Runtime only through a
@@ -81,6 +82,8 @@ make, and the one that catches a wrong mask or a wrong position offset.
 ```sh
 uv run --project export python export/export_seedvc.py \
     models/seedvc  models/seedvc/onnx
+
+seedvc convert --backend onnx --onnx models/seedvc/onnx -r clip.wav -o out/ in.wav
 ```
 
 The first argument is a directory holding the four released checkpoints — the
@@ -125,7 +128,14 @@ checkpoint stores the pair, are folded by the exporter.
 
 ### What the export was checked against
 
-<!-- wave 3 will fill this in -->
+`seedvc convert` on the same source, reference, seed, steps and guidance against
+`--backend tch` and `--backend onnx --onnx <bundle>` produced two waveforms whose
+**log-energy envelopes correlate at r=1.000000**, mean |dB difference| < 0.001
+dB at 64-, 256- and 1024-sample block sizes, and **`stt` transcribes both to
+identical text**. That exercises all six graphs end to end — content, style, mel,
+regulator, the diffusion transformer at two batch sizes (the CFG pair), Euler
+integration on the host, and BigVGAN — on the real checkpoints, at the real
+preset.
 
 ### Not covered
 
@@ -143,7 +153,7 @@ checkpoint stores the pair, are folded by the exporter.
 
 ## Notes
 
-Both exporters use PyTorch's modern **dynamo** ONNX exporter
+All three exporters use PyTorch's modern **dynamo** ONNX exporter
 (`torch.onnx.export(..., dynamo=True)` with `dynamic_shapes`), so they are
 warning-free and require `torch>=2.7`. Dynamic axes are declared with
 `Dim.DYNAMIC` rather than `Dim.AUTO`: DYNAMIC *asserts* the axis stays dynamic

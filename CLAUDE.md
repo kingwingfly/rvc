@@ -475,7 +475,7 @@ Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper
 | `tts-train` | fine-tuning GPT-SoVITS. `s1` is plain next-token cross-entropy over `T2s::forward_prompt_all` — one model, one optimizer, one loss, so unlike `rvc-train` the number means something on its own. `s2` is the other half: an adversarial VITS loop over `burn-vits`'s shared discriminators, inheriting `rvc-train`'s loss family (mel-L1 ×45, KL ×1, feature matching ×2, LSGAN) rather than inventing one, with GPT-SoVITS's five discriminator periods `[2,3,5,7,11]` against RVC's eight. Verified on 13 clips: mel falls 26.6 → 18.2 over two epochs on GPU and on CPU alike. `--stage s1|s2|both` prepares the corpus exactly once — preparation is the expensive half — and each stage writes its own checkpoint family. A corpus is `<stem>.wav` + `<stem>.txt` pairs, and `stt` is how the transcripts get written |
 | `tts-cli` | lib **and** the `tts` binary |
 | `burn-seedvc` | the Seed-VC network: the diffusion transformer and its flow-matching sampler, the length regulator, CAMPPlus, BigVGAN. **The crate the workspace's GPL-3.0 comes from** — see its own section below |
-| `seedvc-core` | zero-shot voice conversion: `reference` (one clip → timbre vector + mel prefix + length-regulated content), `convert` (the chunk arithmetic and the equal-power crossfade), the streaming `Converter`, and the Burn backends behind one `Model` trait — the shape `stt-core` and `tts-core` use, so the backend is a constructor call rather than a type parameter. **No `-train` sibling, and no ONNX arm**: `--backend onnx` is refused with a reason, since nothing exports Seed-VC |
+| `seedvc-core` | zero-shot voice conversion: `reference` (one clip → timbre vector + mel prefix + length-regulated content), `convert` (the chunk arithmetic and the equal-power crossfade), the streaming `Converter`, and the Burn backends behind one `Model` trait — the shape `stt-core` and `tts-core` use, so the backend is a constructor call rather than a type parameter. **No `-train` sibling**, and the `onnx` feature adds an `OnnxModel` reading the six graphs `export/export_seedvc.py` writes, behind `--backend onnx --onnx <dir>` |
 | `seedvc-cli` | lib **and** the `seedvc` binary: the bare invocation streams, plus `convert`, `download`, `completions` |
 | `cli-kit` | logging, shell completions, and the shared `--backend`/`--device`/`--cache-dir` flags — one enum and one alias set for all five binaries, so the spellings cannot drift apart again |
 | `preprocess-kit` | the `preprocess` subcommand `rvc` and `tts` both expose: decode, slice on silence, write `<stem>_<NNN>.wav`. One definition, so the flags and the slicing cannot differ between the two engines |
@@ -582,15 +582,20 @@ the cheaper answer:
   `tts` run without ORT once `--prosody` is left off. It now *also* has an ONNX
   graph, which is the shape to aim for everywhere: both, chosen at run time.
 - GPT-SoVITS `s1`/`s2` are Burn because they are fine-tuned, and they now run on
-  ONNX Runtime as well — `alongside` Burn, never instead of it. `tts` is therefore
-  the first engine to reach the target in full: every model it uses runs either
-  way, and tuning stays on Burn.
-- Seed-VC is the one engine with **no** ONNX path, and it is the second asymmetry
-  rather than an omission: no export exists, and Burn cannot write one. So
-  `seedvc-core`'s loader refuses `--backend onnx` before it reads a file, with a
-  message saying *why* — a user told "not compiled in" goes looking for a feature
-  flag that cannot exist. `export/` is where that would change, and adding it
-  means another clean-room mirror beside `rvc_infer.py`.
+  ONNX Runtime as well — `alongside` Burn, never instead of it. Seed-VC now
+  belongs in the same sentence, the third engine to reach the target in full:
+  every model either of them uses runs either way, and tuning stays on Burn
+  wherever a fine-tune exists.
+- Seed-VC has an ONNX path now, and it was the exporter's work rather than a
+  change of heart. **`export/export_seedvc.py` writes the six graphs — `content`,
+  `style`, `mel`, `regulator`, `dit`, `bigvgan` — and `seedvc-core`'s `OnnxModel`
+  runs them behind `--backend onnx --onnx <dir>`.** A Seed-VC checkpoint is four
+  files rather than one, so `auto` cannot settle the runtime from a `-m` the way
+  `rvc` does from a `.onnx`: it still resolves by hardware unless `--onnx` names
+  a bundle, the one artefact on disk that could decide it. `--backend onnx` with
+  no `--onnx` is refused with a reason naming the missing directory — not "not
+  supported", which would send a user hunting for a feature flag that cannot
+  exist.
 
 **This reverses an earlier position on purpose, so do not "restore" it.** The old
 plan was to port `rvc-core`'s ContentVec and RMVPE to Burn *in order to* drop
@@ -1049,8 +1054,12 @@ needs no export — this is only for ONNX Runtime / cross-framework deploy.
 It is the **only** direction that needs Python, and only because Burn reads ONNX
 without writing it. Extending it to a new model means adding another clean-room
 mirror of that network's Burn layout beside `rvc_infer.py` — `gptsovits_infer.py`
-is the second — never importing the upstream project, and never adding a step a
-user has to run. `export_gptsovits.py` accepts *either* weight layout: an original
+is the second, and `seedvc_infer/` is the third, a *directory* rather than a file
+because it mirrors the 4800 Burn lines of `burn-seedvc` as six modules — never
+importing the upstream project, and never adding a step a user has to run. The
+Seed-VC mirror is the one this batch added, split across five parallel worktrees
+on its way in: the five mirror PRs landed first, then the driver that assembles
+them. `export_gptsovits.py` accepts *either* weight layout: an original
 `.pth`/`.ckpt` through the same key remaps the Rust loaders apply, or a Burn
 `.safetensors` from `tts train`. That second path is the point of the whole
 exercise — it is how a voice fine-tuned here would reach ONNX Runtime.
