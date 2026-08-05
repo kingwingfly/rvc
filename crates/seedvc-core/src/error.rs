@@ -19,6 +19,12 @@ pub enum Error {
     /// rather than the symptom.
     #[error("{0}")]
     Input(String),
+    /// An ONNX Runtime graph failed to load or to run — the export exists but a
+    /// session could not be built, or a run was refused (a shape the graphs
+    /// were not exported for).
+    #[cfg(feature = "onnx")]
+    #[error("onnxruntime: {0}")]
+    Onnx(String),
     #[error(transparent)]
     Audio(#[from] audio_kit::AudioError),
     #[error(transparent)]
