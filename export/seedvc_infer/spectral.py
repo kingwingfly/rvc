@@ -121,8 +121,10 @@ class Spectral(nn.Module):
 
         fft_freqs = torch.arange(n_bins, dtype=torch.float32) * cfg.sample_rate / n_fft
         mel_min, mel_max = hz_to_mel(cfg.fmin), hz_to_mel(cfg.fmax)
-        steps = torch.arange(cfg.n_mels + 2, dtype=torch.float32) / (cfg.n_mels + 1)
-        hz = mel_to_hz(mel_min + (mel_max - mel_min) * steps)
+        steps = torch.arange(cfg.n_mels + 2, dtype=torch.float32)
+        # Multiply before dividing, which is the association `spectral.rs` uses;
+        # in float32 the other grouping differs by an ulp per band.
+        hz = mel_to_hz(mel_min + (mel_max - mel_min) * steps / (cfg.n_mels + 1))
         lower, centre, upper = hz[:-2, None], hz[1:-1, None], hz[2:, None]
         triangle = torch.minimum(
             (fft_freqs - lower) / (centre - lower),
