@@ -73,10 +73,14 @@ class Norm(nn.Module):
     """`BatchNorm` frozen at its running statistics, with the checkpoint's own
     parameter names.
 
-    Written out rather than reached for from `torch.nn` because the affine pair
-    is **optional**: upstream's `batchnorm_` config string builds
-    `affine=False`, which the final layer uses, and `nn.BatchNorm1d(affine=False)`
-    would still carry a `training` branch this model must never take.
+    Written out rather than reached for from `torch.nn` for two reasons. One
+    module serves both ranks — `nn.BatchNorm1d` and `nn.BatchNorm2d` would be
+    two, splitting a set of weights the checkpoint keeps under one shape. And
+    normalising by the running statistics is unconditional here, where a
+    `BatchNorm` decides it from a `training` flag: the speaker encoder is frozen
+    in every Seed-VC path, so that branch could only ever make an embedding
+    depend on what else was in the batch, and forgetting an `.eval()` would be
+    the way it happened.
 
     `num_batches_tracked` has no inference role and is deliberately not a
     buffer; it is the one key per norm that `load_checkpoint` reports unclaimed.
@@ -135,8 +139,10 @@ class ResBlock(nn.Module):
         self.conv2 = nn.Conv2d(channels, channels, 3, padding=1, bias=False)
         self.bn2 = Norm(channels)
         # Present only where the stride makes the input and output shapes
-        # differ — 4 of the 5 blocks in the released model have one, and a
-        # block that unconditionally built it would report parameters missing.
+        # differ, which is 2 of the released model's 4 residual blocks — the
+        # first of each stage. Modelling it as optional is what makes this a
+        # load with *nothing* missing, rather than ten absent parameters a
+        # reader has to talk themselves out of.
         self.shortcut = (
             Shortcut(in_channels, channels, stride)
             if stride != 1 or in_channels != channels
