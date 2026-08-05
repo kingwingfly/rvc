@@ -57,8 +57,8 @@ and renders it adequately with nothing trained at all.
 
 **`--backend` is a run-time choice on every engine**: `rvc`, `stt` and `tts` run
 under ONNX Runtime or under native Burn on LibTorch, CubeCL/CUDA or WebGPU, in
-one binary, with one set of spellings; `seedvc` is Burn-only, because nothing
-exports Seed-VC to ONNX. Fine-tuning is always Burn.
+one binary, with one set of spellings; `seedvc` also runs on ONNX Runtime, from a bundle of six graphs
+written by `export/export_seedvc.py`. Fine-tuning is always Burn.
 
 ## Documentation
 

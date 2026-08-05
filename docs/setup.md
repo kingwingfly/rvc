@@ -52,8 +52,9 @@ The CUDA execution provider is tried first, then CPU.
 
 How much it matters depends on the engine: `stt` and `rvc` need it only where
 something is actually running on it; for `tts` its absence downgrades the prosody
-encoder to zeros with a warning rather than failing; `seedvc` has no ONNX path at
-all, since nothing exports Seed-VC. Each engine's README says which applies.
+encoder to zeros with a warning rather than failing; `seedvc`'s ONNX path is six graphs written by `export/export_seedvc.py`, and
+it needs `--onnx <dir>` to name them — different from the other three, whose
+models are one file or one directory. Each engine's README says which applies.
 
 **`rvc` used to be the exception and no longer is.** It runs three models — a
 generator, ContentVec and RMVPE — and until ContentVec and RMVPE were ported to
@@ -129,10 +130,9 @@ cargo build --release -p rvc-cli --no-default-features --features cuda,wgpu
 cargo build --release -p stt-cli --no-default-features --features cuda,tch,wgpu
 ```
 
-`stt-cli` and `tts-cli` have `cuda`, `tch`, `wgpu` and `onnx`; `rvc-cli` has the
-first three only, because `rvc-core` depends on `ort` unconditionally and so
-there is nothing to gate. `seedvc-cli` has the first three for the opposite
-reason: it never uses ONNX Runtime at all.
+`stt-cli`, `tts-cli` and `seedvc-cli` have `cuda`, `tch`, `wgpu` and `onnx`;
+`rvc-cli` has the first three only, because `rvc-core` depends on `ort`
+unconditionally and so there is nothing to gate.
 `voice-cli` re-declares the same four names and forwards each to the engines
 that have it, so one `--no-default-features --features cuda` line means the same
 thing for every binary.
