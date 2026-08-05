@@ -14,6 +14,10 @@ description = "Zero-shot voice conversion with Seed-VC: reference analysis, flow
 cuda = ["burn/cuda", "burn-kit/cuda", "burn-seedvc/cuda"]
 tch = ["burn/tch", "burn-kit/tch", "burn-seedvc/tch"]
 wgpu = ["burn/wgpu", "burn-kit/wgpu", "burn-seedvc/wgpu"]
+# The ONNX Runtime path, reading the six graphs `export/export_seedvc.py`
+# writes. Also no `default`: an ONNX build should not force a GPU toolchain
+# either, and the Burn backends remain the way to tune.
+onnx = ["dep:ort"]
 
 [dependencies]
 burn = { version = "0.21", default-features = false, features = ["std"] }
@@ -25,6 +29,8 @@ burn-vits.workspace = true
 burn-kit = { workspace = true, features = ["store"] }
 audio-kit.workspace = true
 cli-kit.workspace = true
+# `onnx` feature only: the six graphs `export/export_seedvc.py` writes.
+ort = { workspace = true, optional = true }
 anyhow.workspace = true
 # The streaming filter's output side: a `Stream` fed from the blocking worker's
 # channel, which is what `rvc-core` builds its filter out of too.

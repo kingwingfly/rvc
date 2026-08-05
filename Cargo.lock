@@ -6802,6 +6802,7 @@ dependencies = [
  "clap",
  "cli-kit",
  "futures",
+ "ort",
  "thiserror 2.0.19",
  "tokio",
  "tracing",

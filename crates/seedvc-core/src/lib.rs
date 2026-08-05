@@ -32,6 +32,8 @@ pub mod backend;
 pub mod convert;
 pub mod error;
 pub mod model;
+#[cfg(feature = "onnx")]
+pub mod onnx_model;
 pub mod reference;
 pub mod stream;
 
@@ -45,4 +47,6 @@ pub use burn_seedvc::flow::Sampler;
 pub use convert::{ConvertOptions, convert, convert_path};
 pub use error::{Error, Result};
 pub use model::{BurnModel, CONTENT_SR, Model, ModelPaths, Reference};
+#[cfg(feature = "onnx")]
+pub use onnx_model::OnnxModel;
 pub use stream::{Converter, StreamParams, convert_stream};
