@@ -19,17 +19,18 @@ name = "seedvc"
 path = "src/main.rs"
 
 [features]
-# One binary, every compute backend; `--backend` picks at run time. There is no
-# `onnx` here and there will not be one until something exports Seed-VC.
+# One binary, every compute backend; `--backend` picks at run time. `onnx` runs
+# the six graphs `export/export_seedvc.py` writes, named with `--onnx`.
 #
 # The `tch` feature is load-bearing beyond what it links: `rpath_kit::emit()`
 # reads *this* crate's `CARGO_FEATURE_TCH` to decide whether to bake the LibTorch
 # search path into the binary. Without it the rpath is missing and the binary
 # fails in `ld.so` before `main`, on every subcommand.
-default = ["cuda", "tch", "wgpu"]
+default = ["cuda", "tch", "wgpu", "onnx"]
 cuda = ["seedvc-core/cuda", "burn-kit/cuda"]
 tch = ["seedvc-core/tch", "burn-kit/tch"]
 wgpu = ["seedvc-core/wgpu", "burn-kit/wgpu"]
+onnx = ["seedvc-core/onnx"]
 
 [dependencies]
 audio-kit.workspace = true

@@ -43,7 +43,8 @@ pub enum SeedVcCommand {
     Download(DownloadArgs),
 }
 
-/// Where the four networks come from, and which voice to convert into.
+/// Where the model comes from — the four checkpoints, or the six ONNX graphs —
+/// and which voice to convert into.
 ///
 /// The reference lives here rather than beside the input files because both the
 /// filter and `convert` need it, and neither can be given it by clap: these
@@ -69,6 +70,13 @@ pub struct ModelOpts {
     /// Hugging Face].
     #[arg(long)]
     pub content: Option<PathBuf>,
+    /// Directory holding the six ONNX graphs `export/export_seedvc.py` writes —
+    /// either directly, or in an `onnx/` subdirectory inside it. Naming one runs
+    /// the whole conversion on ONNX Runtime and ignores the four checkpoint
+    /// flags above: a graph carries its weights, so there is nothing to fetch
+    /// and nothing to override.
+    #[arg(long)]
+    pub onnx: Option<PathBuf>,
     /// Directory the downloaded models are cached in. Shared by every engine
     /// unless `$SEEDVC_CACHE_DIR` (or `$VOICE_CACHE_DIR`) says otherwise.
     #[arg(long, default_value_os_t = hub_kit::cache_dir_for("SEEDVC_CACHE_DIR"))]
@@ -150,10 +158,9 @@ pub struct FilterArgs {
     /// Samples per input read chunk from stdin (16 kHz mono f32le).
     #[arg(long, default_value_t = 1600)]
     pub chunk: usize,
-    /// Inference backend: `cuda` (aliases `burn`, `burn-cuda`), `tch`
+    /// Inference backend: `onnx`, `cuda` (aliases `burn`, `burn-cuda`), `tch`
     /// (`libtorch`, `burn-tch`) or `wgpu` (`webgpu`, `burn-wgpu`); `auto` picks
-    /// the fastest compiled in. Nothing exports Seed-VC to ONNX, so `onnx` is an
-    /// error rather than a fallback.
+    /// ONNX Runtime when `--onnx` names an export, else the fastest compiled in.
     #[arg(long, value_enum, default_value_t = Backend::Auto)]
     pub backend: Backend,
     /// Compute device: `auto` (fastest visible), `cpu`, `gpu`, `gpu:N`, `mps` or
@@ -185,10 +192,9 @@ pub struct ConvertArgs {
     /// Directory to write converted `<stem>.wav` files into.
     #[arg(short = 'o', long, default_value = ".")]
     pub output_dir: PathBuf,
-    /// Inference backend: `cuda` (aliases `burn`, `burn-cuda`), `tch`
+    /// Inference backend: `onnx`, `cuda` (aliases `burn`, `burn-cuda`), `tch`
     /// (`libtorch`, `burn-tch`) or `wgpu` (`webgpu`, `burn-wgpu`); `auto` picks
-    /// the fastest compiled in. Nothing exports Seed-VC to ONNX, so `onnx` is an
-    /// error rather than a fallback.
+    /// ONNX Runtime when `--onnx` names an export, else the fastest compiled in.
     #[arg(long, value_enum, default_value_t = Backend::Auto)]
     pub backend: Backend,
     /// Compute device: `auto` (fastest visible), `cpu`, `gpu`, `gpu:N`, `mps` or
