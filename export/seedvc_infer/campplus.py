@@ -247,12 +247,24 @@ def segment_pool(x: torch.Tensor) -> torch.Tensor:
     """Average each `SEG_LEN`-frame segment and broadcast it back over the
     segment's own frames.
 
-    `ceil_mode` gives the final short window its own average rather than
-    dropping it, and with no padding anywhere `avg_pool1d` divides that window
-    by the frames actually in it — which is exactly a mean over the slice.
+    `ceil_mode` is what gives the final short window an average of its own
+    rather than dropping it — but **what that window is divided by is not
+    agreed between torch and ONNX**, and dividing the pooled ones by themselves
+    is what makes this immune to the disagreement. `torch.avg_pool1d` divides a
+    ceil-mode window by the frames actually in it; `torch.onnx.export` emits
+    `AveragePool` with `count_include_pad=1`, so ONNX Runtime divides the same
+    window by the full kernel of 100. Whatever the divisor, it is the same one
+    for `x` and for the ones, so the ratio is the true mean either way.
+
+    Measured before the fix, torch against ONNX Runtime on the same weights: a
+    249-frame clip — one partial window and nothing else — embedded to cosine
+    **0.940**, where a 3612-frame clip, whose tail is 6 frames in 1806, reached
+    0.99995. A wrong divisor on the tail is therefore worst on exactly the
+    1–30 s references this engine exists to take.
     """
     pooled = F.avg_pool1d(x, SEG_LEN, stride=SEG_LEN, ceil_mode=True)
-    return pooled.repeat_interleave(SEG_LEN, dim=2)[..., : x.shape[2]]
+    frames = F.avg_pool1d(torch.ones_like(x[:, :1]), SEG_LEN, stride=SEG_LEN, ceil_mode=True)
+    return (pooled / frames).repeat_interleave(SEG_LEN, dim=2)[..., : x.shape[2]]
 
 
 class CamDenseTdnnLayer(nn.Module):
