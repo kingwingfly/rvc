@@ -526,7 +526,10 @@ fn lock(session: &Mutex<Session>) -> MutexGuard<'_, Session> {
 ///
 /// The fourth copy of these six lines — `stt-core`, `rvc-core` and `tts-core`
 /// each carry them, and they are not shared because engines do not depend on
-/// each other.
+/// each other. `tts-core`'s comment marks the third copy as the moment to
+/// consider a kit crate rather than the moment to reach across — four is past
+/// that bar, the count at which lifting the six lines into `cli-kit` becomes
+/// worthwhile.
 fn session(path: &Path) -> Result<Session> {
     use ort::execution_providers::{CPU, CUDA};
 
