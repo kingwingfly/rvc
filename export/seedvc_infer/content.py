@@ -326,3 +326,146 @@ class Graph(nn.Module):
     def dynamic_shapes(self) -> tuple:
         # One entry per input, and it is empty: no axis of this graph moves.
         return ({},)
+
+
+# ---- checking the port ------------------------------------------------------
+#
+# `cargo run -p burn-seedvc --example content` is the Burn side of this, and the
+# two are written to be read side by side: same clip, same resampler, same
+# statistics, same lines. **Coverage is not the check** — this repo has already
+# shipped a Whisper port that loaded at 100% and produced garbage, because
+# coverage says the module tree matches the checkpoint and says nothing about
+# what the forward pass computes. The mean and the peak of the features are what
+# agree or do not.
+
+
+def read_wav(path: str) -> tuple[list[float], int]:
+    """Minimal RIFF/WAVE reader: 16-bit PCM or 32-bit float, downmixed to mono.
+
+    Hand-rolled for the reason `examples/content` hand-rolls one: a self-check
+    should not oblige the exporter to grow an audio dependency.
+    """
+    import struct
+
+    data = open(path, "rb").read()
+    if data[0:4] != b"RIFF" or data[8:12] != b"WAVE":
+        raise ValueError(f"{path} is not a RIFF/WAVE file")
+
+    fmt = channels = bits = 0
+    rate = 0
+    pos = 12
+    while pos + 8 <= len(data):
+        chunk, size = data[pos : pos + 4], struct.unpack("<I", data[pos + 4 : pos + 8])[0]
+        body = pos + 8
+        if chunk == b"fmt ":
+            fmt, channels, rate = struct.unpack("<HHI", data[body : body + 8])
+            bits = struct.unpack("<H", data[body + 14 : body + 16])[0]
+        elif chunk == b"data":
+            raw = data[body : min(body + size, len(data))]
+            if (fmt, bits) == (3, 32):
+                frames = list(struct.unpack(f"<{len(raw) // 4}f", raw[: len(raw) // 4 * 4]))
+            elif (fmt, bits) == (1, 16):
+                frames = [s / 32768.0 for s in struct.unpack(f"<{len(raw) // 2}h", raw)]
+            else:
+                raise ValueError(f"{path}: unsupported WAV format {fmt} at {bits} bits")
+            ch = max(channels, 1)
+            mono = [sum(frames[i : i + ch]) / ch for i in range(0, len(frames) - ch + 1, ch)]
+            return mono, rate
+        pos = body + size + (size & 1)  # chunks are word-aligned
+    raise ValueError(f"{path}: no data chunk")
+
+
+def resample(samples: list[float], src: int, dst: int) -> torch.Tensor:
+    """Windowed-sinc resample, ported tap for tap from `examples/content`.
+
+    It has to be the *same* filter, not merely a good one: the statistics below
+    are compared against the Burn run's, so any difference in the audio reaching
+    the encoder would show up as a difference in the encoder. Linear
+    interpolation would be the worst version of that — 48 kHz down to 16 kHz
+    folds everything above 8 kHz back into the speech band, and the two ports
+    would then be judged on different recordings.
+    """
+    if src == dst:
+        return torch.tensor(samples, dtype=torch.float32)
+
+    half_width = 16
+    step = src / dst
+    cutoff = min(dst / src, 1.0)
+    out_len = int(len(samples) / step)
+
+    x = torch.tensor(samples, dtype=torch.float64)
+    centre = torch.arange(out_len, dtype=torch.float64) * step
+    idx = centre.floor().unsqueeze(1) + torch.arange(
+        -half_width, half_width + 1, dtype=torch.float64
+    )
+    d = centre.unsqueeze(1) - idx
+    # Blackman window over the sinc, which is what keeps the stopband deep
+    # enough for the fold-back to stay inaudible.
+    t = (d / (half_width + 1.0) + 1.0) / 2.0
+    w = 0.42 - 0.5 * torch.cos(2 * math.pi * t) + 0.08 * torch.cos(4 * math.pi * t)
+    arg = math.pi * d * cutoff
+    sinc = torch.where(arg.abs() < 1e-9, torch.ones_like(arg), torch.sin(arg) / arg)
+
+    inside = (idx >= 0) & (idx < len(samples))
+    taps = sinc * w * inside
+    acc = (x[idx.clamp(0, len(samples) - 1).long()] * taps).sum(1)
+    norm = taps.sum(1)
+    return torch.where(norm.abs() > 1e-9, acc / norm, acc).float()
+
+
+def main() -> None:
+    import sys
+
+    from safetensors.torch import load_file
+
+    if len(sys.argv) != 3:
+        raise SystemExit("usage: content.py <whisper-small/model.safetensors> <clip.wav>")
+    weights, clip = sys.argv[1], sys.argv[2]
+
+    source, source_sr = read_wav(clip)
+    print(f"clip    : {clip} — {len(source)} samples at {source_sr} Hz "
+          f"({len(source) / source_sr:.2f} s)")
+
+    # The same recording, resampled twice to two different rates. Not
+    # redundancy: 16 kHz is Whisper's analysis rate and 22 050 Hz is the
+    # preset's, and no single rate serves both.
+    content_wav = resample(source, source_sr, CONTENT_SR)
+    mel_wav = resample(source, source_sr, 22_050)
+
+    model = ContentEncoder().eval()
+    result = load_encoder(model, load_file(weights))
+    print(f"\nencoder : applied {len(result['applied'])}, missing "
+          f"{len(result['missing'])}, errors {len(result['errors'])}")
+    for name in result["missing"]:
+        print(f"    MISSING {name}")
+    for why in result["errors"]:
+        print(f"    ERROR   {why}")
+    print(f"          unused  {len(result['unused'])} — the decoder half, deleted upstream too")
+    assert not result["missing"] and not result["errors"], "the encoder is not fully covered"
+
+    # What `Graph` does not do, spelled out: pad to the fixed window, then keep
+    # the frames that describe real audio. Both halves are the host's, and both
+    # are one line, which is the argument for leaving them out of the graph.
+    padded = F.pad(content_wav[:WINDOW_SAMPLES], (0, max(0, WINDOW_SAMPLES - len(content_wav))))
+    with torch.no_grad():
+        full = Graph(model)(padded.unsqueeze(0))
+    frames = min(len(content_wav) // CONTENT_STRIDE + 1, full.shape[1])
+    features = full[:, :frames]
+
+    print(f"content : {list(features.shape)} at {CONTENT_SR // CONTENT_STRIDE} Hz — "
+          f"graph gave {list(full.shape)}, host kept {frames} "
+          f"({len(content_wav)} samples / {CONTENT_STRIDE} + 1)")
+    assert torch.isfinite(features).all(), "content features are not finite"
+    print(f"          finite, mean {features.mean():.4f}, peak |x| {features.abs().max():.4f}")
+
+    # The 22 050 Hz mel is another unit's graph, so only its frame *count* is
+    # reproduced here — `samples / hop` exactly, which is what `center=False`
+    # padding of `(n_fft - hop) / 2` yields and what the Burn example asserts.
+    mel_frames = len(mel_wav) // 256
+    print(f"\nmel     : {mel_frames} frames at 86.13 Hz ({len(mel_wav)} samples / 256)")
+    print(f"\nratio   : {mel_frames} mel frames to {frames} content frames "
+          f"({mel_frames / frames:.3f}x) — what the length regulator has to close")
+
+
+if __name__ == "__main__":
+    main()
