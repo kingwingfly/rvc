@@ -2,10 +2,12 @@
 //!
 //! The enum, its aliases and the `auto` rule are [`cli_kit::Backend`], shared
 //! with every other binary — adding an engine means reusing that enum, never
-//! declaring another one beside it. What is local is whether the six ONNX graphs
-//! are on disk, because that is what decides how `auto` resolves: Seed-VC now
-//! has an export (`export/export_seedvc.py` writes it), so the question is no
-//! longer *whether* ONNX Runtime can run it but *where the graphs are*.
+//! declaring another one beside it. What is local is whether `--onnx` was given,
+//! because that is what decides how `auto` resolves: Seed-VC now has an export
+//! (`export/export_seedvc.py` writes it), so the question is no longer *whether*
+//! ONNX Runtime can run it but whether the caller pointed at the graphs.
+//! Whether the directory actually holds them is checked later, when the sessions
+//! open.
 //!
 //! [`load`] is the whole of the erasure for the Burn path. Each arm builds a
 //! [`BurnModel<B>`](crate::model::BurnModel) for one concrete Burn backend, boxes

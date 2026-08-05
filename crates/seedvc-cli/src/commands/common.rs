@@ -165,6 +165,10 @@ pub async fn load_model(
 /// checkpoint flags are deliberately ignored: the graphs carry their weights.
 #[cfg(feature = "onnx")]
 fn load_onnx(dir: &Path) -> Result<Box<dyn Model>> {
+    // The Burn path logs the same line inside `seedvc_core::load`; here there is
+    // no backend or Burn device to name (ORT picks its own execution provider),
+    // so the useful fact is which export directory the graphs come from.
+    tracing::info!("loading Seed-VC (onnx, from {})", dir.display());
     let model = tokio::task::block_in_place(|| seedvc_core::onnx_model::OnnxModel::load(dir))?;
     Ok(Box::new(model))
 }
