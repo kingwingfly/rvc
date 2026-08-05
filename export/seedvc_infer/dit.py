@@ -53,6 +53,8 @@ NORM_EPS = 1e-5
 FINAL_NORM_EPS = 1e-6
 # Base of the rotary ladder and of the timestep code — upstream reuses 10000 for both.
 FREQ_BASE = 10_000.0
+# The period both sinusoidal ladders are reduced by — see `rope_tables`.
+TWO_PI = 2.0 * math.pi
 # Width of the sinusoidal timestep code before the MLP sees it, pinned
 # independently by `mlp.0.weight` being `[512, 256]`.
 TIME_FREQ_DIM = 256
@@ -177,22 +179,28 @@ def rope_tables(frames: torch.Tensor | int, head_dim: int, device, dtype) -> tup
     Recomputed per forward rather than cached, as on the Burn side: the tables
     are a function of the sequence length, which is a dynamic axis of the graph.
 
-    **The angles are built in `float64` and only the cosines and sines are
-    narrowed**, which is what `rope_tables` in `dit.rs` does — it accumulates in
-    `f64` and pushes `as f32`. The rounding lost by computing `pos · inv` in
-    `float32` instead grows with position, from 1.9e-06 at 64 frames to 3.0e-04
-    at the trained `block_size` of 8192; that is an order of magnitude above the
-    1e-5 this repo compares runtimes at, so it would show up as a plausible port
-    bug when ONNX is measured against Burn. PyTorch's own Llama RoPE widens here
-    for the same reason.
+    **The angle is accumulated in `float64` and reduced modulo 2π before it is
+    narrowed**, because computing `pos · inv` in `float32` loses precision that
+    grows with position — 1.9e-06 at 64 frames but 3.0e-04 at the trained
+    `block_size` of 8192, an order of magnitude above the 1e-5 this repo
+    compares runtimes at. `dit.rs` accumulates in `f64` and pushes `as f32`, so
+    a `float32` mirror would have surfaced as a plausible port bug the first
+    time a long clip was measured ONNX against Burn.
+
+    **The reduction is what keeps the trigonometry in `float32`, and it is not
+    optional.** ONNX Runtime has no `float64` kernel for `Cos`/`Sin`, so taking
+    the Burn side literally — cosine in `f64`, then narrow — exports and passes
+    `onnx.checker` but fails at session creation with `NOT_IMPLEMENTED`. Since
+    both are 2π-periodic, reducing first is exact in real arithmetic and leaves
+    an argument in `[0, 2π)`, where `float32` spacing is 2.4e-07 — three orders
+    below the threshold that mattered. So this is the accurate answer *and* the
+    portable one, rather than a trade between them.
     """
     half = head_dim // 2
     pos = torch.arange(frames, device=device, dtype=torch.float64)
     inv = FREQ_BASE ** (-2.0 * torch.arange(half, device=device, dtype=torch.float64) / head_dim)
-    theta = pos[:, None] * inv[None, :]
-    cos = theta.cos().to(dtype)[None, :, None, :]
-    sin = theta.sin().to(dtype)[None, :, None, :]
-    return cos, sin
+    theta = (pos[:, None] * inv[None, :]).remainder(TWO_PI).to(dtype)
+    return theta.cos()[None, :, None, :], theta.sin()[None, :, None, :]
 
 
 def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
@@ -319,13 +327,15 @@ class TimestepEmbedder(nn.Module):
         # `scale · exp(-ln(10000) · i / half)` with `scale = 1000`: the flow time
         # is in [0, 1] where a diffusion step index would be in [0, 1000), so
         # upstream rescales the argument rather than re-deriving the ladder.
-        # Built in `float64` and narrowed after the trigonometry, matching
-        # `dit.rs`'s `f64` ladder — the argument reaches 1000 at `t = 1`, where
-        # `float32` spacing is already 6e-05.
+        # Accumulated in `float64` and reduced modulo 2π before narrowing, for
+        # the reasons `rope_tables` gives: the argument reaches 1000 at `t = 1`,
+        # where `float32` spacing is already 6e-05, and ONNX Runtime has no
+        # `float64` `Cos`/`Sin`.
         i = torch.arange(half, device=t.device, dtype=torch.float64)
         args = t[:, None].double() * (1000.0 * FREQ_BASE ** (-i / half))[None, :]
+        args = args.remainder(TWO_PI).to(t.dtype)
         # `cat([cos, sin])`, in that order — reversing it is silent.
-        code = torch.cat([args.cos(), args.sin()], dim=1).to(t.dtype)
+        code = torch.cat([args.cos(), args.sin()], dim=1)
         return self.mlp[1](F.silu(self.mlp[0](code)))
 
 
