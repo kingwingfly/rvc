@@ -7,7 +7,7 @@
 //! [`seedvc_core::convert`], which knows each source's length up front and can
 //! therefore balance its last chunk instead of leaving a fragment.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use burn_kit::DeviceSpec;
@@ -92,7 +92,8 @@ pub async fn resolve_paths(opts: &ModelOpts) -> Result<Paths> {
     })
 }
 
-/// Load the four checkpoints and analyse the reference against them.
+/// Load the model — the four checkpoints, or the six ONNX graphs when `--onnx`
+/// names an export — and analyse the reference against it.
 ///
 /// Hands back both rather than a built converter, because the two commands want
 /// different things from them: the filter wraps them in a
@@ -112,27 +113,33 @@ pub async fn load_model(
     let reference = opts.reference()?;
     // Asked before the fetch, not after: `load` checks this again, but by then a
     // cold cache has already spent a gigabyte on a backend that was never going
-    // to run. The two calls are the same function, so they cannot disagree.
-    seedvc_core::backend::resolve(backend)?;
-    let paths = resolve_paths(opts).await?;
+    // to run. The two calls are the same function, so they cannot disagree. The
+    // export directory is what lets `auto` settle on ONNX Runtime at all.
+    let backend = seedvc_core::backend::resolve(backend, opts.onnx.is_some())?;
 
-    // Four checkpoints and roughly a gigabyte of tensors, all of it synchronous:
-    // `block_in_place` keeps it off the runtime's worker threads, as the other
-    // engines' loaders do. No `context` here — `seedvc_core::Error` already
-    // names both the file that failed and, for `--backend onnx`, why no rebuild
-    // would help.
-    let model = tokio::task::block_in_place(|| {
-        seedvc_core::load(
-            &ModelPaths {
-                dit: &paths.checkpoint,
-                campplus: &paths.campplus,
-                bigvgan: &paths.bigvgan,
-                content: &paths.content,
-            },
-            backend,
-            device,
-        )
-    })?;
+    // `--onnx` short-circuits the four checkpoints entirely: a graph carries its
+    // weights, so there is nothing to fetch and nothing to override.
+    let model: Box<dyn Model> = if let Some(dir) = &opts.onnx {
+        load_onnx(dir)?
+    } else {
+        let paths = resolve_paths(opts).await?;
+        // Four checkpoints and roughly a gigabyte of tensors, all of it
+        // synchronous: `block_in_place` keeps it off the runtime's worker
+        // threads, as the other engines' loaders do. No `context` here —
+        // `seedvc_core::Error` already names the file that failed.
+        tokio::task::block_in_place(|| {
+            seedvc_core::load(
+                &ModelPaths {
+                    dit: &paths.checkpoint,
+                    campplus: &paths.campplus,
+                    bigvgan: &paths.bigvgan,
+                    content: &paths.content,
+                },
+                backend,
+                device,
+            )
+        })?
+    };
 
     let analysed = seedvc_core::reference::analyse(model.as_ref(), reference)
         .await
@@ -148,4 +155,24 @@ pub async fn load_model(
     );
 
     Ok((model, analysed))
+}
+
+/// Open the six ONNX graphs from the directory `--onnx` names.
+///
+/// Compiled only with the feature that can open them, so a build without ONNX
+/// Runtime fails with a rebuild hint rather than a type error about a module
+/// that is not there — the same shape `tts-cli`'s loader uses. The four
+/// checkpoint flags are deliberately ignored: the graphs carry their weights.
+#[cfg(feature = "onnx")]
+fn load_onnx(dir: &Path) -> Result<Box<dyn Model>> {
+    let model = tokio::task::block_in_place(|| seedvc_core::onnx_model::OnnxModel::load(dir))?;
+    Ok(Box::new(model))
+}
+
+#[cfg(not(feature = "onnx"))]
+fn load_onnx(_dir: &Path) -> Result<Box<dyn Model>> {
+    Err(anyhow::anyhow!(
+        "this binary was built without the `onnx` feature — rebuild with `--features onnx` to \
+         run the six graphs `export/export_seedvc.py` writes"
+    ))
 }

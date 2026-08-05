@@ -4,8 +4,9 @@
 //! the same arrangement `tts-core`'s `Engine` and `stt-core`'s use: everything
 //! crossing it is plain `f32`, so [`crate::convert`] and [`crate::reference`]
 //! never name a Burn type and nothing above here is generic. [`BurnModel<B>`] is
-//! the only implementation today — there is no ONNX export of Seed-VC — and
-//! [`crate::backend::load`] is what erases it.
+//! the Burn implementation and [`crate::backend::load`] is what erases it; ONNX
+//! Runtime is a second one, loaded from the graphs `export/export_seedvc.py`
+//! writes.
 //!
 //! # What is inside, and why it cannot be outside
 //!

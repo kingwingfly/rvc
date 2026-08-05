@@ -64,9 +64,9 @@ fn main() {
         std::process::exit(2);
     };
 
-    // `--backend onnx` first, and before anything is read: it must fail on the
-    // argument rather than on a missing file, and it must say why — no rebuild
-    // and no `--features` can make Seed-VC run on ONNX Runtime.
+    // `--backend onnx` first, and before anything is read: without an export
+    // directory it must fail on the argument rather than on a missing file, and
+    // it must say why — the graphs are on disk only where `--onnx` points.
     let paths = ModelPaths {
         dit: &dit,
         campplus: &campplus,
@@ -74,8 +74,18 @@ fn main() {
         content: &content,
     };
     match load(&paths, Backend::Onnx, burn_kit::DeviceSpec::Auto) {
-        Ok(_) => panic!("--backend onnx was accepted"),
-        Err(e) => println!("--backend onnx: {e}\n"),
+        Ok(_) => panic!("--backend onnx was accepted without --onnx"),
+        Err(e) => println!("--backend onnx (no --onnx): {e}\n"),
+    }
+
+    // With an export directory the same request is accepted — that is what
+    // `--onnx <dir>` does. The coverage example cannot open a real export (no
+    // weights can be committed), so the resolver accepting the pair is the part
+    // that is checkable here.
+    match seedvc_core::backend::resolve(Backend::Onnx, true) {
+        Ok(Backend::Onnx) => println!("--backend onnx + --onnx <dir>: resolves to onnx\n"),
+        Ok(other) => panic!("--backend onnx + --onnx resolved to {other}"),
+        Err(e) => panic!("--backend onnx + --onnx refused: {e}"),
     }
 
     let backend = <Backend as clap::ValueEnum>::from_str(&backend, true).expect("--backend");

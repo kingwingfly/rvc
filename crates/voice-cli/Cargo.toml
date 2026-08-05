@@ -20,9 +20,9 @@ default = ["cuda", "tch", "wgpu", "onnx"]
 cuda = ["rvc-cli/cuda", "stt-cli/cuda", "tts-cli/cuda", "seedvc-cli/cuda"]
 tch = ["rvc-cli/tch", "stt-cli/tch", "tts-cli/tch", "seedvc-cli/tch"]
 wgpu = ["rvc-cli/wgpu", "stt-cli/wgpu", "tts-cli/wgpu", "seedvc-cli/wgpu"]
-# `seedvc-cli` is absent here and stays absent: nothing exports Seed-VC, so it
-# has no ONNX path to forward to.
-onnx = ["stt-cli/onnx", "tts-cli/onnx"]
+# Each engine with an ONNX path forwards it; Seed-VC's joined now that
+# `export/export_seedvc.py` writes the six graphs `--onnx` runs.
+onnx = ["stt-cli/onnx", "tts-cli/onnx", "seedvc-cli/onnx"]
 
 [dependencies]
 rvc-cli.workspace = true
