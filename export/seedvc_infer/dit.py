@@ -176,12 +176,23 @@ def rope_tables(frames: torch.Tensor | int, head_dim: int, device, dtype) -> tup
 
     Recomputed per forward rather than cached, as on the Burn side: the tables
     are a function of the sequence length, which is a dynamic axis of the graph.
+
+    **The angles are built in `float64` and only the cosines and sines are
+    narrowed**, which is what `rope_tables` in `dit.rs` does — it accumulates in
+    `f64` and pushes `as f32`. The rounding lost by computing `pos · inv` in
+    `float32` instead grows with position, from 1.9e-06 at 64 frames to 3.0e-04
+    at the trained `block_size` of 8192; that is an order of magnitude above the
+    1e-5 this repo compares runtimes at, so it would show up as a plausible port
+    bug when ONNX is measured against Burn. PyTorch's own Llama RoPE widens here
+    for the same reason.
     """
     half = head_dim // 2
-    pos = torch.arange(frames, device=device, dtype=dtype)
-    inv = FREQ_BASE ** (-2.0 * torch.arange(half, device=device, dtype=dtype) / head_dim)
+    pos = torch.arange(frames, device=device, dtype=torch.float64)
+    inv = FREQ_BASE ** (-2.0 * torch.arange(half, device=device, dtype=torch.float64) / head_dim)
     theta = pos[:, None] * inv[None, :]
-    return theta.cos()[None, :, None, :], theta.sin()[None, :, None, :]
+    cos = theta.cos().to(dtype)[None, :, None, :]
+    sin = theta.sin().to(dtype)[None, :, None, :]
+    return cos, sin
 
 
 def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
@@ -308,10 +319,13 @@ class TimestepEmbedder(nn.Module):
         # `scale · exp(-ln(10000) · i / half)` with `scale = 1000`: the flow time
         # is in [0, 1] where a diffusion step index would be in [0, 1000), so
         # upstream rescales the argument rather than re-deriving the ladder.
-        i = torch.arange(half, device=t.device, dtype=t.dtype)
-        args = t[:, None] * (1000.0 * FREQ_BASE ** (-i / half))[None, :]
+        # Built in `float64` and narrowed after the trigonometry, matching
+        # `dit.rs`'s `f64` ladder — the argument reaches 1000 at `t = 1`, where
+        # `float32` spacing is already 6e-05.
+        i = torch.arange(half, device=t.device, dtype=torch.float64)
+        args = t[:, None].double() * (1000.0 * FREQ_BASE ** (-i / half))[None, :]
         # `cat([cos, sin])`, in that order — reversing it is silent.
-        code = torch.cat([args.cos(), args.sin()], dim=1)
+        code = torch.cat([args.cos(), args.sin()], dim=1).to(t.dtype)
         return self.mlp[1](F.silu(self.mlp[0](code)))
 
 
