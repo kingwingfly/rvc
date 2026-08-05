@@ -145,9 +145,12 @@ class Spectral(nn.Module):
         x = F.pad(wav.unsqueeze(1), (self.pad, self.pad), mode="reflect")
         real = F.conv1d(x, self.cos_kernel, stride=self.hop)
         imag = F.conv1d(x, self.sin_kernel, stride=self.hop)
-        # The epsilon is **inside** the square root, which is where `burn-vits`
-        # puts it: outside it would leave the gradient at a silent bin infinite,
-        # and it also shifts every magnitude by a constant rather than a floor.
+        # The epsilon goes **inside** the square root, which is where
+        # `burn-vits` puts it. Outside it would be a constant added to every
+        # magnitude rather than a floor under the small ones, and it would leave
+        # the derivative of `sqrt` unbounded at a silent bin — which is what the
+        # epsilon is there for, since `burn-vits` backprops the mel-L1 loss
+        # through this transform.
         mag = (real.pow(2) + imag.pow(2) + 1e-9).sqrt()
         # A **natural** log under a 1e-5 floor, not the dB or `log10` the other
         # two front ends take. This is the scale BigVGAN was trained against.

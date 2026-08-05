@@ -23,10 +23,10 @@ where it came from, rather than carrying a list of ones nothing indexes.
 `min(floor(i · source / frames), source - 1)`, where `frames` is the mel length
 the caller wants; expressed inside the graph that is data-dependent control flow
 over a length ONNX would have to be told anyway. So `picks` comes in as a
-`[T] i64` tensor the host computes — [`picks`] below is the arithmetic, and the
-Rust runtime is its real implementation — and the graph is a gather followed by
-the conv stack. The same split is why the flow-matching Euler loop stays on the
-host.
+`[T] i64` tensor the host computes — [`pick_indices`] below is the arithmetic,
+and the Rust runtime is its real implementation — and the graph is a gather
+followed by the conv stack. The same split is why the flow-matching Euler loop
+stays on the host.
 
 `embedding` (2048 × 512) and `mask_token` are the **discrete** path, which this
 preset does not take: `config.yml` for `seed-uvit-whisper-small-wavenet` sets
@@ -60,11 +60,13 @@ class RegulatorConfig:
     n_blocks: int = 4
 
 
-def picks(source: int, frames: int) -> torch.Tensor:
-    """The nearest-neighbour source index per output frame, as `graph`'s input.
+def pick_indices(source: int, frames: int) -> torch.Tensor:
+    """The nearest-neighbour source index per output frame — the `picks` input.
 
-    Kept here beside the module it feeds so the two cannot drift, but this is
-    **host** arithmetic and `seedvc-core` owns the copy that runs in anger. The
+    Named apart from the tensor so it cannot be confused with the `picks`
+    parameter the two `forward`s take. Kept beside the module it feeds so the
+    two cannot drift, but this is **host** arithmetic and `seedvc-core` owns the
+    copy that runs in anger. The
     float multiply-then-truncate is PyTorch's own `F.interpolate` rule and is
     reproduced rather than simplified: `floor(i * source / frames)` in integers
     disagrees with it wherever the division is inexact, which is every frame of
@@ -151,7 +153,10 @@ class Graph(nn.Module):
         # A second of audio: 50 Whisper frames resampled onto 86 mel frames, so
         # the trace sees the two lengths actually differing.
         source, frames = 50, 86
-        return (torch.randn(1, source, self.regulator.cfg.content_dim), picks(source, frames))
+        return (
+            torch.randn(1, source, self.regulator.cfg.content_dim),
+            pick_indices(source, frames),
+        )
 
     def dynamic_shapes(self) -> tuple:
         dyn = torch.export.Dim.DYNAMIC
