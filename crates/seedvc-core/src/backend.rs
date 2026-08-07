@@ -52,6 +52,19 @@ pub fn resolve(backend: Backend, has_onnx: bool) -> Result<Backend> {
                 .into(),
         ));
     }
+    // The mirror of that refusal, and it is the one that used to be silent: a
+    // bundle of exported graphs is the only thing `--onnx` can name and only ONNX
+    // Runtime can read one, so pairing it with a Burn backend asks for two
+    // different runtimes at once. The caller used to get the graphs regardless —
+    // an explicit `--backend` discarded without a word, which is exactly what
+    // "naming a backend is never a silent substitution" forbids.
+    if has_onnx && !matches!(backend, Backend::Auto | Backend::Onnx) {
+        return Err(Error::Device(format!(
+            "--onnx names a bundle of exported graphs, which only ONNX Runtime can read, but \
+             `--backend {backend}` asks for Burn — drop one of the two (`--onnx <dir>` alone \
+             already selects ONNX Runtime)"
+        )));
+    }
     Ok(backend)
 }
 
@@ -141,5 +154,24 @@ mod tests {
         // Without one, `auto` stays on hardware — the export is the whole
         // reason it could ever have been ONNX.
         assert_ne!(resolve(Backend::Auto, false).unwrap(), Backend::Onnx);
+    }
+
+    /// A Burn backend named *out loud* beside `--onnx` is a contradiction, not a
+    /// preference to be overridden: only ONNX Runtime can read the graphs, so the
+    /// pair has to be refused rather than silently resolved one way.
+    #[test]
+    fn an_export_dir_does_not_override_a_named_burn_backend() {
+        for burn in [Backend::Cuda, Backend::Tch, Backend::Wgpu] {
+            let err = match resolve(burn, true) {
+                Ok(other) => panic!("--backend {burn} with --onnx resolved to {other}"),
+                Err(e) => e.to_string(),
+            };
+            assert!(err.contains("--onnx"), "{err}");
+            assert!(err.contains(burn.name()), "{err}");
+        }
+        // …while the same backends without an export are exactly what they say.
+        for burn in [Backend::Cuda, Backend::Tch, Backend::Wgpu] {
+            assert_eq!(resolve(burn, false).unwrap(), burn);
+        }
     }
 }

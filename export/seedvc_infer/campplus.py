@@ -1,9 +1,11 @@
 """CAM++ — the speaker embedding Seed-VC actually conditions on.
 
 Mirrors `crates/burn-seedvc/src/campplus.rs` field for field, so
-`campplus_cn_common.bin` loads by a direct key mapping — the three remaps in
-[`load_checkpoint`] are the same three `CamPPlus::load_pytorch` applies. This is
-a clean-room reimplementation: it imports neither Seed-VC nor 3D-Speaker.
+`campplus_cn_common.bin` loads by a direct key mapping — `export_seedvc.py`'s
+`CAMPPLUS_REMAPS` and `campplus_remaps` are the same remaps
+`CamPPlus::load_pytorch` applies, and they live there rather than here because
+every one of the six mirrors is loaded by that one driver. This is a clean-room
+reimplementation: it imports neither Seed-VC nor 3D-Speaker.
 
 A reference clip in, one 192-dim timbre vector out. This is the network
 upstream builds as `CAMPPlus(feat_dim=80, embedding_size=192)`, and its output
@@ -23,9 +25,7 @@ effect could be to make an embedding depend on what else was in the batch.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
-from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -83,7 +83,8 @@ class Norm(nn.Module):
     the way it happened.
 
     `num_batches_tracked` has no inference role and is deliberately not a
-    buffer; it is the one key per norm that `load_checkpoint` reports unclaimed.
+    buffer; it is the one key per norm the exporter leaves unclaimed, 122 of
+    them on the released file.
     """
 
     def __init__(self, channels: int, affine: bool = True) -> None:
@@ -390,53 +391,6 @@ class CamPPlus(nn.Module):
         readable side by side.
         """
         return self.xvector(self.head(features.transpose(1, 2))).squeeze(2)
-
-
-# ---- loading `campplus_cn_common.bin` ---------------------------------------
-
-
-def load_checkpoint(model: CamPPlus, path: str | Path) -> list[str]:
-    """Load `funasr/campplus`'s 937 tensors into `model`; return what nothing
-    claimed.
-
-    Three remaps, all of them undoing an `nn.Sequential`'s positional or
-    hard-coded child names — no layout differs, and they mirror
-    `CamPPlus::load_pytorch` one for one:
-
-    - `get_nonlinear` builds a `Sequential` whose norm is registered as
-      `batchnorm`, so every norm sits one level deeper than its field here.
-    - a strided residual block's projection is a bare `Sequential`, hence
-      `shortcut.0`/`shortcut.1` for its convolution and norm.
-    - a dense block is an `nn.ModuleList` whose children are *named*
-      `tdnnd1`…`tdnndN`, one-based, where a `ModuleList` numbers from zero. A
-      regex cannot subtract one, so the pairs are generated — off the tree that
-      was built rather than off the default config, so a model constructed with
-      deeper blocks still generates enough.
-
-    `strict=True` is the coverage report: it raises on anything this mapping
-    left unfed. The returned list should hold nothing but the 122
-    `num_batches_tracked` counters, which have no inference role.
-    """
-    longest = max(len(model.xvector.block1), len(model.xvector.block2), len(model.xvector.block3))
-    remaps = [
-        (r"\.batchnorm\.", "."),
-        (r"\.shortcut\.0\.", ".shortcut.conv."),
-        (r"\.shortcut\.1\.", ".shortcut.norm."),
-        *((rf"\.tdnnd{i + 1}\.", f".{i}.") for i in range(longest)),
-    ]
-
-    raw = torch.load(str(path), map_location="cpu", weights_only=True)
-    wanted = set(model.state_dict())
-    state, unclaimed = {}, []
-    for name, tensor in raw.items():
-        for pattern, replacement in remaps:
-            name = re.sub(pattern, replacement, name)
-        if name in wanted:
-            state[name] = tensor.to(torch.float32)
-        else:
-            unclaimed.append(name)
-    model.load_state_dict(state, strict=True)
-    return unclaimed
 
 
 # ---- the exported graph -----------------------------------------------------

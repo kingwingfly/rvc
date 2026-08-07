@@ -593,7 +593,29 @@ pub async fn fetch_naist_jdic(cache_dir: &Path) -> Result<PathBuf> {
         tar::Archive::new(flate2::read::GzDecoder::new(&body[..])).unpack(&staging)?;
         // The archive holds exactly one top-level directory, so the payload is a
         // level below the staging root.
-        std::fs::rename(staging.join(NAIST_JDIC_DIR), &dest)?;
+        //
+        // A sibling that finished while we were unpacking is **not** a failure:
+        // the rename is what publishes the name, so a directory called `dest` is
+        // a whole dictionary by construction and losing the race means the asset
+        // is already there. Reporting an error here would also be stricter than
+        // the `dest.exists()` fast path at the top, which returns it with no
+        // check at all. What must not be skipped either way is clearing the
+        // staging tree — it is ~100 MB unpacked, and leaving one behind per
+        // collision is how a cache grows without anything ever reading what it
+        // grew.
+        if let Err(e) = std::fs::rename(staging.join(NAIST_JDIC_DIR), &dest) {
+            let _ = std::fs::remove_dir_all(&staging);
+            if dest.exists() {
+                return Ok(dest);
+            }
+            return Err(HubError::Io(std::io::Error::new(
+                e.kind(),
+                format!(
+                    "unpacked the Japanese dictionary but could not move it into {}: {e}",
+                    dest.display(),
+                ),
+            )));
+        }
         let _ = std::fs::remove_dir(&staging);
         Ok(dest)
     })

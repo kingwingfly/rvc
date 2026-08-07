@@ -99,9 +99,16 @@ the file you want.
 backend trains the generator — the trainer builds its own extractor and that
 constructor is ONNX-only — so the two flags accept `onnx` there and refuse a
 Burn backend rather than downgrading it quietly; `--backend tch` still trains on
-LibTorch. And on the conversion path the Burn ContentVec and RMVPE are **not
-wired up yet**: the flags parse, resolve and select the download, and the
-converter refuses a Burn feature model with a message saying so.
+LibTorch.
+
+And **an `.onnx` generator cannot be mixed at all**: ONNX Runtime runs the three
+models as one fused pipeline built from all three graph paths at once, so there
+is nowhere to put a feature model built elsewhere. `-m voice.onnx` with
+`--rmvpe-backend tch` is therefore an error naming the flag, before anything is
+fetched — either drop it and convert entirely on ONNX Runtime, or point `-m` at
+a `.safetensors` generator and mix freely on Burn. Every other combination
+works: a `.safetensors` generator hosts an ONNX or a Burn ContentVec and RMVPE
+in any pairing.
 
 ## Train a voice
 

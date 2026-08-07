@@ -182,6 +182,12 @@ unfinished too; what it does carry is the accent-phrase and pitch-movement marks
 Chinese-or-English user never pays for it and `tts download` does not prefetch
 it. It is *not* downloaded during `cargo build`.
 
+**Synthesis only, so far.** `tts train --language ja` has no dictionary threaded
+through to it and fails on the first transcript rather than phonemizing Japanese
+as something else — deliberately, because the wrong front-end produces
+fluent-sounding wrong audio. Fine-tuning on a Japanese corpus therefore is not
+available yet; synthesis in Japanese from an existing model is.
+
 Mandarin readings that depend on grammar rather than on the word are still
 wrong; g2pw is the fix and is not written.
 

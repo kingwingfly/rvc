@@ -118,7 +118,10 @@ pub async fn load_model(
     let backend = seedvc_core::backend::resolve(backend, opts.onnx.is_some())?;
 
     // `--onnx` short-circuits the four checkpoints entirely: a graph carries its
-    // weights, so there is nothing to fetch and nothing to override.
+    // weights, so there is nothing to fetch and nothing to override. Reaching
+    // here with a directory means `resolve` settled on ONNX Runtime — it refuses
+    // `--onnx` beside a named Burn backend rather than letting one win silently,
+    // which is what this branch used to do.
     let model: Box<dyn Model> = if let Some(dir) = &opts.onnx {
         load_onnx(dir)?
     } else {

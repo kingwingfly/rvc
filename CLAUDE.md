@@ -636,7 +636,11 @@ the cheaper answer:
   a bundle, the one artefact on disk that could decide it. `--backend onnx` with
   no `--onnx` is refused with a reason naming the missing directory — not "not
   supported", which would send a user hunting for a feature flag that cannot
-  exist.
+  exist. **The mirror of that refusal matters as much and was the one that used
+  to be silent**: `--onnx` beside `--backend cuda|tch|wgpu` asks for two runtimes
+  at once, and the loader took the graphs regardless, discarding a backend the
+  user had named out loud. Both refusals live in `seedvc_core::backend::resolve`
+  so the fetch never happens, and `--onnx` alone still selects ONNX Runtime.
 
 **This reverses an earlier position on purpose, so do not "restore" it.** The old
 plan was to port `rvc-core`'s ContentVec and RMVPE to Burn *in order to* drop
@@ -678,13 +682,26 @@ Four things about that choice are worth having written down:
   `rvc download` gained `--backend` for the same reason: with no `-m` to inspect
   it could only guess, it used to guess ONNX, and prefetching the wrong format
   leaves the first real run downloading anyway.
-- **The pure-ORT early return in `build_converter` demands that all three models
-  agree on ONNX, which is not the same test as `backend == Onnx`.** `RvcModel`
-  is *one fused pipeline*, built from a single `RvcConfig`/`ModelPaths` naming
-  all three graphs at once, so an ONNX generator with a LibTorch RMVPE cannot be
-  described to it at all; anything mixed takes the generic path, which composes a
-  `FeatureExtractor` from separately chosen parts. Simplifying the condition back
-  reads as identical and silently discards both flags.
+- **An `.onnx` generator is the one combination that cannot be mixed, and
+  `build_converter` refuses it rather than composing something.** `RvcModel` is
+  *one fused pipeline*, built from a single `RvcConfig`/`ModelPaths` naming all
+  three graphs at once, so an ONNX generator with a LibTorch RMVPE cannot be
+  described to it — and the generic path cannot host it either, because
+  `Generator::convert_segment` takes raw 16 kHz audio and the only ONNX
+  implementor of that trait *is* the fused `RvcModel`. Every constructor that
+  accepts a prebuilt `FeatureExtractor` is a Burn one, so the mix has no third
+  place to go. It is therefore an `ensure!` naming the offending flag, **before
+  any download**.
+
+  **This is a correction, so do not restore the old shape.** The early return
+  used to test that all three models agreed on ONNX and let a disagreement fall
+  through to the generic path — where the match arm is
+  `Backend::Onnx => unreachable!()`, so `-m voice.onnx --rmvpe-backend tch`
+  panicked two downloads and two model loads after the flag that caused it was
+  parsed. Widening the condition back only moves that panic; deleting the check
+  instead forces both feature models onto ORT and silently discards whatever the
+  two override flags said. A `.safetensors` generator still mixes freely, which
+  is what the flags are for.
 - **`rvc train`'s feature backends default to `onnx`, not to `--backend`, and the
   reason is not that ORT cannot train.** Feature extraction is not training — it
   runs once over the corpus before the loop starts. It is that `rvc-train` builds

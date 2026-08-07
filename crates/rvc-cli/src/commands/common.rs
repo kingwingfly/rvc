@@ -42,19 +42,41 @@ pub async fn build_converter(
     // The pure-ORT path is **one fused pipeline, not three independent models**:
     // [`RvcModel`] is built from a single [`RvcConfig`]/[`ModelPaths`] naming all
     // three graphs at once, and there is no way to describe an ONNX generator
-    // whose RMVPE runs on LibTorch to it. That is why this is an early return
-    // and not a fourth arm of the match below — and why it demands that all
-    // three agree. Any mixed configuration goes the generic way instead, which
-    // composes a `FeatureExtractor` out of separately chosen parts and hands it
-    // to a boxed `Generator`.
+    // whose RMVPE runs on LibTorch to it. That is why it is an early return and
+    // not a fourth arm of the match below.
     //
-    // Do not "simplify" this back to `if backend == Backend::Onnx`: that reads
-    // as the same thing and quietly forces both feature models onto the
-    // generator's runtime, discarding whatever the two override flags said.
-    if backend == Backend::Onnx
-        && features.content == Backend::Onnx
-        && features.rmvpe == Backend::Onnx
-    {
+    // It is also why an ONNX generator is the **one** combination the generic
+    // path cannot host either: every Burn generator constructor takes a prebuilt
+    // `FeatureExtractor` and no ONNX one does, so there is no third place for a
+    // mixed configuration to go. Hence the `ensure!` rather than a condition on
+    // the `if`: falling through on disagreement reached `Backend::Onnx =>
+    // unreachable!()` below — a panic, two downloads and two model loads after
+    // the flags that caused it were parsed.
+    //
+    // **Do not turn the refusal back into a silent narrowing** by folding
+    // `features.content == Onnx && features.rmvpe == Onnx` into the `if`. That
+    // sends the mix down the generic path, which cannot build an ONNX generator,
+    // so it only moves the panic; and dropping the check entirely forces both
+    // feature models onto ORT, discarding whatever the two override flags said.
+    if backend == Backend::Onnx {
+        let mixed: Vec<&str> = [
+            ("--content-vec-backend", features.content),
+            ("--rmvpe-backend", features.rmvpe),
+        ]
+        .into_iter()
+        .filter(|(_, chosen)| *chosen != Backend::Onnx)
+        .map(|(flag, _)| flag)
+        .collect();
+        anyhow::ensure!(
+            mixed.is_empty(),
+            "{} cannot name a Burn backend while the generator is an `.onnx` export: ONNX \
+             Runtime runs all three models as one fused pipeline, so there is nowhere to put \
+             a feature model built elsewhere. Either drop the flag (or pass `onnx`) and \
+             convert entirely on ONNX Runtime, or point `-m` at a `.safetensors` generator \
+             and convert entirely on Burn.",
+            mixed.join(" and "),
+        );
+
         let (content, rmvpe) = resolve_feature_models(opts, features).await?;
         let cfg = build_rvc_config(opts, content, rmvpe)?;
         let onnx = RvcModel::load(cfg).context("failed to load RVC models")?;
@@ -133,6 +155,8 @@ pub async fn build_converter(
             .context("failed to load the Burn generator on the LibTorch backend")?;
             Converter::new(g, params, conv_params)
         }
+        // Genuinely unreachable: the block above either returned the fused
+        // pipeline or refused the mix that would have arrived here.
         Backend::Onnx => unreachable!("handled above"),
         Backend::Auto => unreachable!("resolved above"),
         // Only reachable on a `--no-default-features` build.

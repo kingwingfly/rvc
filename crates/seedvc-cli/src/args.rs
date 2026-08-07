@@ -74,7 +74,9 @@ pub struct ModelOpts {
     /// either directly, or in an `onnx/` subdirectory inside it. Naming one runs
     /// the whole conversion on ONNX Runtime and ignores the four checkpoint
     /// flags above: a graph carries its weights, so there is nothing to fetch
-    /// and nothing to override.
+    /// and nothing to override. It cannot be combined with a `--backend` that
+    /// names Burn, since only ONNX Runtime can read a graph — that pair is an
+    /// error rather than one of the two winning.
     #[arg(long)]
     pub onnx: Option<PathBuf>,
     /// Directory the downloaded models are cached in. Shared by every engine

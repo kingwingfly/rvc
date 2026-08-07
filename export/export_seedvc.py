@@ -197,13 +197,20 @@ def resolve(flag: Path | None, models: Path, what: str, find) -> Path:
     Each checkpoint is matched by what identifies it rather than by its full
     upstream name, because a cache, a clone and a hand-made copy name these
     files differently — the same tolerance `seedvc_paths` has.
+
+    `find` is handed the entry **and its lowercased name**, and the matchers
+    below compare against the second. That is not tidiness: `seedvc_paths`
+    lowercases every filename before matching, and the released checkpoint is
+    `DiT_seed_v2_uvit_whisper_small_wavenet_bigvgan_pruned.pth`, so a
+    case-sensitive `startswith("dit")` finds nothing and the two sides disagree
+    about a directory both claim to read the same way.
     """
     if flag is not None:
         return flag
     if not models.is_dir():
         raise SystemExit(f"{models} is not a directory")
     for entry in sorted(models.iterdir()):
-        if found := find(entry):
+        if found := find(entry, entry.name.lower()):
             return found
     raise SystemExit(f"no {what} under {models}")
 
@@ -261,7 +268,7 @@ def main() -> None:
                 opts.content,
                 opts.models,
                 "a whisper-small directory (holding model.safetensors)",
-                lambda e: e / "model.safetensors" if e.is_dir() and (e / "model.safetensors").exists() else None,
+                lambda e, _n: e / "model.safetensors" if e.is_dir() and (e / "model.safetensors").exists() else None,
             )
             state = read_checkpoint(path, None, CONTENT_REMAPS)
             encoder.encoder.load_state_dict(build_state_dict(encoder.encoder, state, "content"), strict=True)
@@ -274,7 +281,7 @@ def main() -> None:
                 opts.campplus,
                 opts.models,
                 "campplus_cn_common.bin",
-                lambda e: e if e.name.startswith("campplus") and e.suffix == ".bin" else None,
+                lambda e, n: e if n.startswith("campplus") and n.endswith(".bin") else None,
             )
             state = read_checkpoint(path, None, campplus_remaps(model))
             model.load_state_dict(build_state_dict(model, state, "campplus"), strict=True)
@@ -291,7 +298,7 @@ def main() -> None:
                 opts.dit,
                 opts.models,
                 "a DiT*.pth checkpoint",
-                lambda e: e if e.name.startswith("dit") and e.suffix == ".pth" else None,
+                lambda e, n: e if n.startswith("dit") and n.endswith(".pth") else None,
             )
             if "dit" in wanted:
                 model = dit.Dit()
@@ -312,7 +319,7 @@ def main() -> None:
                 opts.bigvgan,
                 opts.models,
                 "bigvgan_generator.pt",
-                lambda e: e if "bigvgan" in e.name and e.suffix == ".pt" and "discriminator" not in e.name else None,
+                lambda e, n: e if "bigvgan" in n and n.endswith(".pt") and "discriminator" not in n else None,
             )
             state = read_checkpoint(path, "generator", BIGVGAN_REMAPS)
             model.load_state_dict(build_state_dict(model, state, "bigvgan"), strict=True)

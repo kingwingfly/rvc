@@ -63,9 +63,13 @@ impl Default for GeneratorIo {
 ///
 /// Deliberately all-or-nothing, and that is why it is not the general shape:
 /// [`RvcModel`](crate::RvcModel) is one pipeline built from all three at once,
-/// so it cannot describe an ONNX generator whose RMVPE runs on LibTorch. Any
-/// mixed configuration composes a [`FeatureExtractor`](crate::FeatureExtractor)
-/// and a [`Generator`](crate::Generator) separately instead.
+/// so it cannot describe an ONNX generator whose RMVPE runs on LibTorch. A mix
+/// composes a [`FeatureExtractor`](crate::FeatureExtractor) and a
+/// [`Generator`](crate::Generator) separately instead — **except when the
+/// generator itself is the ONNX one**, since every [`Generator`] constructor
+/// that takes a prebuilt extractor is a Burn one. That combination has nowhere
+/// to go and is a caller-side error; `rvc-cli`'s `build_converter` is where it
+/// is refused.
 #[derive(Debug, Clone)]
 pub struct ModelPaths {
     /// ContentVec / HuBERT encoder (`vec-768-layer-12.onnx`).

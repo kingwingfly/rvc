@@ -18,7 +18,7 @@ there; a choice still open belongs here.
 - [`seedvc train`](#seedvc-train)
 - [A native audio-device backend](#a-native-audio-device-backend)
 - [g2pw — Mandarin's syntactic polyphones](#g2pw--mandarins-syntactic-polyphones)
-- [ContentVec and RMVPE, both ways](#contentvec-and-rmvpe-both-ways)
+- [Exporting a fine-tuned ContentVec or RMVPE](#exporting-a-fine-tuned-contentvec-or-rmvpe)
 - [The duplicated `session()` builder](#the-duplicated-session-builder)
 - [The RVC 2.3 mel floor](#the-rvc-23-mel-floor)
 
@@ -166,31 +166,25 @@ is confined to characters whose reading is grammatically determined, which is a
 short list; a corpus count would say whether this is a rare blemish or a
 persistent one, and that number should decide the priority.
 
-## ContentVec and RMVPE, both ways
+## Exporting a fine-tuned ContentVec or RMVPE
 
-`rvc-core`'s feature extraction — ContentVec and RMVPE — runs on ONNX Runtime
-only, which is why `rvc` cannot be built without ORT the way a Burn-only `stt`
-can. Burn ports of both are being added, giving feature extraction the same
-run-time backend choice the generator already has and demoting ORT from a hard
-requirement to an option.
-
-**The mirror-image gap is what belongs on this list.** Once those models can be
-*fine-tuned* here, a fine-tuned one cannot reach ONNX Runtime, because Burn
+**A fine-tuned ContentVec or RMVPE could not reach ONNX Runtime**, because Burn
 imports ONNX without emitting it. `export/` is where that changes, and the work
 is the same shape as every other entry there: a clean-room torch mirror of the
 Burn layout, plus the exporter.
+
+Only the *export* direction is open. Running these two on either runtime is
+done — `burn-rmvpe` and `burn-rvc`'s `ContentVec` (over the extracted
+`burn-hubert`) give feature extraction the same run-time backend choice the
+generator has, selected by `--content-vec-backend` and `--rmvpe-backend`. What
+that decision cost and which traps it avoided is [`CLAUDE.md`](../CLAUDE.md)'s
+business, not this page's.
 
 *Why this is not urgent.* Neither model is fine-tuned today — both are frozen
 inference assets — so the gap is theoretical until something trains them. It is
 listed because the asymmetry is easy to forget, and because the moment a `train`
 subcommand touches either one, deployment under ORT silently stops being possible
 for the result.
-
-*Worth doing alongside.* ContentVec is a HuBERT variant, so `burn-gptsovits`'s
-`hubert.rs` already covers its architecture. Sharing it means lifting that module
-into a `burn-hubert` of its own — two engines would then depend on it, and **no
-engine may depend on another engine**, so the shared code has to move to a
-neutral crate first. That is a naming and layering job, not a modelling one.
 
 ## The duplicated `session()` builder
 
