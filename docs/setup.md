@@ -176,8 +176,11 @@ never a silent fallback.** Only `auto` substitutes.
 `seedvc` is the one engine whose ONNX path is a bundle rather than a single
 file — it wants `--onnx <dir>` pointing at the six graphs
 `export/export_seedvc.py` writes. `auto` resolves to ONNX Runtime when
-`--onnx` is set, and by hardware otherwise; `--backend onnx` without
-`--onnx` is refused with a reason rather than falling back.
+`--onnx` is set, and by hardware otherwise. The two halves of that are both
+errors rather than fallbacks: `--backend onnx` without `--onnx` is refused for
+want of a directory, and `--onnx` beside `--backend cuda|tch|wgpu` is refused
+because only ONNX Runtime can read a graph. `--onnx` on its own already selects
+it.
 
 Training is always Burn — ONNX Runtime has no training path at all — so a
 `train` subcommand takes the same flag minus `onnx`.
@@ -188,9 +191,17 @@ Training is always Burn — ONNX Runtime has no training path at all — so a
 runs several can give each its own flag, and `rvc` is the one that does:
 `--content-vec-backend` and `--rmvpe-backend` take exactly the spellings above,
 default to whatever `--backend` resolved to, and are independent of it and of
-each other — so an ONNX generator with a LibTorch F0 estimator is a real
-configuration rather than an accident. `--content-vec-backend auto` means
-*inherit*, which is the same as leaving the flag off.
+each other — so a `.safetensors` generator with an ONNX F0 estimator, or the
+reverse, is a real configuration rather than an accident.
+`--content-vec-backend auto` means *inherit*, which is the same as leaving the
+flag off.
+
+**The one combination that is refused is an `.onnx` generator beside a Burn
+feature model.** ONNX Runtime runs `rvc`'s three models as a single fused
+pipeline built from all three graph paths at once, so there is nowhere to put a
+feature model built elsewhere — `-m voice.onnx --rmvpe-backend tch` is an error
+naming the flag, before anything is downloaded. Point `-m` at a `.safetensors`
+generator and the two flags mix freely.
 
 **A runtime and a weight format are not the same choice, and the second follows
 from the first.** ONNX Runtime and Burn read different files, so picking a
