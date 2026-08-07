@@ -333,7 +333,7 @@ cargo run -p burn-seedvc --example content    # whisper-small + the length regul
 cargo run -p burn-rvc    --example infer      # one generator forward pass
 cargo run -p seedvc-core --features tch --example convert  # the engine, end to end
 cargo run -p seedvc-core --features tch --example stream   # the same, through the filter
-cargo run -p rvc-core --features tch --example f0_runtimes # Burn vs ORT F0, 0.11–1.11 Hz
+cargo run -p rvc-core --features tch --example f0_runtimes # Burn vs ORT F0, median 0.005–1.40 Hz
 # `--features tch` there is not decoration: `f0_runtimes` carries
 # `required-features`, so it fails to build rather than compiling to nothing
 # when the backend it exists to compare against is absent.
@@ -716,11 +716,32 @@ Four things about that choice are worth having written down:
 order.** ContentVec on Burn against ContentVec on ORT: per-frame cosine
 **1.000000** as both mean and minimum, with identical frame counts — where
 comparing frame *i* against frame *i + T/2* gives 0.004, so that is agreement and
-not a degenerate metric. RMVPE, network against network on one shared mel:
+not a degenerate metric. (`examples/load -- contentvec` is 210/0/57, the unused
+being 54 LayerNorms counted under Burn's `gamma`/`beta`, v1's `final_proj`, and
+SpecAugment's mask token.) RMVPE, network against network on one shared mel:
 **0.70 Hz** mean absolute F0 difference over 406 jointly voiced frames at
-correlation **0.9932–0.9996**; driven through `FeatureExtractor` itself on four
-clips, **0.11–1.11 Hz**. A swapped GRU gate or a fused bias does not perturb a
-contour by fractions of a hertz, it decorrelates it.
+correlation **0.9932–0.9996**.
+
+**Driven through `FeatureExtractor`, read the median and not the mean** — this is
+the one number here that a favourable sample can flatter, and it did.
+`f0_runtimes` over eight clips of this repository's own breathy close-mic
+corpus: median absolute difference **0.005–1.40 Hz**, sub-hertz on seven of
+eight, while the *mean* over the same frames spans **0.49–24.4 Hz** and
+correlation drops to 0.31. Both describe the same contours, because the
+disagreement is a handful of frames rather than a drift — one clip has a median
+of 0.0047 Hz across 502 voiced frames and a mean of 4.53, which is one frame in
+five hundred. `max |Δ|` prints both readings and their ratio to identify them,
+and on half the clips it is **an octave** (0.42–0.45, or 2.0): where the salience
+map has two comparable peaks an octave apart, whichever is fractionally higher
+wins, so a perturbation far too small to move a confident frame flips an
+ambiguous one outright. An earlier "0.11–1.11 Hz, 0–6 voicing disagreements" here
+was measured on clean clips; this toolkit exists for the material that is not.
+
+**A swapped GRU gate or a fused bias is not content-dependent**, which is what
+makes the median the check: it would not spare the confident frames. The
+threshold is not a second effect either — both runtimes use the same
+`F0_THRESHOLD` of 0.03, so the 7–87 voicing disagreements are the same
+perturbation at that boundary.
 
 **That residual is a known difference and not a defect to reconcile.** The U-net
 wants a multiple of 32 frames; `Rmvpe::forward` pads with **zeros**, which is
