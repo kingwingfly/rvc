@@ -205,7 +205,7 @@ an engine depends on must never be named `voice-*` — that is why the shared
 crates are `*-kit`. `voice-cli` is the only `voice-*` crate.
 
 ### Where documentation goes
-Eight places, and putting a paragraph in the wrong one is exactly how `README.md`
+Nine places, and putting a paragraph in the wrong one is exactly how `README.md`
 once grew ninety lines of engine manual:
 
 - **`README.md`** is an *index*: what `voice` is, the pipeline, which binary to
@@ -254,7 +254,13 @@ once grew ninety lines of engine manual:
   loss term is for, why the training loop has the shape it does. Typst sources
   with the rendered PDF committed beside them, so reading needs no toolchain;
   rebuild with `typst compile docs/<name>.typ` and commit both.
-- **this file** is the eighth: why a decision was made and which trap it avoids.
+- **`export/README.md`** is the exporter's own manual, and it is a place rather
+  than a footnote because it is the only documentation of the *other* side of a
+  port: which graphs each model is split into and why, what to pass, and the
+  cross-runtime agreement numbers that say the mirror is faithful. It is the
+  only page describing a tool that **no user, no test and no training run ever
+  invokes**, which is why its material cannot be folded into `docs/setup.md`.
+- **this file** is the ninth: why a decision was made and which trap it avoids.
   A fact that would be equally true of any VITS repo belongs in a `.typ` paper;
   a fact that will bite whoever edits this code next belongs here.
 
@@ -282,6 +288,16 @@ cargo check -p rvc-train --features cuda,tch    # where the trait bounds bite
 cargo clippy --workspace        # workspace is kept clippy-clean
 cargo fmt
 
+# There is no CI, so those two plus the tests are the whole gate — nothing else
+# will catch it. `--workspace` builds every member with default features, which
+# includes `tch`, so LibTorch has to be loadable at run time as well as linked:
+LD_LIBRARY_PATH=$PWD/libtorch/lib cargo test --workspace
+cargo test -p text-kit                      # g2p, and the largest suite by far
+cargo test -p seedvc-core streaming_matches_the_batch_path   # one test by name
+# The one `#[ignore]`d test is `rvc-core`'s `model_probe`: it wants
+# ORT_DYLIB_PATH and model/audio paths from the environment, so it runs only
+# when asked for by name with `-- --ignored`.
+
 # One `--backend auto|onnx|cuda|tch|wgpu` on every binary (aliases burn/burn-cuda,
 # libtorch/burn-tch, webgpu/burn-wgpu); `--device auto|cpu|gpu|gpu:N|mps|vulkan`
 # (cuda/cuda:N spell gpu). Both default to auto. See docs/setup.md.
@@ -291,14 +307,39 @@ cargo run -p voice-cli -- rvc  convert -m models/voice.safetensors --model-sr 48
 # No LibTorch on the machine? Drop it (then `--backend tch` errors cleanly):
 cargo build --release --no-default-features --features cuda
 
-# Correctness of the Burn port is checked by loading REAL pretrained weights
-# (there are no unit tests for the network) — reports applied/missing/unused:
+# Weight coverage is checked by loading REAL pretrained weights, which is what
+# `cargo test` cannot do — none of them can be committed. The unit tests pin
+# arithmetic against hand-written references; these pin the module tree against
+# the checkpoint. Each reports applied/missing/unused, and every non-zero
+# `unused` in this list has a recorded reason — read it, don't glance at it:
 cargo run -p burn-rvc --example load -- <path/to/f0G48k.pth>       # 560/0, 165/0
 cargo run -p burn-rvc --example load -- contentvec <path/to/hubert_base>  # 210/0
 cargo run -p burn-rmvpe --example load -- <path/to/rmvpe.pt>       # 623/0/118
 cargo run -p burn-whisper --example load -- <path/to/model.safetensors>  # 587/0
 cargo run -p burn-gptsovits --example load -- hubert <chinese-hubert-base/pytorch_model.bin>  # 210/0
+cargo run -p burn-seedvc --example load -- <DiT_seed_v2_...pruned.pth>   # module by module
+cargo run -p seedvc-core --features tch --example coverage -- --dit ... --campplus ...
 cargo run -p burn-gptsovits --example keys -- --group <any checkpoint>   # what names to mirror
+cargo run -p burn-seedvc  --example keys -- <any checkpoint>            # likewise
+
+# The second kind of check, the one coverage cannot make — see **Verifying a
+# port beyond weight coverage**. These exercise arithmetic on real audio, so
+# each takes weights and a clip; the exact usage and the numbers to expect are
+# in the example's own module doc, which is where they stay current:
+cargo run -p burn-gptsovits --example reconstruct  # `s2` round-trip, energy r=0.91
+cargo run -p burn-seedvc --example speaker    # pairwise cosine: same speaker vs not
+cargo run -p burn-seedvc --example vocode     # BigVGAN: does the waveform track the mel
+cargo run -p burn-seedvc --example content    # whisper-small + the length regulator
+cargo run -p burn-rvc    --example infer      # one generator forward pass
+cargo run -p seedvc-core --features tch --example convert  # the engine, end to end
+cargo run -p seedvc-core --features tch --example stream   # the same, through the filter
+cargo run -p rvc-core --features tch --example f0_runtimes # Burn vs ORT F0, 0.11–1.11 Hz
+# `--features tch` there is not decoration: `f0_runtimes` carries
+# `required-features`, so it fails to build rather than compiling to nothing
+# when the backend it exists to compare against is absent.
+cargo run -p text-kit --example phonemize -- ja "私は東京にいます" <naist-jdic-dir>
+# ...the `ja` form specifically: the dictionary is a run-time asset, so it is
+# the one text-kit path `cargo test` cannot reach. `zh` and `en` are covered.
 ```
 
 Porting references are cloned under `/.reference` (gitignored) and **read, never
@@ -710,7 +751,9 @@ half of that trade.
 The other three engines differ only because their cores have no loader at all:
 `stt-cli` and `tts-cli` build the `Engine` themselves. Moving `backend.rs` up to
 `seedvc-cli` to match would strand `seedvc-core`'s three examples, which are the
-crate's only test harness and which take `--backend` themselves.
+crate's only harness against **real weights** — its unit tests run on synthetic
+tensors and a stub `Model`, because none of the four checkpoints can be
+committed — and which take `--backend` themselves.
 
 ### `seedvc convert` drives the batch path, not the streaming one
 Both exist and both are live, which is deliberate. `crate::convert` knows a
