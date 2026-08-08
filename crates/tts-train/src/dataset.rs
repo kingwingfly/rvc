@@ -221,7 +221,17 @@ pub fn prepare<B: Backend>(
 /// failed to apply from *both* lists (`visited && !applied && !skipped &&
 /// !errored`), so a shape mismatch — a checkpoint from a later GPT-SoVITS, say
 /// — otherwise reads as full coverage while the parameter keeps its initialised
-/// value.
+/// value. It is therefore tested *first*: a file whose every tensor failed to
+/// apply would otherwise be reported as "0 missing".
+///
+/// There is deliberately no override. A 209-of-210 load is a corpus prepared by
+/// an encoder with a hole in it, and the flag someone would reach for here is
+/// the flag that makes the whole check pointless — so the fix is naming the
+/// right checkpoint, not passing something.
+///
+/// What this cannot catch is a right-shaped *wrong* model: RVC's ContentVec is
+/// the same architecture with other weights and would pass 210/0. Coverage
+/// checks the module tree against the file, never the file against the intent.
 fn covered(what: &str, result: &burn_kit::ApplyResult) -> Result<()> {
     if let Some(first) = result.errors.first() {
         return Err(TrainError::Weights(format!(
@@ -256,17 +266,22 @@ pub fn encoders<B: Backend>(
     s2_path: &Path,
     device: &B::Device,
 ) -> Result<(Hubert<B>, Quantizer<B>)> {
+    // The path is the useful half of either failure, so the loader's own error
+    // and the coverage refusal are given the same label rather than one naming
+    // the file and the other only the model.
+    let what = format!("cnhubert ({})", hubert_path.display());
     let mut hubert = Hubert::<B>::new(&HubertConfig::chinese_base(), device);
     let applied = hubert
         .load_pytorch(hubert_path)
-        .map_err(|e| TrainError::Weights(format!("cnhubert: {e}")))?;
-    covered(&format!("cnhubert ({})", hubert_path.display()), &applied)?;
+        .map_err(|e| TrainError::Weights(format!("{what}: {e}")))?;
+    covered(&what, &applied)?;
 
+    let what = format!("quantiser ({})", s2_path.display());
     let mut quantizer = Quantizer::<B>::new(&QuantizerConfig::default(), 1, device);
     let applied = quantizer
         .load_pytorch(s2_path)
-        .map_err(|e| TrainError::Weights(format!("quantiser: {e}")))?;
-    covered(&format!("quantiser ({})", s2_path.display()), &applied)?;
+        .map_err(|e| TrainError::Weights(format!("{what}: {e}")))?;
+    covered(&what, &applied)?;
 
     Ok((hubert, quantizer))
 }
