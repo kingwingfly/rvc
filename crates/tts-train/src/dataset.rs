@@ -201,25 +201,72 @@ pub fn prepare<B: Backend>(
     Ok(clips)
 }
 
+/// Reject a load that left parameters at their initialised values.
+///
+/// `load_pytorch_into` allows a partial apply so that a coverage report can be
+/// *inspected* rather than a single mismatch aborting the load, and it has no
+/// strict mode — so **an empty apply is a success unless somebody looks**. Here
+/// that silence is expensive twice over: a randomly-initialised cnhubert
+/// extracts garbage into every clip of the corpus, preparation is the expensive
+/// half of a fine-tune, and the model that comes out the far end is merely bad
+/// rather than broken.
+///
+/// `missing` is the number that matters — a *model parameter* with no tensor
+/// behind it is random weight the encoder will happily run. `unused` is not
+/// checkable here and is deliberately not checked: the quantiser is three
+/// tensors out of an `s2G*.pth` holding the whole synthesizer, so ~770 are left
+/// over by construction.
+///
+/// `errors` is separate from `missing` because the applier drops a path that
+/// failed to apply from *both* lists (`visited && !applied && !skipped &&
+/// !errored`), so a shape mismatch — a checkpoint from a later GPT-SoVITS, say
+/// — otherwise reads as full coverage while the parameter keeps its initialised
+/// value.
+fn covered(what: &str, result: &burn_kit::ApplyResult) -> Result<()> {
+    if let Some(first) = result.errors.first() {
+        return Err(TrainError::Weights(format!(
+            "{what}: {} of the checkpoint's tensors could not be applied \
+             ({first}) — the file does not match the model",
+            result.errors.len(),
+        )));
+    }
+    if result.applied.is_empty() || !result.missing.is_empty() {
+        return Err(TrainError::Weights(format!(
+            "{what}: {} of {} parameters had no weights in the checkpoint \
+             (applied {}) — the file's tensor names do not match the model",
+            result.missing.len(),
+            result.missing.len() + result.applied.len(),
+            result.applied.len(),
+        )));
+    }
+    Ok(())
+}
+
 /// Build a `Hubert` and a `Quantizer` for preparation.
 ///
 /// They are frozen, so they exist only long enough to prepare the corpus and are
 /// dropped before training starts — which matters on a small card, where they
 /// would otherwise sit beside the model being trained.
+///
+/// Both loads are coverage-checked, because both used to throw their
+/// `ApplyResult` away: cnhubert applies 210 parameters and the quantiser 3, and
+/// anything short of that is a corpus prepared by a random encoder.
 pub fn encoders<B: Backend>(
     hubert_path: &Path,
     s2_path: &Path,
     device: &B::Device,
 ) -> Result<(Hubert<B>, Quantizer<B>)> {
     let mut hubert = Hubert::<B>::new(&HubertConfig::chinese_base(), device);
-    hubert
+    let applied = hubert
         .load_pytorch(hubert_path)
         .map_err(|e| TrainError::Weights(format!("cnhubert: {e}")))?;
+    covered(&format!("cnhubert ({})", hubert_path.display()), &applied)?;
 
     let mut quantizer = Quantizer::<B>::new(&QuantizerConfig::default(), 1, device);
-    quantizer
+    let applied = quantizer
         .load_pytorch(s2_path)
         .map_err(|e| TrainError::Weights(format!("quantiser: {e}")))?;
+    covered(&format!("quantiser ({})", s2_path.display()), &applied)?;
 
     Ok((hubert, quantizer))
 }
