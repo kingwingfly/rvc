@@ -114,8 +114,8 @@ fn init_tracing(log_file: Option<&Path>) -> bool {
 /// is fetching, there is nothing else it could be counting.
 #[derive(Debug, Clone, Copy, Args)]
 pub struct DownloadOpts {
-    /// Seconds a download may make **no progress** before it is abandoned and
-    /// started again. Not a limit on how long a download may take — the largest
+    /// Seconds a download may go without arriving before it is abandoned and
+    /// started again. Not a limit on how long a download may take: the largest
     /// asset here is well over a gigabyte, and any limit generous enough for
     /// that on a slow link would be far too long to notice a stall.
     #[arg(long, value_name = "SECONDS", default_value_t = hub_kit::Retry::default().stall.as_secs())]

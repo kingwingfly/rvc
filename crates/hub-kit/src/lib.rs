@@ -186,13 +186,54 @@ fn hub_client(cache_dir: &Path, retry: Retry) -> Result<HFClient> {
 
 /// Records when the transfer last moved, for [`guarded`]'s watchdog.
 ///
+/// **Bytes, not events**, and that distinction is the whole of this type. A
+/// plain HTTP body reports once per chunk, so an event *is* progress there —
+/// but hf-hub's xet path spawns a poller that emits an `AggregateProgress`
+/// every 100 ms whether or not a byte has arrived, and a watchdog fed on
+/// events would take that tick for a healthy transfer and never fire. So the
+/// clock is reset only when the count reported rises above the highest count
+/// this attempt has seen.
+///
 /// `tokio::time::Instant` rather than `std::time::Instant` so a test can drive
 /// the clock instead of waiting out a real stall window.
-struct Heartbeat(std::sync::Mutex<tokio::time::Instant>);
+struct Heartbeat {
+    at: std::sync::Mutex<tokio::time::Instant>,
+    /// The highest byte count any event has reported during this attempt.
+    ///
+    /// Two counts arrive interleaved on the xet path — the batch aggregate and
+    /// the per-file delta — and one watermark over both is still flat exactly
+    /// when nothing is moving, which is all the watchdog asks of it.
+    bytes: std::sync::atomic::AtomicU64,
+}
+
+impl Heartbeat {
+    fn touch(&self) {
+        *self.at.lock().expect("heartbeat mutex") = tokio::time::Instant::now();
+    }
+}
 
 impl ProgressHandler for Heartbeat {
-    fn on_progress(&self, _: &ProgressEvent) {
-        *self.0.lock().expect("heartbeat mutex") = tokio::time::Instant::now();
+    fn on_progress(&self, event: &ProgressEvent) {
+        use hf_hub::progress::DownloadEvent;
+
+        let reported = match event {
+            ProgressEvent::Download(DownloadEvent::AggregateProgress {
+                bytes_completed, ..
+            }) => *bytes_completed,
+            ProgressEvent::Download(DownloadEvent::Progress { files }) => {
+                files.iter().map(|f| f.bytes_completed).sum()
+            }
+            // `Start` and `Complete` carry no running count: they say the
+            // transfer reached a new phase, which is movement by definition.
+            _ => return self.touch(),
+        };
+        if reported
+            > self
+                .bytes
+                .fetch_max(reported, std::sync::atomic::Ordering::Relaxed)
+        {
+            self.touch();
+        }
     }
 }
 
@@ -214,14 +255,19 @@ where
     F: FnMut(Progress) -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
 {
-    let beat = Arc::new(Heartbeat(
-        std::sync::Mutex::new(tokio::time::Instant::now()),
-    ));
+    let beat = Arc::new(Heartbeat {
+        at: std::sync::Mutex::new(tokio::time::Instant::now()),
+        bytes: std::sync::atomic::AtomicU64::new(0),
+    });
     for try_index in 0..=retry.retries {
-        *beat.0.lock().expect("heartbeat mutex") = tokio::time::Instant::now();
+        // A restarted attempt counts from wherever it resumes, so the previous
+        // one's watermark would sit above everything the new one reports and
+        // the clock would never be reset again.
+        beat.bytes.store(0, std::sync::atomic::Ordering::Relaxed);
+        beat.touch();
         let watchdog = async {
             loop {
-                let last = *beat.0.lock().expect("heartbeat mutex");
+                let last = *beat.at.lock().expect("heartbeat mutex");
                 if last.elapsed() >= retry.stall {
                     return;
                 }
@@ -1144,6 +1190,15 @@ mod tests {
         assert!(text.contains("--retries"), "{text}");
     }
 
+    /// One xet-shaped progress event: a cumulative byte count for the batch.
+    fn moved(bytes: u64) -> ProgressEvent {
+        ProgressEvent::Download(hf_hub::progress::DownloadEvent::AggregateProgress {
+            bytes_completed: bytes,
+            total_bytes: 1 << 30,
+            bytes_per_sec: None,
+        })
+    }
+
     /// The other half, and the reason this is a stall watchdog rather than a
     /// `tokio::time::timeout`: a transfer that keeps reporting bytes runs for
     /// **longer** than the stall window and is not touched. Whisper
@@ -1154,17 +1209,34 @@ mod tests {
         let got = guarded(retry, "a slow fetch", |progress| async move {
             // Ten chunks at 20s each: 200s in total against a 30s window, so a
             // deadline of any size that admits this admits a stall too.
-            for _ in 0..10 {
+            for chunk in 1..=10 {
                 tokio::time::sleep(Duration::from_secs(20)).await;
-                progress.on_progress(&ProgressEvent::Download(
-                    hf_hub::progress::DownloadEvent::Complete,
-                ));
+                progress.on_progress(&moved(chunk * 1_000_000));
             }
             Ok(PathBuf::from("/done"))
         })
         .await
         .expect("a transfer reporting progress must not be abandoned");
         assert_eq!(got, PathBuf::from("/done"));
+    }
+
+    /// The trap the byte watermark exists for. hf-hub's xet path spawns a
+    /// poller that emits an `AggregateProgress` every 100 ms whether or not a
+    /// byte has arrived, so a watchdog that counted *events* would read that
+    /// tick as a healthy transfer and never fire — on the one path that moves
+    /// the largest files here.
+    #[tokio::test(start_paused = true)]
+    async fn a_progress_tick_that_reports_no_new_bytes_is_not_progress() {
+        let e = guarded(quick(), "a stalled xet batch", |progress| async move {
+            for _ in 0..1_000 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                progress.on_progress(&moved(4096));
+            }
+            Ok(PathBuf::from("/never"))
+        })
+        .await
+        .expect_err("a byte count that stopped rising is a stall");
+        assert!(matches!(e, HubError::Stalled { .. }), "{e}");
     }
 
     /// A failure that is not a stall is the inner layer's to retry, so it comes
