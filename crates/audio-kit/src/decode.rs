@@ -343,11 +343,18 @@ fn frame_to_mono_f32(frame: &AudioFrame) -> Result<Vec<f32>> {
 /// - **More than two** fold to the front pair: channel 0 leads the left,
 ///   channel 1 the right, and every remaining channel is added to **both** at
 ///   equal weight before dividing by `n - 1`, so a signal identical in every
-///   channel comes back at unity — the same property [`frame_to_mono_f32`]'s
-///   `1/n` has, which is what keeps the two paths comparable. Keeping only the
-///   front pair would be simpler and is wrong for exactly the material this
-///   exists for: 5.1's centre channel is where a centred vocal lives, so
-///   discarding it removes what a separator is hunting for.
+///   channel comes back at unity, exactly as [`frame_to_mono_f32`]'s `1/n`
+///   does. Keeping only the front pair would be simpler and is wrong for
+///   exactly the material this exists for: 5.1's centre channel is where a
+///   centred vocal lives, so discarding it removes what a separator is hunting
+///   for.
+///
+/// **A uniform signal is the only input on which the two paths agree, so do not
+/// read `(L + R) / 2` as the mono downmix.** Beyond two channels the fold
+/// weights the front pair against the rest and the downmix does not: 5.1
+/// carrying `v` in channel 0 alone gives `v/6` through [`frame_to_mono_f32`]
+/// and `v/10` through the averaged pair. Whoever wants the downmix wants
+/// [`decode_paths`], which is the default anyway.
 ///
 /// The fold is decided **per frame**, which is what makes a file that changes
 /// channel count mid-stream harmless: every input frame still yields exactly
@@ -457,6 +464,13 @@ mod tests {
     /// left for right in the same direction, which is precisely the mistake
     /// this path can make. A file written to the spec is an outside authority
     /// on which sample is the left one.
+    ///
+    /// Above two channels this header is deliberately the *simple* one and not
+    /// a conformant one: the spec wants `WAVE_FORMAT_EXTENSIBLE` with a channel
+    /// mask, where this keeps tag 3 and a 16-byte `fmt`. ffmpeg parses it
+    /// leniently and assigns a default layout, which is all the fold tests
+    /// need — they care which channel index carries what, not what the layout
+    /// is called.
     fn float_wav(sample_rate: u32, channels: u16, interleaved: &[f32]) -> Vec<u8> {
         let data_bytes = (interleaved.len() * 4) as u32;
         let mut out = Vec::with_capacity(44 + interleaved.len() * 4);

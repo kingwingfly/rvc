@@ -15,7 +15,7 @@ use futures::{Stream, StreamExt};
 use tokio::fs::File;
 use tokio::io::{AsyncWrite, AsyncWriteExt, BufWriter};
 
-use crate::error::Result;
+use crate::error::{AudioError, Result};
 use crate::{Samples, StereoSamples};
 
 /// Collect a stream of mono `f32` chunks and write them to `path` as a
@@ -65,6 +65,9 @@ where
 /// is `[L, R, L, R, …]` by definition, so this is the one place the layout is
 /// not a choice. Everything upstream keeps the planar pair, which is what an
 /// STFT wants — see [`StereoSamples`].
+///
+/// Fails with [`AudioError::ChannelLengthMismatch`] if a chunk's two channels
+/// disagree in length.
 pub async fn write_wav_stereo<W, S>(writer: W, sample_rate: u32, mut stream: S) -> Result<()>
 where
     W: AsyncWrite + Unpin,
@@ -73,10 +76,19 @@ where
     let mut interleaved: Vec<f32> = Vec::new();
     while let Some(item) = stream.next().await {
         let chunk = item?;
-        // `zip` stops at the shorter channel. `StereoSamples` promises the two
-        // are equal, and a caller who breaks that promise loses the odd sample
-        // rather than shifting every frame after it by one — which is what
-        // writing the longer channel against silence would do.
+        // This is the one place `StereoSamples`'s equal-length invariant is
+        // *relied on*, and the type's own guard is a `debug_assert!` inside
+        // `frames()` that a release build drops and this function never calls.
+        // So it is checked rather than trusted: interleaving a mismatched pair
+        // has no harmless reading — truncating drops audio from the tail of the
+        // longer channel, and padding shifts every frame after the shortfall
+        // against the other channel. Refusing says which chunk was wrong.
+        if chunk.left.len() != chunk.right.len() {
+            return Err(AudioError::ChannelLengthMismatch {
+                left: chunk.left.len(),
+                right: chunk.right.len(),
+            });
+        }
         for (l, r) in chunk.left.iter().zip(&chunk.right) {
             interleaved.push(*l);
             interleaved.push(*r);
@@ -187,6 +199,26 @@ mod tests {
             .map(|i| (f32_at(&out, 44 + i * 8), f32_at(&out, 48 + i * 8)))
             .collect();
         assert_eq!(frames, vec![(0.25, -0.25), (0.5, -0.5), (0.75, -0.75)]);
+    }
+
+    /// `StereoSamples` has public fields, so nothing stops a caller building a
+    /// mismatched pair. The writer refuses it: there is no harmless way to
+    /// interleave one, and a truncated or shifted channel is inaudible as a
+    /// defect and fatal to a separation.
+    #[tokio::test]
+    async fn mismatched_channels_are_refused_not_truncated() {
+        let chunk = StereoSamples {
+            left: vec![0.1, 0.2, 0.3],
+            right: vec![-0.1, -0.2],
+        };
+        let mut out: Vec<u8> = Vec::new();
+        let err = write_wav_stereo(&mut out, 16_000, futures::stream::iter([Ok(chunk)]))
+            .await
+            .expect_err("mismatched channels must not be written");
+        assert!(
+            matches!(err, AudioError::ChannelLengthMismatch { left: 3, right: 2 }),
+            "{err}"
+        );
     }
 
     /// The mono writer is unchanged by sharing a header writer with the stereo

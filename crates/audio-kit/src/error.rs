@@ -21,6 +21,15 @@ pub enum AudioError {
     /// A required libavfilter filter is missing from this ffmpeg build.
     #[error("ffmpeg filter unavailable: {0}")]
     FilterUnavailable(&'static str),
+    /// A [`StereoSamples`](crate::StereoSamples) arrived with its two channels
+    /// at different lengths, which its own invariant forbids.
+    #[error("stereo chunk channels differ in length: left {left}, right {right}")]
+    ChannelLengthMismatch {
+        /// Samples in the left channel.
+        left: usize,
+        /// Samples in the right channel.
+        right: usize,
+    },
 }
 
 /// Convenience alias used throughout the crate.
