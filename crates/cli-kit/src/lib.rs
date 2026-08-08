@@ -98,6 +98,67 @@ fn init_tracing(log_file: Option<&Path>) -> bool {
     false
 }
 
+/// The two knobs on how patient a download is, shared by every engine's
+/// `download` subcommand.
+///
+/// Here rather than in each engine for the reason `Backend` is: four copies of
+/// a flag are four spellings waiting to diverge, and `--backend` had already
+/// done exactly that before it moved. It is also here rather than in `hub-kit`,
+/// which owns the policy this produces, because `hub-kit` must stay free of
+/// `clap` — it is the crate an engine's *core* depends on, and a download
+/// policy is not an argument parser.
+///
+/// The spellings: `--download-timeout` keeps its prefix because "timeout" alone
+/// would be read as a limit on the run, and this one bounds a transfer that has
+/// gone quiet. `--retries` needs no prefix — inside a command whose whole job
+/// is fetching, there is nothing else it could be counting.
+#[derive(Debug, Clone, Copy, Args)]
+pub struct DownloadOpts {
+    /// Seconds a download may make **no progress** before it is abandoned and
+    /// started again. Not a limit on how long a download may take — the largest
+    /// asset here is well over a gigabyte, and any limit generous enough for
+    /// that on a slow link would be far too long to notice a stall.
+    #[arg(long, value_name = "SECONDS", default_value_t = hub_kit::Retry::default().stall.as_secs())]
+    pub download_timeout: u64,
+    /// How many times a download that stalled or failed transiently is started
+    /// again. A missing file is not retried at all: it would fail identically
+    /// every time and only report it later.
+    #[arg(long, value_name = "N", default_value_t = hub_kit::Retry::default().retries)]
+    pub retries: u32,
+}
+
+impl DownloadOpts {
+    /// Reject a pair that would fetch nothing.
+    pub fn verify(&self) -> Result<()> {
+        // Zero is not "no timeout" here, it is a window that has already
+        // expired: every attempt would be abandoned before its first byte, so
+        // the command would spend its whole retry budget and report a stall on
+        // a link that is working. There is deliberately no spelling for "wait
+        // forever" — that is the behaviour this flag exists to remove.
+        anyhow::ensure!(
+            self.download_timeout > 0,
+            "--download-timeout must be at least 1 second: 0 abandons every \
+             download before its first byte arrives"
+        );
+        Ok(())
+    }
+
+    /// Check the pair and make it this process's download policy.
+    ///
+    /// The one call a subcommand makes, so the check cannot be left out of a
+    /// command that installs; [`Self::verify`] stays public because it is the
+    /// house-shaped half and a caller that only validates has it.
+    pub fn install(&self) -> Result<()> {
+        self.verify()?;
+        hub_kit::Retry {
+            stall: std::time::Duration::from_secs(self.download_timeout),
+            retries: self.retries,
+        }
+        .install();
+        Ok(())
+    }
+}
+
 #[derive(Debug, Args)]
 pub struct CompletionsArgs {
     /// Shell to generate the completion script for.

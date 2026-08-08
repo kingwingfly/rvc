@@ -19,8 +19,11 @@
 //! directory) the chosen format needs.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 use hf_hub::HFClient;
+use hf_hub::progress::{Progress, ProgressEvent, ProgressHandler};
 
 /// Errors from model resolution/download.
 #[derive(Debug, thiserror::Error)]
@@ -37,10 +40,217 @@ pub enum HubError {
     /// A download that arrived, but not intact.
     #[error("{0}")]
     Download(String),
+    /// A transfer that stopped moving and was abandoned — see [`Retry::stall`].
+    ///
+    /// Its own variant rather than an [`HubError::Io`] timeout because it is the
+    /// one failure here that the server never reported: the bytes simply stopped
+    /// arriving. That is the case this crate used to sit in forever with no
+    /// diagnostic at all, so it says what expired and what to turn.
+    #[error(
+        "{what}: no data for {}s, abandoned after {tries} attempt(s) — raise \
+         --download-timeout if the link is just slow to get going, --retries if it is flaky",
+        stall.as_secs()
+    )]
+    Stalled {
+        /// What was being fetched, spelled the way the user asked for it.
+        what: String,
+        /// The window of silence that expired.
+        stall: Duration,
+        /// How many attempts were made in total.
+        tries: u32,
+    },
 }
 
 /// Convenience alias.
 pub type Result<T> = std::result::Result<T, HubError>;
+
+/// How long a download may go nowhere, and how often it is started again.
+///
+/// One value for the whole process rather than a parameter on each of the
+/// thirteen `fetch_*` entry points below. Those thirteen have around twenty
+/// call sites spread across all four engines, and every one of them would have
+/// to grow an argument carrying the same answer — because there *is* only one
+/// answer per invocation: this is a property of the network the process is on,
+/// not of the asset being fetched. It is the shape `cli_kit::init_logging`
+/// already has, installed once from argv at the top of a command and read
+/// wherever it is needed.
+///
+/// [`Retry::current`] is that reading, and it falls back to [`Retry::default`]
+/// when nothing installed one — so a library caller, a test, and every
+/// subcommand that does not take the flags all keep working, with the timeout
+/// applied rather than skipped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Retry {
+    /// How long a transfer may make **no progress** before it is abandoned.
+    ///
+    /// A stall window, **not** a deadline on the download, and the distinction
+    /// is the whole reason this is not a `tokio::time::timeout` around the
+    /// fetch: Whisper large-v3-turbo is 1.6 GB, and any deadline generous
+    /// enough for that on a slow link is far too long to notice a stall. What
+    /// is measured instead is silence — hf-hub reports every chunk it writes,
+    /// so a transfer moving at any rate at all keeps resetting this, and only
+    /// one that has stopped runs it out.
+    pub stall: Duration,
+    /// How many times a fetch that stalled is started again from the top.
+    ///
+    /// Zero means "try once and report". It is also handed to hf-hub as its own
+    /// per-request retry budget, so the two layers agree about how patient the
+    /// user asked to be — see [`hub_client`] for why they are two layers.
+    pub retries: u32,
+}
+
+/// A minute of silence is a stall on any link that was ever going to work: the
+/// Hub's own connect and first-byte latencies are seconds, and a transfer that
+/// is merely slow still reports progress every chunk.
+const DEFAULT_STALL: Duration = Duration::from_secs(60);
+
+/// Three, because the failures this retries are transient by construction and
+/// a fourth attempt says more about the network being down than about luck.
+const DEFAULT_RETRIES: u32 = 3;
+
+/// Backoff between our own attempts: `BACKOFF_BASE`, doubling.
+///
+/// Deliberately **not** a flag. The two numbers a user can act on are how long
+/// to wait and how many times to try; a third asking them to tune the pause
+/// between attempts buys nothing they could measure, and it is dwarfed by the
+/// stall window that precedes it anyway.
+const BACKOFF_BASE: Duration = Duration::from_secs(1);
+
+impl Default for Retry {
+    fn default() -> Self {
+        Self {
+            stall: DEFAULT_STALL,
+            retries: DEFAULT_RETRIES,
+        }
+    }
+}
+
+static INSTALLED: std::sync::OnceLock<Retry> = std::sync::OnceLock::new();
+
+impl Retry {
+    /// The policy this process fetches under.
+    pub fn current() -> Self {
+        INSTALLED.get().copied().unwrap_or_default()
+    }
+
+    /// Install this as the process-wide policy, if nothing has yet.
+    ///
+    /// Idempotent rather than fallible: a command parses its flags once, and a
+    /// second install would be a caller bug that is not worth an error path in
+    /// front of every download. The mechanism itself takes a `Retry`
+    /// explicitly, so nothing in this crate is reachable *only* through the
+    /// global — which is what keeps the tests below able to exercise a policy
+    /// this never sees.
+    pub fn install(self) {
+        let _ = INSTALLED.set(self);
+    }
+}
+
+/// The Hub client every fetch goes through.
+///
+/// Two layers of retry meet here and they divide cleanly:
+///
+/// - **hf-hub retries individual HTTP requests**, and already classifies what
+///   is worth retrying exactly as this needs — a connection reset, a read
+///   timeout, 408/429/500/502/503/504 are transient; a 404 on a filename that
+///   does not exist is not, and comes straight back. That classifier is
+///   `pub(crate)` to hf-hub, so reimplementing it here would mean a second
+///   opinion about which failures are permanent, drifting from the first.
+/// - **[`guarded`] retries a whole fetch that stalled**, which is the one
+///   failure hf-hub cannot see: no request has failed, no status has arrived,
+///   the response body has simply stopped.
+///
+/// So `--retries` is handed to both, and the outer loop only ever runs for a
+/// stall — the two cannot multiply into `retries * retries` attempts.
+///
+/// The `read_timeout`/`connect_timeout` pair is what makes the inner layer able
+/// to see a stall at all. They are per-operation, not per-transfer: `timeout()`
+/// would cap the whole download and kill a healthy 1.6 GB fetch on a slow link.
+fn hub_client(cache_dir: &Path, retry: Retry) -> Result<HFClient> {
+    let http = reqwest::Client::builder()
+        .connect_timeout(retry.stall)
+        .read_timeout(retry.stall)
+        // hf-hub sets its default headers only on a client it built itself, so
+        // supplying one means supplying the `User-Agent` too. An anonymous
+        // client is what the Hub rate-limits first, and that failure would be
+        // intermittent, remote, and look like anything but a missing header.
+        .user_agent(concat!("voice/", env!("CARGO_PKG_VERSION")))
+        .build()?;
+    Ok(HFClient::builder()
+        .cache_dir(cache_dir.to_path_buf())
+        .client(http)
+        .retry_max_attempts(retry.retries as usize)
+        .retry_base_delay(BACKOFF_BASE)
+        .build()?)
+}
+
+/// Records when the transfer last moved, for [`guarded`]'s watchdog.
+///
+/// `tokio::time::Instant` rather than `std::time::Instant` so a test can drive
+/// the clock instead of waiting out a real stall window.
+struct Heartbeat(std::sync::Mutex<tokio::time::Instant>);
+
+impl ProgressHandler for Heartbeat {
+    fn on_progress(&self, _: &ProgressEvent) {
+        *self.0.lock().expect("heartbeat mutex") = tokio::time::Instant::now();
+    }
+}
+
+/// Run one Hub download under the stall watchdog, restarting it if it stalls.
+///
+/// `attempt` is a closure rather than a future because a stalled attempt is
+/// dropped and a *fresh* one started — a future that has already stalled cannot
+/// be polled back into life.
+///
+/// The watchdog exists because the timeouts on [`hub_client`]'s client do not
+/// cover the whole path: hf-hub builds a second, no-redirect client of its own
+/// for the metadata `HEAD` that opens every cached download, and offers no way
+/// to configure it. A server that accepts the connection and then says nothing
+/// stalls there, before any client of ours is reached. Watching for progress
+/// catches that case for free, because a `HEAD` that never returns emits no
+/// progress event either.
+async fn guarded<F, Fut, T>(retry: Retry, what: &str, mut attempt: F) -> Result<T>
+where
+    F: FnMut(Progress) -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let beat = Arc::new(Heartbeat(
+        std::sync::Mutex::new(tokio::time::Instant::now()),
+    ));
+    for try_index in 0..=retry.retries {
+        *beat.0.lock().expect("heartbeat mutex") = tokio::time::Instant::now();
+        let watchdog = async {
+            loop {
+                let last = *beat.0.lock().expect("heartbeat mutex");
+                if last.elapsed() >= retry.stall {
+                    return;
+                }
+                tokio::time::sleep_until(last + retry.stall).await;
+            }
+        };
+        tokio::select! {
+            done = attempt(Progress::from(beat.clone())) => return done,
+            () = watchdog => {}
+        }
+        if try_index < retry.retries {
+            // Doubling from `BACKOFF_BASE`. The stall window already dominates
+            // this, so it is politeness to the server rather than pacing.
+            let pause = BACKOFF_BASE * 2u32.pow(try_index.min(6));
+            tracing::warn!(
+                "{what}: no data for {}s, retrying in {}s ({} attempt(s) left)",
+                retry.stall.as_secs(),
+                pause.as_secs(),
+                retry.retries - try_index
+            );
+            tokio::time::sleep(pause).await;
+        }
+    }
+    Err(HubError::Stalled {
+        what: what.to_string(),
+        stall: retry.stall,
+        tries: retry.retries + 1,
+    })
+}
 
 /// A single file within a Hub model repo.
 #[derive(Debug, Clone)]
@@ -229,16 +439,21 @@ fn note_cache_move(cache: &Path) {
 /// path. `cache_dir` is resolved by the caller — see [`cache_dir_for`].
 pub async fn fetch(model: &ModelRef, cache_dir: &Path) -> Result<PathBuf> {
     note_cache_move(cache_dir);
-    let client = HFClient::builder()
-        .cache_dir(cache_dir.to_path_buf())
-        .build()?;
-    let repo = client.model(model.owner.clone(), model.name.clone());
-    let path = repo
-        .download_file()
-        .filename(model.file.clone())
-        .send()
-        .await?;
-    Ok(path)
+    let retry = Retry::current();
+    let client = hub_client(cache_dir, retry)?;
+    let what = format!("{}/{}/{}", model.owner, model.name, model.file);
+    guarded(retry, &what, |progress| {
+        let repo = client.model(model.owner.clone(), model.name.clone());
+        async move {
+            Ok(repo
+                .download_file()
+                .filename(model.file.clone())
+                .progress(progress)
+                .send()
+                .await?)
+        }
+    })
+    .await
 }
 
 /// Where the warm-start bases a training run starts from live: `pretrained/`
@@ -297,18 +512,31 @@ pub async fn fetch_pretrained(model: &ModelRef, dir: &Path) -> Result<PathBuf> {
         model.file,
         dir.display()
     );
-    let client = HFClient::new()?;
-    let repo = client.model(model.owner.clone(), model.name.clone());
+    // `local_dir` below writes the file itself, so hf-hub's cache tree is never
+    // reached on this path and the directory named here is inert. It is `dir`
+    // rather than hf-hub's own default because an inert setting that names this
+    // toolkit's own cache cannot become a live one pointing at
+    // `~/.cache/huggingface` if that ever changes.
+    let retry = Retry::current();
+    let client = hub_client(dir, retry)?;
+    let what = format!("{}/{}/{}", model.owner, model.name, model.file);
     // `local_dir` reproduces the repo's own directory structure, so the file
     // lands a level down; move it up and drop the wrapper if it is now empty.
     // Only the completed download is ever named `dest`, which is what makes the
     // reuse check above safe after an interrupted one.
-    let path = repo
-        .download_file()
-        .filename(model.file.clone())
-        .local_dir(dir.to_path_buf())
-        .send()
-        .await?;
+    let path = guarded(retry, &what, |progress| {
+        let repo = client.model(model.owner.clone(), model.name.clone());
+        async move {
+            Ok(repo
+                .download_file()
+                .filename(model.file.clone())
+                .local_dir(dir.to_path_buf())
+                .progress(progress)
+                .send()
+                .await?)
+        }
+    })
+    .await?;
     if path != dest {
         std::fs::rename(&path, &dest)?;
         if let Some(parent) = path.parent() {
@@ -536,8 +764,8 @@ pub const NAIST_JDIC_URL: &str = "https://github.com/jpreprocess/jpreprocess/rel
 ///
 /// Worth the constant because a truncated body is otherwise reported by the gzip
 /// decoder as a corrupt archive, which reads as "the release is broken" and
-/// sends the user to the wrong place — the transfer stopped early, and retrying
-/// fixes it.
+/// sends the user to the wrong place — the transfer stopped early, so
+/// [`fetch_naist_jdic`] retries it rather than saying so and stopping.
 const NAIST_JDIC_BYTES: usize = 28_668_638;
 
 /// The single directory the archive holds, and the name it keeps in the cache.
@@ -554,6 +782,13 @@ const NAIST_JDIC_DIR: &str = "naist-jdic";
 /// unpacked into a staging directory and only *renamed* into place once it is
 /// whole, so a directory under the final name is always a complete dictionary
 /// and an interrupted fetch can never be mistaken for one.
+///
+/// The retrying here is its own loop rather than [`guarded`]'s, because this is
+/// the one asset nothing of hf-hub's touches: there is no client to hand a
+/// retry budget to, so both layers are this function's. What it retries is
+/// spelled out in [`retryable`] — a 404 on the pinned URL means the release
+/// moved and comes back at once, since three more attempts would only make the
+/// same answer slower to arrive.
 pub async fn fetch_naist_jdic(cache_dir: &Path) -> Result<PathBuf> {
     let dest = cache_dir.join(NAIST_JDIC_DIR);
     if dest.exists() {
@@ -565,18 +800,54 @@ pub async fn fetch_naist_jdic(cache_dir: &Path) -> Result<PathBuf> {
         NAIST_JDIC_BYTES / 1_000_000,
         cache_dir.display()
     );
-    let body = reqwest::get(NAIST_JDIC_URL)
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
-    if body.len() != NAIST_JDIC_BYTES {
-        return Err(HubError::Download(format!(
-            "{NAIST_JDIC_URL} gave {} bytes where the release is {NAIST_JDIC_BYTES} — \
-             the transfer stopped early; retrying is the fix",
-            body.len()
-        )));
-    }
+    let retry = Retry::current();
+    // `read_timeout` rather than `timeout`, for the reason `hub_client` gives:
+    // a deadline over the whole body is a size limit in disguise. This one is
+    // 28 MB and would survive either, but the two paths must not disagree about
+    // what `--download-timeout` means.
+    let client = reqwest::Client::builder()
+        .connect_timeout(retry.stall)
+        .read_timeout(retry.stall)
+        .user_agent(concat!("voice/", env!("CARGO_PKG_VERSION")))
+        .build()?;
+
+    let mut spent = 0;
+    let body = loop {
+        let attempt = async {
+            let bytes = client
+                .get(NAIST_JDIC_URL)
+                .send()
+                .await?
+                .error_for_status()?
+                .bytes()
+                .await?;
+            // A short body is the transfer stopping early, which the gzip
+            // decoder would report as a corrupt archive two steps later.
+            if bytes.len() != NAIST_JDIC_BYTES {
+                return Err(HubError::Download(format!(
+                    "{NAIST_JDIC_URL} gave {} bytes where the release is {NAIST_JDIC_BYTES} — \
+                     the transfer stopped early",
+                    bytes.len()
+                )));
+            }
+            Ok(bytes)
+        };
+        match attempt.await {
+            Ok(bytes) => break bytes,
+            Err(e) if retryable(&e) && spent < retry.retries => {
+                let pause = BACKOFF_BASE * 2u32.pow(spent.min(6));
+                tracing::warn!(
+                    "the Japanese dictionary failed to download ({e}), retrying in {}s \
+                     ({} attempt(s) left)",
+                    pause.as_secs(),
+                    retry.retries - spent
+                );
+                tokio::time::sleep(pause).await;
+                spent += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    };
 
     // Inflating 28 MB and writing ~100 MB of it is blocking work, and every
     // caller is inside an async runtime. The staging directory carries the
@@ -792,6 +1063,38 @@ pub fn seedvc_paths(dir: &Path) -> Result<SeedVcPaths> {
     })
 }
 
+/// Whether starting [`fetch_naist_jdic`]'s download again could plausibly
+/// succeed where this attempt did not.
+///
+/// The distinction is the point: a 404 on the pinned release URL means the
+/// asset moved, and retrying it three times with backoff turns a clear answer
+/// into a slow one while telling the user nothing new. What *is* worth another
+/// go is anything that says the network faltered rather than that the file is
+/// wrong — a timeout, a refused or reset connection, a 429 from the CDN, and
+/// any 5xx, which is the server saying "not now" rather than "not here".
+/// A short body is here too, and by construction: the length is known, so a
+/// body that fell short of it is a transfer that stopped, never a release that
+/// changed size — that would fail the check on every attempt and 404 first.
+///
+/// The same list hf-hub applies to its own requests, which is deliberate; its
+/// classifier is `pub(crate)`, so agreeing with it is a thing this has to do on
+/// purpose rather than by calling it.
+fn retryable(e: &HubError) -> bool {
+    match e {
+        HubError::Download(_) => true,
+        HubError::Http(e) => {
+            e.is_timeout()
+                || e.is_connect()
+                || e.status().is_some_and(|s| {
+                    s.is_server_error()
+                        || s == reqwest::StatusCode::TOO_MANY_REQUESTS
+                        || s == reqwest::StatusCode::REQUEST_TIMEOUT
+                })
+        }
+        _ => false,
+    }
+}
+
 fn missing(what: &str, dir: &Path) -> HubError {
     HubError::Io(std::io::Error::new(
         std::io::ErrorKind::NotFound,
@@ -802,6 +1105,110 @@ fn missing(what: &str, dir: &Path) -> HubError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A policy short enough to read, driven by a paused clock rather than a
+    /// real one — `start_paused` advances time only when every task is waiting
+    /// on a timer, so these run instantly and cannot be flaky under load.
+    fn quick() -> Retry {
+        Retry {
+            stall: Duration::from_secs(30),
+            retries: 2,
+        }
+    }
+
+    /// The point of the unit: a fetch that never produces a byte comes back as
+    /// an error rather than hanging, and it costs exactly the attempts asked
+    /// for. `pending()` is the stalled server — a connection that was accepted
+    /// and then said nothing looks like this from here.
+    #[tokio::test(start_paused = true)]
+    async fn a_transfer_that_never_moves_is_abandoned() {
+        let started = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let counter = started.clone();
+        let started_at = tokio::time::Instant::now();
+
+        let e = guarded(quick(), "a stalled fetch", |_progress| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            std::future::pending::<Result<PathBuf>>()
+        })
+        .await
+        .expect_err("a fetch that never moves must not succeed");
+
+        assert!(matches!(e, HubError::Stalled { tries: 3, .. }), "{e}");
+        assert_eq!(started.load(std::sync::atomic::Ordering::Relaxed), 3);
+        // Three stall windows, plus the 1s + 2s backoff between them.
+        assert_eq!(started_at.elapsed(), Duration::from_secs(30 * 3 + 3));
+        // The message has to name both knobs, since which one to turn depends
+        // on whether the link is slow or flaky and only the user knows which.
+        let text = e.to_string();
+        assert!(text.contains("--download-timeout"), "{text}");
+        assert!(text.contains("--retries"), "{text}");
+    }
+
+    /// The other half, and the reason this is a stall watchdog rather than a
+    /// `tokio::time::timeout`: a transfer that keeps reporting bytes runs for
+    /// **longer** than the stall window and is not touched. Whisper
+    /// large-v3-turbo is 1.6 GB, so any deadline is a size limit in disguise.
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_transfer_that_keeps_moving_is_left_alone() {
+        let retry = quick();
+        let got = guarded(retry, "a slow fetch", |progress| async move {
+            // Ten chunks at 20s each: 200s in total against a 30s window, so a
+            // deadline of any size that admits this admits a stall too.
+            for _ in 0..10 {
+                tokio::time::sleep(Duration::from_secs(20)).await;
+                progress.on_progress(&ProgressEvent::Download(
+                    hf_hub::progress::DownloadEvent::Complete,
+                ));
+            }
+            Ok(PathBuf::from("/done"))
+        })
+        .await
+        .expect("a transfer reporting progress must not be abandoned");
+        assert_eq!(got, PathBuf::from("/done"));
+    }
+
+    /// A failure that is not a stall is the inner layer's to retry, so it comes
+    /// straight back out — this is what stops `--retries 3` becoming 3 × 3
+    /// attempts once hf-hub's own budget is counted.
+    #[tokio::test(start_paused = true)]
+    async fn a_real_failure_is_not_retried_here() {
+        let tries = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let counter = tries.clone();
+        let e = guarded(quick(), "a missing file", |_progress| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            std::future::ready(Err::<PathBuf, _>(HubError::Download("no such file".into())))
+        })
+        .await
+        .expect_err("the error must not be swallowed");
+        assert!(matches!(e, HubError::Download(_)), "{e}");
+        assert_eq!(tries.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    /// [`retryable`] is the classifier for the one asset hf-hub never touches,
+    /// so it is the only place a 404 could start costing a retry budget.
+    #[test]
+    fn only_a_faltering_network_is_worth_another_attempt() {
+        // A short body is a transfer that stopped: the length is known up
+        // front, so this cannot mean the release changed size.
+        assert!(retryable(&HubError::Download("28 bytes".into())));
+        // A missing directory, a corrupt archive: nothing a second GET fixes.
+        assert!(!retryable(&missing("a file", Path::new("/tmp"))));
+        assert!(!retryable(&HubError::Stalled {
+            what: "x".into(),
+            stall: Duration::from_secs(1),
+            tries: 1,
+        }));
+    }
+
+    /// The default must be a policy, not the absence of one: every caller that
+    /// installs nothing — a library user, a test, `convert`, `train`, and the
+    /// bare filter — still fetches with the timeout applied.
+    #[test]
+    fn nothing_installed_still_has_a_timeout() {
+        let policy = Retry::current();
+        assert_eq!(policy, Retry::default());
+        assert!(policy.stall > Duration::ZERO);
+    }
 
     /// `default_rmvpe`'s whole job is a one-word filename change on the same
     /// first-party repo — this pins both words.

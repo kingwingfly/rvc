@@ -354,6 +354,8 @@ pub struct DownloadArgs {
     /// [default: the toolkit's RMVPE for the chosen backend].
     #[arg(long)]
     pub rmvpe: Option<String>,
+    #[command(flatten)]
+    pub download: cli_kit::DownloadOpts,
 }
 
 #[derive(Debug, Args)]

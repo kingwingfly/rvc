@@ -9,6 +9,11 @@ description = "CLI plumbing shared by the voice toolkit's binaries: logging, com
 
 [dependencies]
 burn-kit.workspace = true
+# For `DownloadOpts`, exactly as `burn-kit` is here for `parse_device`: the flag
+# is parsed once for every binary and the type it produces belongs to the kit
+# that owns the thing being configured. The edge only goes this way — `hub-kit`
+# must not depend on `cli-kit`, which is why `WeightFormat` lives over there.
+hub-kit.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
 anyhow.workspace = true
