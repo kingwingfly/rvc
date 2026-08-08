@@ -63,14 +63,8 @@ impl<B: Backend> BurnPitchEstimator<B> {
         let res = model.load_pytorch(weights).map_err(|e| {
             VcError::Burn(format!("loading rmvpe weights {}: {e}", weights.display()))
         })?;
-        if !res.missing.is_empty() {
-            return Err(VcError::Burn(format!(
-                "rmvpe weights {} are incomplete: {} params missing (first: {:?})",
-                weights.display(),
-                res.missing.len(),
-                res.missing.first()
-            )));
-        }
+        burn_kit::check_coverage(&format!("rmvpe weights {}", weights.display()), &res)
+            .map_err(VcError::Burn)?;
         tracing::info!(
             "loaded {} rmvpe params from {}",
             res.applied.len(),
@@ -140,14 +134,8 @@ impl<B: Backend> BurnContentEncoder<B> {
                 weights.display()
             ))
         })?;
-        if !res.missing.is_empty() {
-            return Err(VcError::Burn(format!(
-                "contentvec weights {} are incomplete: {} params missing (first: {:?})",
-                weights.display(),
-                res.missing.len(),
-                res.missing.first()
-            )));
-        }
+        burn_kit::check_coverage(&format!("contentvec weights {}", weights.display()), &res)
+            .map_err(VcError::Burn)?;
         tracing::info!(
             "loaded {} contentvec params from {}",
             res.applied.len(),

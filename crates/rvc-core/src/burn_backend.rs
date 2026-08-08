@@ -65,14 +65,8 @@ impl<B: Backend> BurnGenerator<B> {
                 weights.display()
             ))
         })?;
-        if !res.missing.is_empty() {
-            return Err(VcError::Burn(format!(
-                "generator weights {} are incomplete: {} params missing (first: {:?})",
-                weights.display(),
-                res.missing.len(),
-                res.missing.first()
-            )));
-        }
+        burn_kit::check_coverage(&format!("generator weights {}", weights.display()), &res)
+            .map_err(VcError::Burn)?;
         tracing::info!(
             "loaded {} generator params from {}",
             res.applied.len(),

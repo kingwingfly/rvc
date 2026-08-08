@@ -21,7 +21,12 @@ description = "RVC v2 voice-conversion inference (ort/ONNX) as a streaming Conve
 # build that wants Burn inference wants all of it, and `--backend`,
 # `--content-vec-backend` and `--rmvpe-backend` are run-time choices over what
 # is linked, never build-time ones.
-burn = ["dep:burn", "dep:burn-rvc", "dep:burn-rmvpe"]
+#
+# `burn-kit/store` is named here rather than left to arrive through `burn-rvc`:
+# the Burn paths call `burn_kit::check_coverage`, which lives behind that
+# feature, and a dependency you use but do not declare compiles only for as long
+# as some sibling happens to enable it.
+burn = ["dep:burn", "dep:burn-rvc", "dep:burn-rmvpe", "burn-kit/store"]
 # CubeCL/CUDA compute backend for the Burn generator.
 cuda = ["burn", "burn/cuda", "burn-kit/cuda"]
 # LibTorch compute backend. Needs a LibTorch install at build time — see
