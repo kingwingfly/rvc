@@ -2,9 +2,9 @@
 //!
 //! No engine's flags are defined here. Each `*-cli` crate exports the whole of
 //! its own command tree — [`rvc_cli::args::RvcCli`], [`stt_cli::SttCli`],
-//! [`tts_cli::TtsCli`], [`seedvc_cli::SeedVcCli`] — and this file only nests
-//! them, so `voice rvc convert` and `rvc convert` are one definition worn two
-//! ways.
+//! [`tts_cli::TtsCli`], [`seedvc_cli::SeedVcCli`],
+//! [`preprocess_cli::PreprocessCli`] — and this file only nests them, so
+//! `voice rvc convert` and `rvc convert` are one definition worn two ways.
 //!
 //! There is deliberately no top-level asset command. There used to be a `voice
 //! models`, which announced itself as fetching "shared model assets" and in
@@ -15,6 +15,7 @@
 use clap::{Parser, Subcommand};
 use rvc_cli::args::{CompletionsArgs, RvcCli};
 
+use preprocess_cli::PreprocessCli;
 use seedvc_cli::SeedVcCli;
 use stt_cli::SttCli;
 use tts_cli::TtsCli;
@@ -31,15 +32,15 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Voice conversion: f32le mono PCM @16 kHz on stdin, converted PCM on
-    /// stdout; `convert`, `train`, `preprocess` and `download` beside it.
+    /// stdout; `convert`, `train` and `download` beside it.
     // Every engine's tree is boxed because each carries its trainer's arguments,
     // and an enum is as large as its biggest variant.
     Rvc(Box<RvcCli>),
     /// Speech recognition: f32le mono PCM @16 kHz on stdin, text on stdout;
     /// `download` beside it.
     Stt(Box<SttCli>),
-    /// Speech synthesis: text on stdin, f32le mono PCM on stdout; `train`,
-    /// `preprocess` and `download` beside it.
+    /// Speech synthesis: text on stdin, f32le mono PCM on stdout; `train` and
+    /// `download` beside it.
     Tts(Box<TtsCli>),
     /// Zero-shot voice conversion: f32le mono PCM @16 kHz on stdin, converted
     /// PCM @22.05 kHz on stdout; `convert` and `download` beside it. The voice
@@ -48,6 +49,13 @@ pub enum Command {
     // variant `seed-vc`, and the subcommand has to be the binary's own name.
     #[command(name = "seedvc")]
     SeedVc(Box<SeedVcCli>),
+    /// Corpus preparation: `clip` recordings into per-utterance training clips,
+    /// `denoise` them. Not an engine and has no bare invocation — the
+    /// subcommand *is* which stage runs.
+    // No `#[command(name)]`: clap kebab-cases `Preprocess` to `preprocess`,
+    // which is already the binary's name. The `SeedVc` variant above needs one
+    // only because kebab-case would have spelled it `seed-vc`.
+    Preprocess(Box<PreprocessCli>),
     /// Print a shell completion script (bash, zsh, fish, powershell, elvish).
     Completions(CompletionsArgs),
 }

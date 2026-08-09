@@ -26,7 +26,6 @@ use crate::convert::ConvertArgs;
 use crate::download::DownloadArgs;
 use crate::train::TrainArgs;
 pub use cli_kit::Backend;
-pub use preprocess_kit::PreprocessArgs;
 
 /// The whole of the `tts` command tree, defined once and worn two ways: the
 /// `tts` binary flattens it at its top level, `voice` nests it under a `tts`
@@ -57,8 +56,6 @@ pub enum TtsCommand {
     // Boxed because it carries every knob of two training loops, and an enum is
     // as large as its biggest variant.
     Train(Box<TrainArgs>),
-    /// Slice a corpus into clean per-sentence clips (dead-air removed).
-    Preprocess(PreprocessArgs),
     /// Prefetch the weights synthesis needs, so the first run is offline.
     Download(DownloadArgs),
 }

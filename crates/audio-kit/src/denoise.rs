@@ -1,6 +1,11 @@
-//! Optional streaming de-hiss for the generator's output, backed by ffmpeg's
-//! `anlmdn` non-local-means de-noiser (in-process via libavfilter, not a
-//! subprocess).
+//! Streaming de-hiss, backed by ffmpeg's `anlmdn` non-local-means de-noiser
+//! (in-process via libavfilter, not a subprocess).
+//!
+//! Here rather than in an engine because two callers now want it and neither
+//! owns it: voice conversion runs it as an optional stage on the generator's
+//! output, and corpus preparation runs it over a whole recording before
+//! anything is trained on it. It knows about no model and no engine — it is a
+//! filter graph and a sample rate.
 //!
 //! Soft, close-mic speech is the hard case: the content itself (breaths,
 //! whispers, mouth sounds) is soft and *broadband* — spectrally
@@ -17,13 +22,14 @@
 //! leaves behind — and it runs ~12× faster than realtime, so the streaming
 //! filter stays realtime.
 //!
-//! The heavy lifting lives in [`audio_kit::AudioFilter`]; this is a thin,
-//! streaming wrapper that keeps the same `process`/`flush`/`reset` shape the
-//! [`crate::Converter`] expects. The graph is built lazily and, if ffmpeg
-//! cannot build it (e.g. a build without `anlmdn`), the stage fails **open** —
-//! audio passes through unchanged with a warning rather than being dropped.
+//! The heavy lifting lives in [`AudioFilter`]; this is a thin, streaming
+//! wrapper with a `process`/`flush`/`reset` shape, so a block-at-a-time
+//! converter and a whole-file batch stage drive it the same way. The graph is
+//! built lazily and, if ffmpeg cannot build it (e.g. a build without
+//! `anlmdn`), the stage fails **open** — audio passes through unchanged with a
+//! warning rather than being dropped.
 
-use audio_kit::AudioFilter;
+use crate::AudioFilter;
 
 /// Tunable de-hiss settings. Defaults are tuned for soft, breathy content
 /// (`strength` is the one knob most worth touching: raise it for more hiss
@@ -92,7 +98,8 @@ impl Denoiser {
 
     /// Clear all state so the stage can start fresh on an independent input.
     /// Drops the current filter graph; a new one is built on the next
-    /// [`Self::process`] (afftdn's noise profile must not carry across files).
+    /// [`Self::process`], because `anlmdn`'s research window would otherwise
+    /// average the start of one recording against the end of another.
     pub fn reset(&mut self) {
         self.filter = None;
         self.failed = false;

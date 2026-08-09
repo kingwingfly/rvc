@@ -1,15 +1,14 @@
 [package]
-name = "preprocess-kit"
+name = "preprocess-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "the corpus `preprocess` subcommand: slice recordings into clean per-sentence clips"
+description = "corpus preparation stages: slice on silence, de-hiss, and whatever comes next"
 
 [dependencies]
 audio-kit.workspace = true
 anyhow.workspace = true
-clap.workspace = true
 futures.workspace = true
 tokio = { workspace = true }

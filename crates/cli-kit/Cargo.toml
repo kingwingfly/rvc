@@ -14,6 +14,9 @@ burn-kit.workspace = true
 # that owns the thing being configured. The edge only goes this way — `hub-kit`
 # must not depend on `cli-kit`, which is why `WeightFormat` lives over there.
 hub-kit.workspace = true
+# For `DenoiseOpts`, and the same edge again: `audio-kit` owns the de-hiss
+# stage these flags configure, and knows nothing about clap.
+audio-kit.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
 anyhow.workspace = true

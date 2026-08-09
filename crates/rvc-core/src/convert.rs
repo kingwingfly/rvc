@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 
 use crate::backend::Generator;
 use crate::config::{ANALYSIS_SR, ConvertParams};
-use crate::denoise::{DenoiseParams, Denoiser};
+use audio_kit::{DenoiseParams, Denoiser};
 use crate::error::Result;
 
 /// Block/overlap parameters, expressed in 16 kHz input samples.

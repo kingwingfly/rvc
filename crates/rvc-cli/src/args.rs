@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 pub use cli_kit::{Backend, CompletionsArgs};
-pub use preprocess_kit::PreprocessArgs;
 
 /// The whole of the `rvc` command tree, defined once and worn two ways: the
 /// `rvc` binary flattens it at its top level, `voice` nests it under an `rvc`
@@ -34,8 +33,6 @@ pub enum RvcCommand {
     // Boxed because `TrainArgs` alone is ~320 bytes against 72 for the next
     // largest variant, and clippy is right that every parse shouldn't pay it.
     Train(Box<TrainArgs>),
-    /// Slice a corpus into clean per-sentence training clips (dead-air removed).
-    Preprocess(PreprocessArgs),
     /// Prefetch the weights a conversion needs, so the first run is offline.
     Download(DownloadArgs),
 }
@@ -72,7 +69,7 @@ impl ModelOpts {
     ///
     /// Optional to clap only because these options are also flattened beside
     /// the subcommands, for the bare filter invocation — requiring `-m` there
-    /// would require it of `train` and `preprocess` too. So "required" is
+    /// would require it of `train` and `download` too. So "required" is
     /// decided here, and callers check it before anything is fetched or loaded.
     pub fn model(&self) -> Result<&Path> {
         self.model.as_deref().context(
@@ -259,9 +256,14 @@ impl FilterArgs {
 }
 
 /// De-hiss options shared by the streaming filter and `convert`. Off unless
-/// `--denoise` is given; the tuning flags only take effect when it is. Defaults
-/// mirror
-/// [`rvc_core::DenoiseParams::default`]; `--denoise-strength` is the main knob.
+/// `--denoise` is given; the tuning flags only take effect when it is.
+///
+/// The switch is this engine's and the tuning is not: de-hiss is an *optional*
+/// stage here, on a pipeline that otherwise does not run it, so `--denoise` has
+/// a job to do — but the three `anlmdn` knobs and the `research > patch`
+/// invariant are the same wherever the stage runs, and they live in
+/// [`cli_kit::DenoiseOpts`] so this engine and corpus preparation cannot end up
+/// with two spellings or two sets of defaults.
 #[derive(Debug, Args, Clone)]
 pub struct DenoiseOpts {
     /// Remove steady background hiss from the output (ffmpeg `anlmdn`
@@ -269,19 +271,8 @@ pub struct DenoiseOpts {
     /// broadband texture of quiet, breathy content).
     #[arg(long)]
     pub denoise: bool,
-    /// De-hiss strength: raise to remove more hiss, lower if soft/breathy
-    /// texture starts to smear. Only used with `--denoise`.
-    #[arg(long = "denoise-strength", default_value_t = 0.008)]
-    pub denoise_strength: f32,
-    /// `anlmdn` patch duration (seconds): the unit compared for self-similarity;
-    /// smaller keeps finer detail. Only used with `--denoise`.
-    #[arg(long = "denoise-patch", default_value_t = 0.002)]
-    pub denoise_patch: f32,
-    /// `anlmdn` research window (seconds): how far in time it looks for similar
-    /// patches. Must exceed the patch, and sets the de-hiss latency. Only used
-    /// with `--denoise`.
-    #[arg(long = "denoise-research", default_value_t = 0.006)]
-    pub denoise_research: f32,
+    #[command(flatten)]
+    pub tuning: cli_kit::DenoiseOpts,
 }
 
 impl DenoiseOpts {
@@ -293,31 +284,13 @@ impl DenoiseOpts {
         if !self.denoise {
             return Ok(());
         }
-        anyhow::ensure!(
-            self.denoise_strength > 0.0,
-            "--denoise-strength must be positive (drop --denoise to disable the stage)"
-        );
-        anyhow::ensure!(self.denoise_patch > 0.0, "--denoise-patch must be positive");
-        // Not cosmetic: `anlmdn` searches a window for patches to compare, so a
-        // window no larger than the patch leaves it nothing to average over.
-        anyhow::ensure!(
-            self.denoise_research > self.denoise_patch,
-            "--denoise-research ({}) must exceed --denoise-patch ({}): the research \
-             window is where similar patches are looked for",
-            self.denoise_research,
-            self.denoise_patch
-        );
-        Ok(())
+        self.tuning.verify()
     }
 
     /// The [`rvc_core::DenoiseParams`] these flags describe, or `None` when
     /// `--denoise` was not passed (stage disabled).
     pub fn params(&self) -> Option<rvc_core::DenoiseParams> {
-        self.denoise.then_some(rvc_core::DenoiseParams {
-            strength: self.denoise_strength,
-            patch_secs: self.denoise_patch,
-            research_secs: self.denoise_research,
-        })
+        self.denoise.then(|| self.tuning.params())
     }
 }
 

@@ -22,7 +22,6 @@ mod analysis;
 mod backend;
 mod config;
 mod convert;
-mod denoise;
 mod dsp;
 mod encoder;
 mod error;
@@ -63,7 +62,11 @@ pub use config::{
     RMVPE_BINS, RvcConfig,
 };
 pub use convert::{Converter, StreamParams, convert_stream};
-pub use denoise::{DenoiseParams, Denoiser};
+// Re-exported rather than owned: the de-hiss stage moved down to `audio-kit`
+// once corpus preparation wanted it too, and a stage that knows about no model
+// belongs in the neutral crate. Kept in this crate's surface because
+// `Converter::with_denoise` takes it, so a caller of one needs the other.
+pub use audio_kit::{DenoiseParams, Denoiser};
 pub use dsp::{f0_to_coarse, shift_pitch, upsample_rows};
 pub use error::{Result, VcError};
 pub use features::{

@@ -2,7 +2,9 @@
 //!
 //! The bare invocation is the Unix filter: raw f32le mono PCM at 16 kHz on
 //! stdin, converted PCM on stdout. Beside it sit the subcommands — `convert`
-//! (batch files to WAV), `train`, `preprocess`, `models` and `completions`.
+//! (batch files to WAV), `train`, `download` and `completions`. Preparing a
+//! corpus is not one of them: that is the `preprocess` binary's, because
+//! slicing recordings is not voice conversion and two engines wanted it.
 //!
 //! This is the voice-conversion tool on its own. The `voice` binary hosts the
 //! same command tree under `voice rvc …`, alongside `stt` and `tts`; install

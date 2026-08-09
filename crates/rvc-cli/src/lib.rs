@@ -24,7 +24,6 @@ pub async fn run(cli: RvcCli) -> Result<()> {
         None => commands::filter::run(cli.filter).await,
         Some(RvcCommand::Convert(a)) => commands::convert::run(a).await,
         Some(RvcCommand::Train(a)) => commands::train::run(*a).await,
-        Some(RvcCommand::Preprocess(a)) => preprocess_kit::run(a).await,
         Some(RvcCommand::Download(a)) => commands::download::run(a).await,
     }
 }

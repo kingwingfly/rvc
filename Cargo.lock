@@ -1513,6 +1513,7 @@ name = "cli-kit"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "audio-kit",
  "burn-kit",
  "clap",
  "clap_complete",
@@ -5660,12 +5661,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "preprocess-kit"
+name = "preprocess-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "audio-kit",
  "clap",
+ "clap_complete",
+ "cli-kit",
+ "preprocess-core",
+ "rpath-kit",
+ "tokio",
+]
+
+[[package]]
+name = "preprocess-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "audio-kit",
  "futures",
  "tokio",
 ]
@@ -6657,7 +6671,6 @@ dependencies = [
  "cli-kit",
  "futures",
  "hub-kit",
- "preprocess-kit",
  "rpath-kit",
  "rvc-core",
  "rvc-train",
@@ -8155,7 +8168,6 @@ dependencies = [
  "cli-kit",
  "futures",
  "hub-kit",
- "preprocess-kit",
  "rpath-kit",
  "text-kit",
  "tokio",
@@ -8461,6 +8473,7 @@ dependencies = [
  "anyhow",
  "clap",
  "cli-kit",
+ "preprocess-cli",
  "rpath-kit",
  "rvc-cli",
  "seedvc-cli",

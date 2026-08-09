@@ -9,7 +9,9 @@
 //!
 //! Every engine has the same shape: the bare invocation is the filter, and
 //! everything else is a subcommand beside it (`voice rvc convert`,
-//! `voice tts train`). `voice rvc …` hosts exactly the command tree of the
+//! `voice tts train`). `voice preprocess` is the one that is not an engine —
+//! it prepares a corpus for the ones that are, so it has stages rather than a
+//! filter. `voice rvc …` hosts exactly the command tree of the
 //! standalone `rvc` binary, from the same code — install `rvc` on its own if
 //! voice conversion is all you need, and `voice` if you want the rest of the
 //! toolkit with it.
@@ -40,6 +42,10 @@ async fn main() -> Result<()> {
             Some(TtsCommand::Train(a)) => Some(a.as_ref()),
             _ => None,
         }),
+        // `preprocess` has its own, so a stage that later wants a dashboard
+        // has one place to say so — routing it through voice conversion's was
+        // only ever true by accident.
+        Command::Preprocess(_) => preprocess_cli::init_logging(),
         // No arm for `seedvc`: it is zero-shot, so it has no trainer and no
         // dashboard to route stderr around.
         _ => rvc_cli::init_logging(None),
@@ -49,6 +55,7 @@ async fn main() -> Result<()> {
         Command::Stt(c) => stt_cli::run(*c).await,
         Command::Tts(c) => tts_cli::run(*c).await,
         Command::SeedVc(c) => seedvc_cli::run(*c).await,
+        Command::Preprocess(c) => preprocess_cli::run(*c).await,
         Command::Completions(a) => cli_kit::completions(a, Cli::command()),
     }
 }

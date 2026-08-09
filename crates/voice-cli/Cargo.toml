@@ -29,6 +29,7 @@ rvc-cli.workspace = true
 stt-cli.workspace = true
 tts-cli.workspace = true
 seedvc-cli.workspace = true
+preprocess-cli.workspace = true
 cli-kit.workspace = true
 tokio = { workspace = true }
 clap.workspace = true
