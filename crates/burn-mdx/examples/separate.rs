@@ -122,10 +122,13 @@
 //! far too small to be the gap. What is left is the material: a speaking voice
 //! is not a sung one, and a stream's backing track is not a mastered production.
 //!
-//! **The partition is 34–37 dB here against 41.5 dB on one chunk.** The
-//! difference is the seams: this runs 50% overlap-add across a whole file where
-//! upstream's config asks for `num_overlap: 8`. It is a property of the chunking
-//! and not of the weights.
+//! **The partition is 34–37 dB here against 41.5 dB on one chunk.** Overlap-add
+//! seams are part of that — this runs 50% where upstream's config asks for
+//! `num_overlap: 8`, and the synthetic mode runs a single chunk with no seam at
+//! all — but they are demonstrably **not all of it**: the mono fold above has
+//! the same file, the same hop and therefore the same seams, and reads 37.5 dB
+//! against the stereo run's 34.9. So the partition reading is content-sensitive,
+//! which is worth knowing before treating a change in it as a regression.
 //!
 //! ## What `stt` says, which is the closest thing to listening
 //!
@@ -142,10 +145,12 @@
 //!   continuous bed means the recording *has* no silence — so a corpus behind
 //!   music cannot be sliced into sentences at all until the bed comes off. That
 //!   is a larger practical gain than the 6.5 dB suggests.
-//! - **Two of the 14 are hallucinations** (`Pelsa made a bangle`, `拜拜`) in
-//!   near-silent frames the mixture's longer segments had swallowed. Emptier
-//!   gaps give Whisper more room to invent, so anything consuming the stems
-//!   wants a duration or confidence floor.
+//! - **The stem also invents.** One segment is a clear hallucination
+//!   (`Pelsa made a bangle`, English in a Chinese-pinned run) and one is a
+//!   0.37 s fragment too short to judge from a transcript — both in near-silent
+//!   frames the mixture's longer segments had swallowed. Emptier gaps give
+//!   Whisper more room to invent, so anything consuming the stems wants a
+//!   duration or confidence floor.
 //!
 //! # Cost
 //!

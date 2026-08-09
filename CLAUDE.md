@@ -850,8 +850,10 @@ Each model therefore needs a second check that exercises arithmetic:
   which is one stem following the intermittent speech and the other the
   continuous bed; the music removed from the vocals stem is **5–6.5 dB** where
   the bed is continuous, against the 15–20 dB this model reaches on a song. The
-  partition holds at 34–37 dB across a whole file, the drop from 41.5 being the
-  overlap-add seams rather than the weights.
+  partition holds at 34–37 dB across a whole file. Overlap-add seams are part of
+  the drop from 41.5 and **not all of it** — the mono fold below has the same
+  file and the same seams and reads 37.5 — so that reading is content-sensitive
+  and a change in it is not on its own a regression.
 
   Three things about that measurement not to re-derive:
 
@@ -871,10 +873,10 @@ Each model therefore needs a second check that exercises arithmetic:
     them 18.8 s of merged speech — and the vocals stem **14**, one per
     utterance, with the same words. `audio_kit`'s slicer cuts on silence and a
     continuous bed leaves none, so a corpus recorded behind music cannot be
-    sliced into sentences at all until the bed comes off. Two of the 14 are
-    Whisper hallucinations in the newly-emptied gaps, so a consumer wants a
-    duration floor. **Pin `--language`**: left to detect, the two files disagree
-    and the comparison stops meaning anything.
+    sliced into sentences at all until the bed comes off. One of the 14 is a
+    clear Whisper hallucination in a newly-emptied gap and one is a 0.37 s
+    fragment, so a consumer wants a duration floor. **Pin `--language`**: left to
+    detect, the two files disagree and the comparison stops meaning anything.
 
 ### The semantic-token boundary (`burn-gptsovits::quantizer`)
 25 Hz token ids over a 1024-entry codebook are what the two stages agree on: T2S
