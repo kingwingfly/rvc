@@ -1,7 +1,7 @@
 //! Kaldi's filterbank — **the only input CAM++ has ever been shown.**
 //!
 //! `torchaudio.compliance.kaldi.fbank` in Burn, because nothing else in the
-//! workspace computes it and [`crate::campplus`] cannot run without it. Seed-VC's
+//! workspace computes it and [`CamPPlus`](crate::CamPPlus) cannot run without it. Seed-VC's
 //! `inference.py` writes the speaker encoder's input in two lines:
 //!
 //! ```text
@@ -17,8 +17,8 @@
 //!
 //! # Not the mel the rest of this crate speaks
 //!
-//! [`burn_vits::Spectral`] is 22.05 kHz, 80 band, log — and so is this, which is
-//! exactly the trap [`crate::campplus`]'s module docs name. They are different
+//! `burn_vits::Spectral` is 22.05 kHz, 80 band, log — and so is this, which is
+//! exactly the trap the crate docs name. They are different
 //! transforms for different consumers, and every difference below is a place
 //! where substituting one for the other would run, produce a plausible tensor,
 //! and feed the network a distribution it was never trained on:
@@ -96,7 +96,7 @@ const POVEY_EXPONENT: f64 = 0.85;
 /// Seed-VC ever uses.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FbankConfig {
-    /// 16 kHz. Equal to [`crate::config::CONTENT_SR`] and not the same
+    /// 16 kHz. Equal to `burn_seedvc::config::CONTENT_SR` and not the same
     /// constraint — Whisper and CAM++ were each trained at 16 kHz independently,
     /// so the two rates agreeing is a coincidence to keep rather than to share.
     pub sample_rate: usize,
@@ -154,7 +154,7 @@ impl FbankConfig {
 
 /// Kaldi's mel scale, `1127·ln(1 + f/700)`.
 ///
-/// Not the Slaney scale [`burn_vits::Spectral`] and Whisper both use: that one is
+/// Not the Slaney scale `burn_vits::Spectral` and Whisper both use: that one is
 /// linear below 1 kHz and logarithmic above, where this is one expression over
 /// the whole range. They disagree by tens of hertz in the middle of the band.
 fn mel(hz: f64) -> f64 {
@@ -260,7 +260,7 @@ impl<B: Backend> Fbank<B> {
 
     /// `wav [batch, samples]` at the configured rate → `[batch, frames, bins]`.
     ///
-    /// **Frames before bins**, which is what [`crate::campplus::CamPPlus::forward`]
+    /// **Frames before bins**, which is what [`CamPPlus::forward`](crate::CamPPlus::forward)
     /// takes, and **the per-clip mean is already subtracted** — see the module
     /// docs for why that is not the caller's job.
     ///

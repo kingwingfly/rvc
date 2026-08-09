@@ -1,22 +1,49 @@
-//! CAM++ — **the speaker embedding Seed-VC actually conditions on.**
+//! CAM++ — a speaker embedding, in [Burn](https://burn.dev).
 //!
-//! A reference clip in, one 192-dim timbre vector out. This is the network
-//! `inference.py` builds as `CAMPPlus(feat_dim=80, embedding_size=192)`, and its
-//! output is the `style2` the diffusion transformer is conditioned on — so
-//! without it there is no zero-shot conversion at all.
+//! A reference clip in, one 192-dim timbre vector out, over the Kaldi
+//! filterbank in [`fbank`] that is the only front end it has ever been shown.
+//! This is the network Seed-VC's `inference.py` builds as
+//! `CAMPPlus(feat_dim=80, embedding_size=192)`, and its output is the `style2`
+//! the diffusion transformer is conditioned on — so without it there is no
+//! zero-shot conversion at all.
 //!
-//! It is **not** [`crate::style_encoder`], which is an 18-tensor subtree of the
-//! Seed-VC checkpoint that upstream's `build_model` never assembles. That module
-//! documents why it is a fossil; this one is its live replacement.
+//! **This is its own crate because a second reader is arriving**, and the
+//! workspace rule is that anything two of them need moves to a neutral crate
+//! first — the same move, for the same reason, that lifted `burn-hubert` out of
+//! `burn-gptsovits` when RVC's ContentVec became its second reader. Speaker
+//! diarisation wants exactly this: one embedding per clip, compared by cosine.
+//! `burn-seedvc` re-exports it, so `burn_seedvc::campplus` and
+//! `burn_seedvc::fbank` still resolve and no call site changed.
+//!
+//! It is **not** `burn_seedvc::style_encoder`, which is an 18-tensor subtree of
+//! the Seed-VC checkpoint that upstream's `build_model` never assembles. That
+//! module documents why it is a fossil; this crate is its live replacement.
+//!
+//! Nothing here names a compute backend, and there are no app dependencies.
+//!
+//! # Licence: GPL-3.0-only, like the rest of the workspace
+//!
+//! **The weights are Apache-2.0 and this port is not, and the distinction is
+//! easy to get backwards.** `campplus_cn_common.bin` comes from `funasr/campplus`
+//! and the original 3D-Speaker model carries an Apache-2.0 header — but the code
+//! below was written by reading Seed-VC's vendored copy under
+//! `modules/campplus/`, and Seed-VC is GPL-3.0. A port written from reading GPL
+//! source is a derivative work, so this crate inherits
+//! `license.workspace = true` = `GPL-3.0-only` like every other member.
+//!
+//! So: **a crate that must stay permissive cannot depend on this one**, however
+//! permissive the checkpoint it loads is. Apache-2.0 into GPL-3.0 is the
+//! compatible direction, which is what makes the combination legal — not what
+//! makes the result permissive.
 //!
 //! # The weights live in somebody else's release
 //!
 //! `campplus_cn_common.bin` (28 MB, 937 tensors) from Hugging Face
-//! `funasr/campplus` — the repository `inference.py` names verbatim. It is a
-//! 3D-Speaker model, and the architecture below is a port of the copy Seed-VC
-//! vendors under `modules/campplus/`, which carries 3D-Speaker's Apache-2.0
-//! header. Apache-2.0 into GPL-3.0 is the compatible direction, so this file
-//! does not widen the workspace's licence beyond what Seed-VC already imposed.
+//! `funasr/campplus` — the repository Seed-VC's `inference.py` names verbatim.
+//! It loads at **815 applied / 0 missing / 122 unused**, the 122 being one
+//! `num_batches_tracked` per norm: a training counter PyTorch stores as a buffer
+//! and inference never reads. That third number is the **raw** `unused` count,
+//! not one with the expected entries already subtracted.
 //!
 //! # What it consumes is not this crate's mel, and that is the trap
 //!
@@ -57,7 +84,7 @@
 //!   which is how a speaker-level network suppresses content-level detail.
 //! - **Statistics pooling** — mean and standard deviation over time, concatenated
 //!   — is what makes the reference length irrelevant, exactly as the average pool
-//!   does in [`crate::style_encoder`].
+//!   does in `burn_seedvc::style_encoder`.
 //! - A final `1024 → 192` pointwise layer and a non-affine batch norm.
 //!
 //! # Inference only
@@ -81,6 +108,15 @@
 //! - **`eps = 1e-5`** is PyTorch's `BatchNorm` default rather than anything the
 //!   checkpoint records. Upstream never passes an `eps`, so this follows from
 //!   reading the constructor, but no tensor pins it.
+
+// The front end travels with the network on purpose. CAM++ has no input
+// normalisation of its own, so the per-clip mean subtraction upstream writes at
+// the *call site* lives inside `Fbank::forward` — see that module's docs. It was
+// dropped twice in one week while this engine was being built, and the failure
+// is silent: the embedding stays finite and repeatable and quietly starts keying
+// on the recording's channel rather than on the speaker. Splitting the two
+// crates would put that omission one forgotten dependency away.
+pub mod fbank;
 
 use std::error::Error;
 use std::path::Path;
@@ -577,7 +613,7 @@ impl<B: Backend> CamPPlus<B> {
     /// `features`: a Kaldi filterbank, `[batch, frames, bins]` → `[batch, embedding]`.
     ///
     /// **Frames before bins**, which is upstream's order and the opposite of
-    /// [`crate::style_encoder::StyleEncoder::forward`] — see the module docs, and
+    /// `burn_seedvc::style_encoder::StyleEncoder::forward` — see the module docs, and
     /// note that both are 80 wide, so the two transpositions of the same clip
     /// differ only in which axis is which and neither will fail loudly.
     ///

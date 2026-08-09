@@ -15,12 +15,32 @@
 //! `DiT_seed_v2_uvit_whisper_small_wavenet_bigvgan_pruned.pth` (440 MB), the
 //! whole of which is **302 tensors / 110,035,232 parameters**:
 //!
-//! | prefix | tensors | module |
+//! | prefix | tensors | module | applied/missing/unused |
+//! |---|---|---|---|
+//! | `net.cfm.module.estimator.*` | 255 | [`dit`] and [`wavenet`] | 255/0/0 |
+//! | `net.length_regulator.module.*` | 22 | [`length_regulator`] | 22/0/0 (+8 norm aliases) |
+//! | `net.style_encoder.module.*` | 18 | [`style_encoder`] | 18/0/0 |
+//! | `net.vq.module.quantizers.*` | 7 | [`vq`] | 7/0/0 |
+//!
+//! and the two networks that arrive in their own releases:
+//!
+//! | file | module | applied/missing/unused |
 //! |---|---|---|
-//! | `net.cfm.module.estimator.*` | 255 | [`dit`] and [`wavenet`] |
-//! | `net.length_regulator.module.*` | 22 | [`length_regulator`] |
-//! | `net.style_encoder.module.*` | 18 | [`style_encoder`] |
-//! | `net.vq.module.quantizers.*` | 7 | [`vq`] |
+//! | `campplus_cn_common.bin` | [`campplus`] | **815/0/122** |
+//! | `bigvgan_generator.pt` | [`bigvgan`] | 783/0/0 |
+//!
+//! The 122 are one `num_batches_tracked` per norm — a training counter PyTorch
+//! stores as a buffer and inference never reads. The 8 beside the length
+//! regulator are norm `weight`/`bias` pairs consumed under Burn's `gamma`/`beta`
+//! names, which `burn-store` counts as unconsumed *while having applied them*.
+//! Both are subtracted rather than hidden, and what is left is 0 everywhere.
+//!
+//! **`Σ applied over the four blocks above == the checkpoint's own tensor
+//! count`** is the assertion that makes this a test rather than a printout, and
+//! it is computed from the file rather than written down: a subtree nobody
+//! ported cannot be seen in any single block's `unused`, because each loader's
+//! remap strips only its own prefix and everything else is filed as "somebody
+//! else's". It shows up in the sum, and nowhere else.
 //!
 //! Two of the six networks are **not in this file at all** — the content encoder
 //! is `openai/whisper-small` and the vocoder is
@@ -38,8 +58,13 @@
 //! complete run, and each flag adds its own block instead of being required to
 //! reach the next.
 //!
+//! `--strict` turns every one of those numbers into an exit code, which is what
+//! makes this runnable from a script. Without it the example prints a fault and
+//! exits 0, which is how a load that reported 90 `MISSING` lines could look like
+//! a clean run to anything that was not reading the output.
+//!
 //! ```text
-//! cargo run -p burn-seedvc --example load -- [--backend ndarray|cuda|tch] \
+//! cargo run -p burn-seedvc --example load -- [--backend ndarray|cuda|tch] [--strict] \
 //!     <ckpt.pth> [--campplus campplus_cn_common.bin] [--bigvgan bigvgan_generator.pt]
 //! ```
 
@@ -63,6 +88,46 @@ struct Load {
     campplus: Option<String>,
     /// `bigvgan_generator.pt`, a third file again.
     bigvgan: Option<String>,
+    /// Exit non-zero on any fault, rather than printing it and exiting 0.
+    strict: bool,
+}
+
+/// What one module's load came to: how much of the checkpoint it claimed, and
+/// everything wrong with it.
+struct Coverage {
+    /// Tensors this module claimed. Summed over the modules that read the
+    /// Seed-VC checkpoint, this is what has to equal the file's own tensor
+    /// count — see the module docs for why no single block's `unused` can
+    /// substitute for it.
+    applied: usize,
+    /// Already-phrased complaints, empty when the module loaded cleanly. What
+    /// `--strict` exits on.
+    faults: Vec<String>,
+}
+
+/// Is `key` a norm's `weight`/`bias`, reported unused but in fact applied under
+/// Burn's `gamma`/`beta` names?
+///
+/// **The test is the last path segment, not a substring of the parent path**,
+/// and that is a correction rather than a nicety. `stem.contains("norm")` files
+/// every orphaned key that merely *sits under* a norm-ish parent as a benign
+/// alias: `AdaLayerNorm` holds a plain `Linear` called `project_layer`, so a
+/// genuinely unclaimed `blocks.0.attention_norm.project_layer.weight` matched
+/// the substring and vanished into the count nobody reads. So did anything under
+/// `ffn_norm.*` or `transformer.norm.*`.
+///
+/// A compound name has to keep matching, which is why this is not simply
+/// `== "norm"`: the checkpoint's own aliases arrive as `blocks.N.norm.weight`
+/// here and as `attention_norm.weight` elsewhere, and both are real norms.
+fn is_norm_alias(key: &str) -> bool {
+    let Some((stem, leaf)) = key.rsplit_once('.') else {
+        return false;
+    };
+    if leaf != "weight" && leaf != "bias" {
+        return false;
+    }
+    let field = stem.rsplit('.').next().unwrap_or(stem);
+    field == "norm" || field.ends_with("_norm")
 }
 
 /// Applied/missing/unused for one module, in the form every `burn-*` crate's
@@ -75,22 +140,26 @@ struct Load {
 ///   them leaves the other ~280 tensors unconsumed. Those still carry their
 ///   `net.<module>.` prefix, because each loader's remaps strip only its own —
 ///   which is exactly what separates "belongs to somebody else" from "belongs
-///   here and did not land".
+///   here and did not land". It is a *presumption*, though, and a weak one: a
+///   loader strips one prefix, so a tensor at `net.cfm.module.<something-else>.*`
+///   keeps its `net.` and is filed under somebody else's name while belonging to
+///   nobody. Only the sum over every block catches that, which is why this
+///   returns [`Coverage::applied`] rather than printing it and forgetting it.
 /// - A normalisation layer's `weight`/`bias` are consumed under Burn's
 ///   `gamma`/`beta` names and the store still counts the original keys as
-///   unconsumed, so they appear here *having been applied*.
+///   unconsumed, so they appear here *having been applied* — [`is_norm_alias`].
 ///
 /// **What is left after both is real, and 0 is the only acceptable number.**
-fn report(label: &str, result: &burn_store::ApplyResult) {
+fn report(label: &str, result: &burn_store::ApplyResult) -> Coverage {
     let mine: Vec<&String> = result
         .unused
         .iter()
         .filter(|k| !k.starts_with("net."))
         .collect();
-    let (norms, real): (Vec<&String>, Vec<&String>) = mine.iter().copied().partition(|k| {
-        let stem = k.rsplit_once('.').map(|(s, _)| s).unwrap_or(k);
-        (k.ends_with(".weight") || k.ends_with(".bias")) && stem.contains("norm")
-    });
+    let (norms, real): (Vec<&String>, Vec<&String>) = mine
+        .iter()
+        .copied()
+        .partition(|k| is_norm_alias(k.as_str()));
     println!(
         "\n{label}\n  applied : {}\n  missing : {}\n  unused  : {} in this subtree ({} norm \
          gamma/beta, reported but applied; {} genuinely unused) + {} belonging to other \
@@ -112,6 +181,43 @@ fn report(label: &str, result: &burn_store::ApplyResult) {
     for e in &result.errors {
         println!("    ERROR {e:?}");
     }
+    Coverage {
+        applied: result.applied.len(),
+        faults: faults_for(label, result, real.len()),
+    }
+}
+
+/// Everything about one load that `--strict` refuses to exit 0 on.
+///
+/// **`errors` is tested first, and not only for tidiness.** `burn-store`'s
+/// applier computes `missing` as `visited && !applied && !skipped && !errored`,
+/// so a tensor that failed on a shape mismatch is excluded from `missing` — read
+/// the two counts in the other order and a module whose every weight was the
+/// wrong shape reports full coverage.
+///
+/// `applied == 0` is called out separately because it is the observed shape of
+/// pointing a loader at the wrong file: the read succeeds, every key misses, and
+/// the `Ok` is what makes it look like a load rather than a mistake.
+fn faults_for(label: &str, result: &burn_store::ApplyResult, real_unused: usize) -> Vec<String> {
+    let mut faults = Vec::new();
+    if !result.errors.is_empty() {
+        faults.push(format!("{label}: {} tensors errored", result.errors.len()));
+    }
+    if !result.missing.is_empty() {
+        faults.push(format!("{label}: {} tensors missing", result.missing.len()));
+    }
+    if real_unused > 0 {
+        faults.push(format!(
+            "{label}: {real_unused} checkpoint tensors nothing claimed"
+        ));
+    }
+    if result.applied.is_empty() {
+        faults.push(format!(
+            "{label}: nothing applied at all — the usual cause is the wrong file, \
+             which reads cleanly and matches no key"
+        ));
+    }
+    faults
 }
 
 impl common::Job for Load {
@@ -155,33 +261,20 @@ impl common::Job for Load {
         // Every loader is handed the whole 302-tensor checkpoint, so `unused`
         // arrives full of other modules' weights. Each block filters it down to
         // its own subtree — the only number that says anything about the port.
+        // Every block that reads the Seed-VC checkpoint pushes its `applied`
+        // here. The sum is the only check that sees a subtree nobody ported —
+        // see the module docs.
+        let mut claimed = Vec::new();
+        let mut faults = Vec::new();
+
         let cfg = StyleEncoderConfig::default();
         let mut style = StyleEncoder::<B>::new(&cfg, device);
         let res = style
             .load_pytorch(&self.checkpoint)
             .expect("failed to load net.style_encoder");
-        // `load_pytorch` strips `net.style_encoder.module.` off the keys it
-        // claims, so anything still wearing a `net.` prefix belongs to someone
-        // else and is not this module's business.
-        let unused: Vec<_> = res
-            .unused
-            .iter()
-            .filter(|key| !key.starts_with("net."))
-            .collect();
-        println!("\nstyle_encoder (net.style_encoder.module.*)");
-        println!("  applied : {}", res.applied.len());
-        println!("  missing : {}", res.missing.len());
-        for (name, why) in &res.missing {
-            println!("      MISSING {name}  ({why})");
-        }
-        println!("  unused  : {} (in this subtree)", unused.len());
-        for name in &unused {
-            println!("      UNUSED {name}");
-        }
-        println!("  errors  : {}", res.errors.len());
-        for e in &res.errors {
-            println!("      ERROR {e:?}");
-        }
+        let cov = report("style_encoder (net.style_encoder.module.*)", &res);
+        claimed.push(cov.applied);
+        faults.extend(cov.faults);
 
         // Coverage proves the layout, never the arithmetic — this repo has
         // shipped a port that loaded at 100% and produced garbage. The cheapest
@@ -216,7 +309,9 @@ impl common::Job for Load {
         let res = dit
             .load_pytorch(&self.checkpoint)
             .expect("failed to read checkpoint");
-        report("net.cfm.module.estimator.* (dit + wavenet)", &res);
+        let cov = report("net.cfm.module.estimator.* (dit + wavenet)", &res);
+        claimed.push(cov.applied);
+        faults.extend(cov.faults);
 
         // The same reasoning as the timbre encoder's check below, applied to the
         // network that has the most ways to load perfectly and compute nonsense:
@@ -246,7 +341,9 @@ impl common::Job for Load {
         let res = regulator
             .load_pytorch(&self.checkpoint)
             .expect("failed to read checkpoint");
-        report("net.length_regulator.module.*", &res);
+        let cov = report("net.length_regulator.module.*", &res);
+        claimed.push(cov.applied);
+        faults.extend(cov.faults);
 
         // CAMPPlus, if its checkpoint was named. It is deliberately optional:
         // `campplus_cn_common.bin` is a 28 MB file from somebody else's release
@@ -283,6 +380,7 @@ impl common::Job for Load {
             for e in &res.errors {
                 println!("      ERROR {e:?}");
             }
+            faults.extend(faults_for("campplus_cn_common.bin", &res, real.len()));
 
             // Same forward check as the style encoder's, for the same reason and
             // against the same failure: an encoder that ignores its input
@@ -343,7 +441,33 @@ impl common::Job for Load {
         let res = vq
             .load_pytorch(&self.checkpoint)
             .expect("failed to read checkpoint");
-        report("net.vq.module.quantizers.*", &res);
+        let cov = report("net.vq.module.quantizers.*", &res);
+        claimed.push(cov.applied);
+        faults.extend(cov.faults);
+
+        // **The check no single block can make.** Each loader's remap strips
+        // only its own prefix, so every block files the other ~280 tensors as
+        // "belonging to other modules" without ever asking whether some module
+        // actually claimed them. A subtree nobody ported is invisible in all
+        // four `unused` counts and shows up only here, as a shortfall of exactly
+        // its own size. Computed from the file rather than written down, so a
+        // different checkpoint is checked against itself.
+        let total: usize = claimed.iter().sum();
+        println!(
+            "\nΣ applied over the four blocks reading this checkpoint : {total} of {} tensors",
+            tensors.len()
+        );
+        if total != tensors.len() {
+            let short = tensors.len() - total;
+            println!(
+                "    UNCLAIMED {short} tensors are in this checkpoint and no module took them — \
+                 the prefix table above says which"
+            );
+            faults.push(format!(
+                "{short} of {} checkpoint tensors nothing claimed",
+                tensors.len()
+            ));
+        }
 
         // The vocoder is the one module whose weights are **not** in the file
         // above, so it is the one block that can be given a whole checkpoint of
@@ -361,7 +485,9 @@ impl common::Job for Load {
             // overwrite it.
             let derived = vocoder.derived_filter();
             let res = vocoder.load_pytorch(path).expect("failed to load bigvgan");
-            report("bigvgan (its own checkpoint)", &res);
+            // Not added to `claimed`: this is a different file, so its tensors
+            // are not part of the Seed-VC checkpoint's sum.
+            faults.extend(report("bigvgan (its own checkpoint)", &res).faults);
 
             // The anti-aliasing kernels are a deterministic function of the
             // filter design, and upstream stores them anyway because
@@ -385,6 +511,23 @@ impl common::Job for Load {
                 "\nbigvgan: skipped — pass `nvidia/bigvgan_v2_22khz_80band_256x`'s \
                  `bigvgan_generator.pt` as a second argument to cover it"
             );
+        }
+
+        // The verdict. Printing a fault and exiting 0 is what let a load that
+        // reported 90 `MISSING` lines pass for a clean run, so `--strict` is the
+        // form anything automated should use; without it the numbers above are
+        // still all there, and reading them is the caller's job.
+        if faults.is_empty() {
+            println!("\nall blocks clean");
+        } else {
+            println!("\n{} fault(s):", faults.len());
+            for f in &faults {
+                println!("  - {f}");
+            }
+            if self.strict {
+                std::process::exit(1);
+            }
+            println!("note: exiting 0 anyway — pass --strict to make this an exit code");
         }
     }
 }
@@ -413,9 +556,13 @@ fn main() {
     let (backend, mut args) = common::parse_args();
     let campplus = take_value(&mut args, "campplus");
     let bigvgan = take_value(&mut args, "bigvgan");
+    // A bare switch, so it cannot go through `take_value` — that one consumes
+    // the following argument, which here is the checkpoint.
+    let strict = args.iter().any(|a| a == "--strict");
+    args.retain(|a| a != "--strict");
     let Some(checkpoint) = args.first() else {
         eprintln!(
-            "usage: load [--backend ndarray|cuda|tch] <checkpoint> \
+            "usage: load [--backend ndarray|cuda|tch] [--strict] <checkpoint> \
              [--campplus campplus_cn_common.bin] [--bigvgan bigvgan_generator.pt]"
         );
         std::process::exit(2);
@@ -427,6 +574,7 @@ fn main() {
             checkpoint: checkpoint.clone(),
             campplus,
             bigvgan,
+            strict,
         },
     );
 }
