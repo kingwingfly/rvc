@@ -53,6 +53,10 @@ pub enum PreprocessCommand {
 /// Flattened rather than repeated, so the input handling cannot differ between
 /// two stages that are meant to compose — the output of one is a legitimate
 /// input to the next, and that only holds while they agree on what an input is.
+///
+/// `-o` is deliberately *not* here: every stage has one, but each names its own
+/// default after what it produces, and a shared default would have to be one of
+/// them or a directory that describes nothing.
 #[derive(Debug, Args, Clone)]
 pub struct IoArgs {
     /// Input audio files and/or directories (directories are expanded
