@@ -333,6 +333,10 @@ cargo run -p burn-seedvc --example vocode     # BigVGAN: does the waveform track
 cargo run -p burn-seedvc --example content    # whisper-small + the length regulator
 cargo run -p burn-rvc    --example infer      # one generator forward pass
 cargo run -p burn-mdx --example separate --features tch  # stems partition the mix, 41.5 dB
+cargo run -p burn-mdx --example separate --features tch -- --mixture <song.wav> <ckpt>
+# ...the second form is the *real*-recording mode: no stems exist, so it reports
+# no SI-SDR against a source and every reading is a contrast. 5-6.5 dB of bed
+# removal, and the reason that is not a hedge is in the example's module doc.
 cargo run -p seedvc-core --features tch --example convert  # the engine, end to end
 cargo run -p seedvc-core --features tch --example stream   # the same, through the filter
 cargo run -p rvc-core --features tch --example f0_runtimes # Burn vs ORT F0, median 0.005–1.40 Hz
@@ -831,12 +835,48 @@ Each model therefore needs a second check that exercises arithmetic:
   SI-SDR, and a solo source splits in *opposite directions* depending on which
   one went in (4.7 dB and 7.3 dB rejection). Neither survives a transposed
   U-net, a batch norm where an instance norm belongs or a scrambled stem axis,
-  because nothing downstream re-imposes them. **Separation quality is a
-  separate question and is deliberately left open**: every mixture-level SI-SDR
-  sits within a decibel of doing nothing, which is most likely the input —
-  MDX23C was trained on sung vocals inside real productions, and the check
-  feeds it dry close-mic speech over a synthesised chord. Settling it needs a
-  real music mixture, which this repository does not have.
+  because nothing downstream re-imposes them. That synthetic mixture says
+  nothing about **quality**, because it is out of distribution on both sides —
+  every mixture-level SI-SDR in it sits within a decibel of doing nothing.
+
+  **The quality question has since been measured on a real mixture, and the two
+  answers must not be merged.** The user supplied a 19.8-minute stream — a
+  streamer talking over somebody else's music — and `--mixture <file>` is the
+  reference-free mode that reads it: no source exists, so no SI-SDR against one
+  is reported, and every number is a contrast the mixture is measured under the
+  same way. **It separates, modestly.** Across four excerpts the vocals stem's
+  loud/quiet contrast comes out *above* the mixture's (16.8–25.7 against
+  12.9–22.5 dB) while the instrumental stem's comes out *below* it (7.7–16.7),
+  which is one stem following the intermittent speech and the other the
+  continuous bed; the music removed from the vocals stem is **5–6.5 dB** where
+  the bed is continuous, against the 15–20 dB this model reaches on a song. The
+  partition holds at 34–37 dB across a whole file. Overlap-add seams are part of
+  the drop from 41.5 and **not all of it** — the mono fold below has the same
+  file and the same seams and reads 37.5 — so that reading is content-sensitive
+  and a change in it is not on its own a regression.
+
+  Three things about that measurement not to re-derive:
+
+  - **Read the gaps at 250 ms, not at one second.** A between-sentence gap is a
+    few hundred milliseconds, so at a one-second window no "quiet" frame is
+    speech-free and the verdict *inverts*: the same stems on the same 60 s gave
+    2.1 dB of removal and a vocals contrast below the mixture's, which reads as
+    a model that separated nothing, where 250 ms gives 6.5 dB and a contrast
+    above it.
+  - **The input is near-mono, and it is not the explanation.** The side channel
+    sits 14–19 dB under the mid, so the stereo cue a stereo-native separator
+    wants is mostly absent — but folding to true mono and re-running costs only
+    1.4 dB (6.5 → 5.1). What is left is the material: a *speaking* voice is not
+    a sung one. Which also means a mono corpus loses almost nothing.
+  - **The practical gain is bigger than the decibels.** Transcribing the same
+    60 s with `stt convert -l zh`, the mixture yields **5** segments — one of
+    them 18.8 s of merged speech — and the vocals stem **14**, one per
+    utterance, with the same words. `audio_kit`'s slicer cuts on silence and a
+    continuous bed leaves none, so a corpus recorded behind music cannot be
+    sliced into sentences at all until the bed comes off. One of the 14 is a
+    clear Whisper hallucination in a newly-emptied gap and one is a 0.37 s
+    fragment, so a consumer wants a duration floor. **Pin `--language`**: left to
+    detect, the two files disagree and the comparison stops meaning anything.
 
 ### The semantic-token boundary (`burn-gptsovits::quantizer`)
 25 Hz token ids over a 1024-entry codebook are what the two stages agree on: T2S
