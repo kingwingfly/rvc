@@ -81,7 +81,8 @@ async fn main() {
     // and holding the other half fixed is what makes the difference attributable.
     let mut onnx = FeatureExtractor::from_parts(
         rvc_core::onnx_content_encoder(Path::new(content_onnx)).expect("contentvec.onnx"),
-        rvc_core::onnx_pitch_estimator(Path::new(rmvpe_onnx)).expect("rmvpe.onnx"),
+        rvc_core::onnx_pitch_estimator(Path::new(rmvpe_onnx), FeatureExtractor::F0_THRESHOLD)
+            .expect("rmvpe.onnx"),
     );
     let mut burn = FeatureExtractor::from_parts(
         rvc_core::onnx_content_encoder(Path::new(content_onnx)).expect("contentvec.onnx"),

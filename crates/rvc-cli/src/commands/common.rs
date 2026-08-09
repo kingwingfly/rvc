@@ -101,7 +101,8 @@ pub async fn build_converter(
     // has no arm to take and says so rather than failing to link.
     let features_extractor = tokio::task::block_in_place(|| {
         let content_model = build_content_encoder(features.content, &content, device)?;
-        let rmvpe_model = build_pitch_estimator(features.rmvpe, &rmvpe, device)?;
+        let rmvpe_model =
+            build_pitch_estimator(features.rmvpe, &rmvpe, device, opts.f0_threshold)?;
         anyhow::Ok(rvc_core::FeatureExtractor::from_parts(
             content_model,
             rmvpe_model,
@@ -200,32 +201,30 @@ fn build_content_encoder(
 /// Build the pitch estimator on whichever backend `--rmvpe-backend` resolved to.
 ///
 /// Boxed for the same reason as [`build_content_encoder`].
+///
+/// `threshold` is `--f0-threshold`, and every arm gets it: the voicing floor is
+/// a property of the conversion, not of the runtime that computes it, and the
+/// 7–87 frames the two runtimes already disagree about are frames sitting on
+/// exactly this boundary. Handing one backend the flag and another the constant
+/// would turn a tuning knob into a second reason the runtimes differ.
 fn build_pitch_estimator(
     backend: Backend,
     path: &std::path::Path,
     device: DeviceSpec,
+    threshold: f32,
 ) -> Result<Box<dyn rvc_core::PitchEstimator>> {
     let estimator = match backend {
-        Backend::Onnx => {
-            rvc_core::onnx_pitch_estimator(path).context("failed to load RMVPE on ONNX Runtime")?
-        }
+        Backend::Onnx => rvc_core::onnx_pitch_estimator(path, threshold)
+            .context("failed to load RMVPE on ONNX Runtime")?,
         #[cfg(feature = "cuda")]
-        Backend::Cuda => {
-            rvc_core::cuda_pitch_estimator(path, rvc_core::FeatureExtractor::F0_THRESHOLD, device)
-                .context("failed to load RMVPE on the CubeCL/CUDA backend")?
-        }
+        Backend::Cuda => rvc_core::cuda_pitch_estimator(path, threshold, device)
+            .context("failed to load RMVPE on the CubeCL/CUDA backend")?,
         #[cfg(feature = "tch")]
-        Backend::Tch => rvc_core::libtorch_pitch_estimator(
-            path,
-            rvc_core::FeatureExtractor::F0_THRESHOLD,
-            device,
-        )
-        .context("failed to load RMVPE on the LibTorch backend")?,
+        Backend::Tch => rvc_core::libtorch_pitch_estimator(path, threshold, device)
+            .context("failed to load RMVPE on the LibTorch backend")?,
         #[cfg(feature = "wgpu")]
-        Backend::Wgpu => {
-            rvc_core::wgpu_pitch_estimator(path, rvc_core::FeatureExtractor::F0_THRESHOLD, device)
-                .context("failed to load RMVPE on the WebGPU backend")?
-        }
+        Backend::Wgpu => rvc_core::wgpu_pitch_estimator(path, threshold, device)
+            .context("failed to load RMVPE on the WebGPU backend")?,
         Backend::Auto => unreachable!("resolved before this point"),
         // Only reachable on a `--no-default-features` build.
         #[allow(unreachable_patterns)]
@@ -303,6 +302,11 @@ pub fn build_rvc_config(opts: &ModelOpts, content: PathBuf, rmvpe: PathBuf) -> R
         opts.model_sr,
     );
     cfg.speaker_id = opts.speaker_id;
+    // The fused pipeline builds its own RMVPE from this config rather than from
+    // `build_pitch_estimator`, so `--f0-threshold` has to be carried here too —
+    // miss it and the flag parses, validates and does nothing whenever `-m`
+    // names an `.onnx` export.
+    cfg.f0_threshold = opts.f0_threshold;
     Ok(cfg)
 }
 
