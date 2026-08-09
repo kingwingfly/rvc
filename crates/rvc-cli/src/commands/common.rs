@@ -101,8 +101,7 @@ pub async fn build_converter(
     // has no arm to take and says so rather than failing to link.
     let features_extractor = tokio::task::block_in_place(|| {
         let content_model = build_content_encoder(features.content, &content, device)?;
-        let rmvpe_model =
-            build_pitch_estimator(features.rmvpe, &rmvpe, device, opts.f0_threshold)?;
+        let rmvpe_model = build_pitch_estimator(features.rmvpe, &rmvpe, device, opts.f0_threshold)?;
         anyhow::Ok(rvc_core::FeatureExtractor::from_parts(
             content_model,
             rmvpe_model,

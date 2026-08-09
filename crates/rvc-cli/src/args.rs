@@ -774,7 +774,8 @@ mod tests {
     fn filter(extra: &[&str]) -> FilterArgs {
         let mut argv = vec!["rvc", "-m", "voice.safetensors"];
         argv.extend_from_slice(extra);
-        let parsed = Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("{argv:?} rejected: {e}"));
+        let parsed =
+            Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("{argv:?} rejected: {e}"));
         assert!(parsed.rvc.command.is_none(), "{argv:?} took a subcommand");
         parsed.rvc.filter
     }
@@ -1018,7 +1019,11 @@ mod tests {
     /// samples, where a saturating cast would turn them into a plausible zero.
     #[test]
     fn a_nonsense_length_is_refused_rather_than_cast() {
-        for arg in ["--crossfade-secs=nan", "--crossfade-secs=-1", "--crossfade-secs=inf"] {
+        for arg in [
+            "--crossfade-secs=nan",
+            "--crossfade-secs=-1",
+            "--crossfade-secs=inf",
+        ] {
             let err = convert(&[arg])
                 .verify()
                 .expect_err("a non-finite or negative crossfade must be refused")
@@ -1047,7 +1052,11 @@ mod tests {
     /// is the reason the check is a range test rather than two comparisons.
     #[test]
     fn a_voicing_floor_outside_zero_to_one_is_refused() {
-        for arg in ["--f0-threshold=1.5", "--f0-threshold=-0.1", "--f0-threshold=nan"] {
+        for arg in [
+            "--f0-threshold=1.5",
+            "--f0-threshold=-0.1",
+            "--f0-threshold=nan",
+        ] {
             let err = convert(&[arg])
                 .verify()
                 .expect_err("a salience outside [0, 1] must be refused")
