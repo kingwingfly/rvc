@@ -93,6 +93,11 @@ struct Separate {
     /// single clip four times gives the metric a periodicity to latch onto that
     /// real speech does not have.
     clips: Vec<String>,
+    /// `--mixture <file>`: a **real** recording whose sources are unknown, which
+    /// switches every reading below to a reference-free one. Empty in the
+    /// synthetic mode, and the two are mutually exclusive — a mixture has no
+    /// known voice to score against, so there is nothing for the clips to be.
+    mixture: Option<String>,
     out: Option<String>,
 }
 
@@ -256,6 +261,10 @@ fn instrumental_bed(samples: usize, sample_rate: f32) -> Vec<f32> {
 impl common::Job for Separate {
     fn run<B: Backend>(self, device: &B::Device) {
         let cfg = MdxConfig::mdx23c_8k_instvoc_hq();
+        if let Some(path) = &self.mixture {
+            real_mixture::<B>(&cfg, &self.weights, path, self.out.as_deref(), device);
+            return;
+        }
         let chunk = cfg.chunk_size();
 
         // --- the two known sources -----------------------------------------
@@ -468,6 +477,252 @@ impl common::Job for Separate {
     }
 }
 
+/// Separate a **real** recording, whose sources are unknown, and report only
+/// what can be measured without them.
+///
+/// No SI-SDR against a source appears here and none can: nobody holds the stems
+/// of somebody else's stream. Every number below is either a property of the
+/// output pair (do they partition, do they differ) or a *contrast* the mixture
+/// is measured under the same way, so the mixture row stays the do-nothing
+/// baseline the synthetic mode established.
+fn real_mixture<B: Backend>(
+    cfg: &MdxConfig,
+    weights: &str,
+    path: &str,
+    out: Option<&str>,
+    device: &B::Device,
+) {
+    let sr = cfg.sample_rate;
+    let (left, right) = decode_stereo(path, sr);
+    let frames = left.len();
+    assert!(
+        frames > cfg.chunk_size(),
+        "a mixture shorter than one chunk"
+    );
+
+    // Mid/side, because how much of either there is decides what the model has
+    // to work with. MDX23C is stereo-native — its front end takes two channels
+    // and a real production gives it a wide bed against a centred vocal — so a
+    // near-mono input removes the spatial cue and leaves it separating
+    // spectrally. That is a property of the recording, and it is printed rather
+    // than assumed so a poor result is not misread as a broken port.
+    let mid: Vec<f32> = left
+        .iter()
+        .zip(&right)
+        .map(|(l, r)| 0.5 * (l + r))
+        .collect();
+    let side: Vec<f32> = left
+        .iter()
+        .zip(&right)
+        .map(|(l, r)| 0.5 * (l - r))
+        .collect();
+    println!(
+        "mixture : {path}\n          {:.1} s at {sr} Hz, mid rms {:.5}, side rms {:.5} \
+         ({:.1} dB below mid)",
+        frames as f32 / sr as f32,
+        rms(&mid),
+        rms(&side),
+        20.0 * (rms(&mid).max(1e-12) / rms(&side).max(1e-12)).log10(),
+    );
+
+    let mut model = TfcTdfNet::<B>::new(cfg, device);
+    let res = model.load_pytorch(weights).expect("load checkpoint");
+    println!(
+        "weights : {} applied / {} missing / {} unused",
+        res.applied.len(),
+        res.missing.len(),
+        res.unused.len()
+    );
+    assert!(
+        res.missing.is_empty() && !res.applied.is_empty(),
+        "bad load"
+    );
+
+    // --- windowed overlap-add ------------------------------------------------
+    //
+    // The network's unit is one chunk and nothing in the crate is aware of a
+    // longer recording, so the caller owns the seams. A periodic Hann at 50%
+    // hop is COLA, but the accumulated window is divided out explicitly rather
+    // than relied on: that makes the first and last half-chunk — covered by one
+    // pass instead of two — an *exact* reconstruction rather than one faded to
+    // zero, which is the difference between an edge that is merely less
+    // averaged and an edge that would drag every metric down.
+    //
+    // Upstream runs `inference.num_overlap: 8`. Two is what a 20-minute stream
+    // can afford here at ~3 s a forward, and the seam it leaves is measurable:
+    // the partition row below is computed over the whole interior and would
+    // show it.
+    let chunk = cfg.chunk_size();
+    let hop = chunk / 2;
+    let window: Vec<f32> = (0..chunk)
+        .map(|i| 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / chunk as f32).cos())
+        .collect();
+    let stft = cfg.stft();
+    let stems = STEMS_8K_INSTVOC.len();
+    let mut acc: Vec<[Vec<f32>; 2]> = (0..stems)
+        .map(|_| [vec![0.0f32; frames], vec![0.0f32; frames]])
+        .collect();
+    let mut norm = vec![0.0f32; frames];
+
+    let started = std::time::Instant::now();
+    let mut passes = 0usize;
+    let mut start = 0usize;
+    loop {
+        let end = (start + chunk).min(frames);
+        let pad = |src: &[f32]| {
+            let mut v = vec![0.0f32; chunk];
+            v[..end - start].copy_from_slice(&src[start..end]);
+            v
+        };
+        let spec = stft.forward::<B>(&[pad(&left), pad(&right)], device);
+        let output = model.forward(spec);
+        let [_, n_stems, n_channels, bins, n_frames] = output.dims();
+        let waves = stft.inverse(output.reshape([n_stems, n_channels, bins, n_frames]));
+        for (si, stem) in waves.iter().enumerate() {
+            for ch in 0..2 {
+                for i in 0..end - start {
+                    acc[si][ch][start + i] += window[i] * stem[ch][i];
+                }
+            }
+        }
+        for i in 0..end - start {
+            norm[start + i] += window[i];
+        }
+        passes += 1;
+        if start + chunk >= frames {
+            break;
+        }
+        start += hop;
+    }
+    for stem in &mut acc {
+        for ch in stem {
+            for (v, w) in ch.iter_mut().zip(&norm) {
+                *v /= w.max(1e-6);
+            }
+        }
+    }
+    println!(
+        "forward : {passes} chunks at 50% overlap in {:.1} s ({:.2} s per chunk)",
+        started.elapsed().as_secs_f32(),
+        started.elapsed().as_secs_f32() / passes as f32,
+    );
+    for stem in &acc {
+        assert!(
+            stem[0].iter().chain(&stem[1]).all(|x| x.is_finite()),
+            "a stem is not finite"
+        );
+    }
+
+    // Everything below is scored on the mono downmix of the **interior**, one
+    // hop in from each end: those two regions are single-pass, and while the
+    // window division makes them exact they are not the same measurement as the
+    // rest, so they are not averaged into it.
+    let trim = hop;
+    let interior = |x: &[f32]| x[trim..frames - trim].to_vec();
+    let mono = |stem: &[Vec<f32>; 2]| -> Vec<f32> {
+        stem[0]
+            .iter()
+            .zip(&stem[1])
+            .map(|(l, r)| 0.5 * (l + r))
+            .collect()
+    };
+    let mix_i = interior(&mid);
+    let stem_i: Vec<Vec<f32>> = acc.iter().map(|s| interior(&mono(s))).collect();
+    let sum: Vec<f32> = stem_i[0]
+        .iter()
+        .zip(&stem_i[1])
+        .map(|(a, b)| a + b)
+        .collect();
+    println!(
+        "\npartition: est_vocals + est_instrumental vs the mixture, SI-SDR {:.2} dB \
+         (over the interior, {:.1} s)",
+        si_sdr(&sum, &mix_i),
+        mix_i.len() as f32 / sr as f32,
+    );
+
+    println!(
+        "\nhow the energy was split (mixture rms {:.5})",
+        rms(&mix_i)
+    );
+    for (i, est) in stem_i.iter().enumerate() {
+        println!(
+            "  est_{:<18} rms {:.5}   {:>6.1} dB relative to the mixture",
+            STEMS_8K_INSTVOC[i],
+            rms(est),
+            20.0 * (rms(est).max(1e-12) / rms(&mix_i).max(1e-12)).log10(),
+        );
+    }
+    // Partition means the stems trade energy, so a *negative* correlation is
+    // what a working separation gives and ≈ +1 would say both stems are half
+    // the mixture — the shape a model that separated nothing produces.
+    println!(
+        "  {:<22} {:>6.3} sample-wise, {:>6.3} on the 32 ms envelope",
+        "vocals vs instrumental",
+        corr(&stem_i[0], &stem_i[1]),
+        corr(
+            &envelope(&stem_i[0], sr as usize / 32),
+            &envelope(&stem_i[1], sr as usize / 32)
+        ),
+    );
+
+    // --- the reading that says whether it separated *this* material ----------
+    //
+    // With no stems, the discriminating question is what happens in the
+    // seconds where the mixture is quietest. A continuous music bed under
+    // intermittent speech puts the mixture's per-second minima at the speech
+    // gaps, so a vocals stem that found the speech must be *quieter there than
+    // the mixture is*, and an instrumental stem that found the bed must be
+    // *flatter than the mixture is*. Both are contrasts within one signal, so
+    // neither needs a reference and neither is fooled by a stem that is simply
+    // scaled down.
+    let per_second: Vec<f32> = mix_i.chunks(sr as usize).map(rms).collect();
+    let mut order: Vec<usize> = (0..per_second.len()).collect();
+    order.sort_by(|a, b| per_second[*a].total_cmp(&per_second[*b]));
+    let fifth = (order.len() / 5).max(1);
+    let quiet = &order[..fifth];
+    let loud = &order[order.len() - fifth..];
+    let over = |signal: &[f32], seconds: &[usize]| -> f32 {
+        let mut gathered = Vec::new();
+        for s in seconds {
+            let (a, b) = (s * sr as usize, ((s + 1) * sr as usize).min(signal.len()));
+            gathered.extend_from_slice(&signal[a..b]);
+        }
+        rms(&gathered)
+    };
+    println!(
+        "\nspeech-gap contrast: the {fifth} quietest and {fifth} loudest of \
+         {} seconds,\nchosen by the *mixture* — so the gaps are speech gaps and \
+         the bed runs through both",
+        per_second.len()
+    );
+    println!(
+        "  {:<22} {:>10} {:>10} {:>10}",
+        "", "quiet rms", "loud rms", "contrast"
+    );
+    for (name, signal) in std::iter::once(("mixture".to_string(), &mix_i)).chain(
+        stem_i
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (format!("est_{}", STEMS_8K_INSTVOC[i]), e)),
+    ) {
+        let (q, l) = (over(signal, quiet), over(signal, loud));
+        println!(
+            "  {name:<22} {q:>10.5} {l:>10.5} {:>7.1} dB",
+            20.0 * (l.max(1e-12) / q.max(1e-12)).log10()
+        );
+    }
+
+    if let Some(dir) = out {
+        std::fs::create_dir_all(dir).expect("create output directory");
+        write_wav_stereo(&format!("{dir}/mixture.wav"), sr, &left, &right);
+        for (i, stem) in acc.iter().enumerate() {
+            let name = STEMS_8K_INSTVOC[i];
+            write_wav_stereo(&format!("{dir}/{name}.wav"), sr, &stem[0], &stem[1]);
+        }
+        println!("\nwrote the mixture and {stems} stems to {dir} — listen to them");
+    }
+}
+
 /// Decode any container to mono `f32` at `sample_rate`.
 ///
 /// A blocking wrapper around `audio-kit`'s stream, because these examples have
@@ -491,6 +746,33 @@ fn decode(path: &str, sample_rate: u32) -> Vec<f32> {
     })
 }
 
+/// Decode a container to **two** channels at `sample_rate`.
+///
+/// Not the mono path folded twice, which is what the synthetic mode feeds the
+/// network: a real mixture's channel difference is one of the two cues the
+/// model has, so throwing it away before the forward pass would make a
+/// near-mono result something this example imposed rather than something it
+/// measured.
+fn decode_stereo(path: &str, sample_rate: u32) -> (Vec<f32>, Vec<f32>) {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    runtime.block_on(async {
+        let mut stream = Box::pin(audio_kit::decode_path_stereo(
+            path,
+            audio_kit::DecodeOptions::new(sample_rate),
+        ));
+        let (mut left, mut right) = (Vec::new(), Vec::new());
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.expect("decode");
+            left.extend_from_slice(&chunk.left);
+            right.extend_from_slice(&chunk.right);
+        }
+        (left, right)
+    })
+}
+
 fn write_wav(path: &str, sample_rate: u32, samples: &[f32]) {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -505,22 +787,49 @@ fn write_wav(path: &str, sample_rate: u32, samples: &[f32]) {
     });
 }
 
+fn write_wav_stereo(path: &str, sample_rate: u32, left: &[f32], right: &[f32]) {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let samples = audio_kit::StereoSamples {
+        left: left.to_vec(),
+        right: right.to_vec(),
+    };
+    runtime.block_on(async move {
+        let stream = futures::stream::once(async move { Ok(samples) });
+        audio_kit::write_wav_stereo_file(path, sample_rate, Box::pin(stream))
+            .await
+            .expect("write wav");
+    });
+}
+
+/// Pull `--<flag> <value>` out of the arguments.
+fn take_value(args: &mut Vec<String>, flag: &str) -> Option<String> {
+    let i = args.iter().position(|a| a == flag)?;
+    args.remove(i);
+    if i >= args.len() {
+        common::fail(&format!("{flag} needs a value"));
+    }
+    Some(args.remove(i))
+}
+
 fn main() {
     let (backend, mut args) = common::parse_args();
-    let out = match args.iter().position(|a| a == "--out") {
-        Some(i) => {
-            args.remove(i);
-            if i >= args.len() {
-                common::fail("--out needs a directory");
-            }
-            Some(args.remove(i))
-        }
-        None => None,
+    let out = take_value(&mut args, "--out");
+    let mixture = take_value(&mut args, "--mixture");
+    // A mixture has no known voice, so there is nothing a clip could be scored
+    // against and passing both is a request for two different measurements.
+    let malformed = match &mixture {
+        Some(_) => args.len() != 1,
+        None => args.len() < 2,
     };
-    if args.len() < 2 {
+    if malformed {
         eprintln!(
-            "usage: separate [--backend tch|tch-gpu|cuda] [--out <dir>] \
-             <MDX23C-*.ckpt> <speech.wav>..."
+            "usage: separate [--backend tch|tch-gpu|cuda] [--out <dir>] \\\n         \
+             <MDX23C-*.ckpt> <speech.wav>...            # synthetic, with references\n   \
+             or: separate [--backend ...] [--out <dir>] --mixture <song.wav> \\\n         \
+             <MDX23C-*.ckpt>                            # real, reference-free"
         );
         std::process::exit(2);
     }
@@ -530,6 +839,7 @@ fn main() {
         Separate {
             weights: args[0].clone(),
             clips: args[1..].to_vec(),
+            mixture,
             out,
         },
     );
