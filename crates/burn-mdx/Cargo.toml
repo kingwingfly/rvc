@@ -1,0 +1,43 @@
+[package]
+name = "burn-mdx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "MDX23C (TFC-TDF-UNet v3), the source-separation network UVR ships, in Burn"
+
+[features]
+# Extra compute backends for the *examples* — this crate's stand-in for unit
+# tests on the module tree, since no checkpoint can be committed. Off by
+# default, so the crate's normal build stays backend-free: nothing in `src/`
+# names a backend, and keeping that mechanical is what protects checkpoint
+# compatibility.
+cuda = ["burn/cuda"]
+tch = ["burn/tch"]
+wgpu = ["burn/wgpu"]
+
+[dependencies]
+burn = { version = "0.21", default-features = false, features = ["std"] }
+burn-store.workspace = true
+# Checkpoint loading, shared with every other network crate.
+burn-kit = { workspace = true, features = ["store"] }
+# The complex STFT front end. Not `burn_vits::Spectral`: that is a *mel* front
+# end with `center=false` that takes magnitudes, and separation needs the
+# complex spectrum with `center=true`. See `stft`'s module docs.
+rustfft.workspace = true
+
+[dev-dependencies]
+burn-ndarray = "0.21"
+# Examples only. `burn-*` crates carry no app dependencies, so decoding real
+# audio for `examples/separate` lives here and never in `src/`.
+audio-kit.workspace = true
+tokio.workspace = true
+
+[[example]]
+name = "separate"
+# Not decoration. One forward pass is ~1 TFLOP over `[1, 128, 256, 1024]`
+# activations, which pure-CPU `ndarray` turns into tens of minutes; the example
+# exists to be *run*, so it fails to build rather than compiling to a crawl when
+# the backend it needs is absent. Same reasoning as `rvc-core`'s `f0_runtimes`.
+required-features = ["tch"]
