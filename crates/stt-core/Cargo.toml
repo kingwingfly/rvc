@@ -22,7 +22,9 @@ onnx = ["dep:ort"]
 [dependencies]
 burn = { workspace = true }
 burn-whisper.workspace = true
-burn-kit.workspace = true
+# `store` for `check_coverage`: declared rather than inherited from
+# `burn-whisper`, so this crate does not compile only by a sibling's grace.
+burn-kit = { workspace = true, features = ["store"] }
 audio-kit.workspace = true
 rustfft.workspace = true
 tokenizers.workspace = true

@@ -6,7 +6,8 @@
 //!   type is being asked for, so voice conversion, recognition and synthesis
 //!   cannot disagree about what `auto` means.
 //! - [`store`] — read a PyTorch or safetensors checkpoint, remap its key names
-//!   onto a Burn module tree, and upcast fp16 to fp32.
+//!   onto a Burn module tree, upcast fp16 to fp32, and check that the load
+//!   covered the model ([`check_coverage`]).
 //!
 //! Nothing here knows what a model is. That is the point: engines are siblings,
 //! so anything two of them need lives somewhere neither owns.
@@ -22,6 +23,13 @@ pub mod store;
 /// somebody checks.
 #[cfg(feature = "store")]
 pub use burn_store::ApplyResult;
+
+/// The check every loader's caller owes its [`ApplyResult`], hoisted here so
+/// there is one definition of what "the checkpoint matches the model" means
+/// rather than one per engine — and, more to the point, so no engine can go on
+/// omitting the `errors` half of it.
+#[cfg(feature = "store")]
+pub use store::check_coverage;
 
 #[cfg(feature = "cuda")]
 pub use device::cuda_device;

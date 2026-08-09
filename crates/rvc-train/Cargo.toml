@@ -19,7 +19,10 @@ wgpu = ["burn/wgpu", "rvc-core/wgpu", "burn-kit/wgpu"]
 audio-kit.workspace = true
 rvc-core.workspace = true
 burn-rvc.workspace = true
-burn-kit.workspace = true
+# `store` for `check_coverage` on the four warm-start/resume loads: declared
+# rather than inherited from `burn-rvc`, so this crate does not compile only by
+# a sibling's grace.
+burn-kit = { workspace = true, features = ["store"] }
 burn-vits.workspace = true
 train-kit.workspace = true
 tokio = { workspace = true }

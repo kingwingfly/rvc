@@ -54,22 +54,15 @@ pub fn run<AB: AutodiffBackend>(
         let res = net_g
             .load_weights(&p)
             .map_err(|e| anyhow!("resuming G from {}: {e}", p.display()))?;
-        anyhow::ensure!(
-            res.missing.is_empty(),
-            "G resume incomplete ({} missing): {} is not a full generator checkpoint",
-            res.missing.len(),
-            p.display()
-        );
+        burn_kit::check_coverage(&format!("G resume from {}", p.display()), &res)
+            .map_err(anyhow::Error::msg)?;
         tracing::info!("resumed generator from {}", p.display());
     } else if let Some(p) = &req.pretrained_g {
         let res = net_g
             .load_pytorch(p)
             .map_err(|e| anyhow!("loading G {}: {e}", p.display()))?;
-        anyhow::ensure!(
-            res.missing.is_empty(),
-            "G warm-start incomplete: {} missing",
-            res.missing.len()
-        );
+        burn_kit::check_coverage(&format!("G warm-start from {}", p.display()), &res)
+            .map_err(anyhow::Error::msg)?;
         tracing::info!("warm-started generator from {}", p.display());
     } else {
         tracing::warn!(
@@ -84,21 +77,15 @@ pub fn run<AB: AutodiffBackend>(
         let res = disc
             .load_safetensors(p)
             .map_err(|e| anyhow!("resuming D from {}: {e}", p.display()))?;
-        anyhow::ensure!(
-            res.missing.is_empty(),
-            "D resume incomplete: {} missing",
-            res.missing.len()
-        );
+        burn_kit::check_coverage(&format!("D resume from {}", p.display()), &res)
+            .map_err(anyhow::Error::msg)?;
         tracing::info!("resumed discriminator from {}", p.display());
     } else if let Some(p) = &req.pretrained_d {
         let res = disc
             .load_pytorch(p, Some("model"))
             .map_err(|e| anyhow!("loading D {}: {e}", p.display()))?;
-        anyhow::ensure!(
-            res.missing.is_empty(),
-            "D warm-start incomplete: {} missing",
-            res.missing.len()
-        );
+        burn_kit::check_coverage(&format!("D warm-start from {}", p.display()), &res)
+            .map_err(anyhow::Error::msg)?;
         tracing::info!("warm-started discriminator from {}", p.display());
     } else if resume.is_some() {
         tracing::warn!(

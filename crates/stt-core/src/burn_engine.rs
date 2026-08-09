@@ -33,13 +33,10 @@ impl<B: Backend> BurnEngine<B> {
         let applied = model
             .load_safetensors(path)
             .map_err(|e| SttError::Weights(e.to_string()))?;
-        if !applied.missing.is_empty() {
-            return Err(SttError::Weights(format!(
-                "{} parameters had no tensor in the checkpoint (first: {})",
-                applied.missing.len(),
-                applied.missing[0].0
-            )));
-        }
+        // The label is the path alone: `SttError::Weights` already renders
+        // "failed to load whisper weights", so naming the model again stutters.
+        burn_kit::check_coverage(&path.display().to_string(), &applied)
+            .map_err(SttError::Weights)?;
         Ok(Self {
             state: model.decoder.state(),
             model,

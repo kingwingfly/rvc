@@ -18,6 +18,66 @@ use burn_store::{
     SafetensorsStore, TensorSnapshot,
 };
 
+/// Reject a load that left parameters at their initialised values.
+///
+/// Every loader here allows a partial apply so that a coverage report can be
+/// *inspected* rather than a single mismatch aborting the load. The cost of that
+/// is that **an empty apply is a success unless somebody looks**: a checkpoint
+/// whose names no longer match the module tree leaves every parameter freshly
+/// initialised, and the model then runs and produces confident garbage with
+/// nothing said anywhere.
+///
+/// The order of the three checks is the point, and **`errors` first** is the one
+/// that is not visible from `burn_store`'s API. Its applier computes `missing`
+/// as *visited and not applied and not skipped and **not errored***, so a path
+/// that failed to apply is dropped from `applied` and `missing` alike — which
+/// means a checkpoint carrying the right tensor *names* at the wrong *shape*
+/// reads as 100% coverage to anyone checking only `missing`. That is precisely
+/// the failure this workspace has already shipped once: a port that loads at
+/// full coverage and computes the wrong thing.
+///
+/// `unused` is deliberately neither checked nor a parameter. A correct load
+/// leaves tensors over all the time — RMVPE's 118 `num_batches_tracked`
+/// counters, ContentVec's 57 LayerNorm aliases, or a multi-module `.pth` of
+/// which one module is being read — so no threshold is right for every caller,
+/// and a wrong one refuses working weights, which is worse than no check at all.
+///
+/// The error is a `String` rather than [`Error`](crate::Error), and that is what
+/// keeps the sentence accurate rather than being a shortcut: every engine's
+/// `From<burn_kit::Error>` flattens to its own `Device` variant, so a bare `?`
+/// on an `Error` here would report a shape mismatch as "device error". A
+/// `String` cannot be `?`-ed into any of them, so each caller is obliged to name
+/// the variant that fits. Logging stays with the caller too, which is the half
+/// that knows which file it just read.
+pub fn check_coverage(label: &str, result: &ApplyResult) -> Result<(), String> {
+    if let Some(first) = result.errors.first() {
+        return Err(format!(
+            "{label}: {} of the checkpoint's tensors could not be applied \
+             (first: {first}) — the file does not match the model",
+            result.errors.len(),
+        ));
+    }
+    if let Some((path, _)) = result.missing.first() {
+        return Err(format!(
+            "{label}: {} of {} parameters had no weights in the checkpoint \
+             (first: {path}) — the file's tensor names do not match the model",
+            result.missing.len(),
+            result.missing.len() + result.applied.len(),
+        ));
+    }
+    if result.applied.is_empty() {
+        // Not reachable through `missing` above, and not something the loaders
+        // can raise on their own: `load_pytorch_into` reads any checkpoint it can
+        // parse, so being handed a different model entirely is a silent success
+        // until the applied count is looked at.
+        return Err(format!(
+            "{label}: nothing was applied — no parameter of the module appears \
+             in the checkpoint at all"
+        ));
+    }
+    Ok(())
+}
+
 /// Build the key remapper from `(regex, replacement)` pairs, applied in order.
 fn remapper(remaps: &[(&str, &str)]) -> KeyRemapper {
     let mut remapper = KeyRemapper::new();
@@ -212,7 +272,77 @@ fn upcast_f16(s: TensorSnapshot) -> TensorSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn_store::ModuleAdapter;
+    use burn::tensor::Shape;
+    use burn_store::{ApplyError, ModuleAdapter};
+
+    /// One report, built field by field because `ApplyResult` has no `Default`.
+    fn report(
+        applied: &[&str],
+        missing: &[&str],
+        unused: &[&str],
+        errors: Vec<ApplyError>,
+    ) -> ApplyResult {
+        ApplyResult {
+            applied: applied.iter().map(|s| s.to_string()).collect(),
+            skipped: Vec::new(),
+            missing: missing
+                .iter()
+                .map(|s| (s.to_string(), String::new()))
+                .collect(),
+            unused: unused.iter().map(|s| s.to_string()).collect(),
+            errors,
+        }
+    }
+
+    #[test]
+    fn a_shape_mismatch_is_rejected_though_nothing_is_missing() {
+        // The regression, and the entire reason `check_coverage` exists. The
+        // applier drops an errored path from `missing` as well as from
+        // `applied`, so this exact pairing — one failed tensor, zero missing —
+        // is what a loader checking only `missing` reads as full coverage. A
+        // checkpoint one config revision away from the model produces it, and
+        // the parameter keeps its initialised value while the model runs.
+        let result = report(
+            &["enc.weight"],
+            &[],
+            &[],
+            vec![ApplyError::ShapeMismatch {
+                path: "enc.bias".to_string(),
+                expected: Shape::from([192]),
+                found: Shape::from([256]),
+            }],
+        );
+        assert!(result.missing.is_empty(), "the premise of this test");
+
+        let err = check_coverage("the generator", &result)
+            .expect_err("a tensor that failed to apply must not read as full coverage");
+        assert!(err.contains("the generator"), "{err}");
+        assert!(err.contains("enc.bias"), "{err}");
+    }
+
+    #[test]
+    fn a_complete_load_passes_with_tensors_left_over() {
+        // `unused` is not an error and must never be treated as one: RMVPE
+        // leaves 118 `num_batches_tracked` counters behind on a load that is
+        // exactly right, and refusing valid weights is worse than not checking.
+        let result = report(&["enc.weight"], &[], &["enc.num_batches_tracked"], vec![]);
+        check_coverage("the generator", &result).expect("leftover tensors are not a failure");
+    }
+
+    #[test]
+    fn a_missing_parameter_and_an_empty_apply_are_each_rejected() {
+        let missing = report(&["enc.weight"], &["enc.bias"], &[], vec![]);
+        let err = check_coverage("rmvpe weights", &missing).expect_err("missing must be refused");
+        assert!(err.contains("enc.bias"), "{err}");
+
+        // The "handed a different model entirely" case, which no loader can
+        // raise on its own — and which the `missing` branch above cannot report
+        // sensibly either, since it would read "0 of 0 parameters".
+        let empty = report(&[], &[], &["something.else"], vec![]);
+        let err =
+            check_coverage("rmvpe weights", &empty).expect_err("an empty apply must be refused");
+        assert!(err.contains("nothing was applied"), "{err}");
+    }
 
     fn snapshot(dtype: DType, data: TensorData) -> TensorSnapshot {
         TensorSnapshot::from_closure(
