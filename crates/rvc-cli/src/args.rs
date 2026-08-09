@@ -770,6 +770,15 @@ mod tests {
         }
     }
 
+    /// The bare invocation — no subcommand, so [`parse`] cannot reach it.
+    fn filter(extra: &[&str]) -> FilterArgs {
+        let mut argv = vec!["rvc", "-m", "voice.safetensors"];
+        argv.extend_from_slice(extra);
+        let parsed = Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("{argv:?} rejected: {e}"));
+        assert!(parsed.rvc.command.is_none(), "{argv:?} took a subcommand");
+        parsed.rvc.filter
+    }
+
     /// Neither flag given: both feature models follow `--backend`, whatever it
     /// resolved to. This is the property the whole design rests on — one flag
     /// still configures the whole pipeline.
@@ -888,5 +897,168 @@ mod tests {
             .to_string();
         assert!(err.contains("--rmvpe-backend"), "{err}");
         assert!(err.contains("ONNX Runtime only"), "{err}");
+    }
+
+    /// Passing none of the geometry flags must reproduce the preset **exactly**,
+    /// field for field — this is the property that makes adding them a no-op for
+    /// every existing user, and it is cheaper and stricter to assert here than
+    /// to diff two converted WAVs.
+    #[test]
+    fn omitting_the_geometry_flags_reproduces_the_preset() {
+        for (opts, preset, which) in [
+            (filter(&[]).geometry, StreamParams::realtime(), "filter"),
+            (convert(&[]).geometry, StreamParams::batch(), "convert"),
+        ] {
+            let resolved = opts.resolve(preset);
+            assert_eq!(resolved.block, preset.block, "{which} block");
+            assert_eq!(resolved.context, preset.context, "{which} context");
+            assert_eq!(resolved.crossfade, preset.crossfade, "{which} crossfade");
+            assert_eq!(resolved.shape, preset.shape, "{which} shape");
+        }
+    }
+
+    /// …and so must passing each flag at the value its help text advertises.
+    /// This is the one that a truncating cast breaks: `0.05f32 * 16000.0` is
+    /// 800.0000119, so `as usize` would land on 799 and quietly move the
+    /// default of anyone who spelled it out.
+    #[test]
+    fn the_documented_defaults_resolve_to_the_preset() {
+        let realtime = filter(&[
+            "--block-secs",
+            "0.5",
+            "--context-secs",
+            "0.25",
+            "--crossfade-secs",
+            "0.05",
+            "--crossfade-shape",
+            "linear",
+        ])
+        .geometry
+        .resolve(StreamParams::realtime());
+        let preset = StreamParams::realtime();
+        assert_eq!(realtime.block, preset.block);
+        assert_eq!(realtime.context, preset.context);
+        assert_eq!(realtime.crossfade, preset.crossfade);
+        assert_eq!(realtime.shape, preset.shape);
+
+        let batch = convert(&[
+            "--block-secs",
+            "15",
+            "--context-secs",
+            "0.5",
+            "--crossfade-secs",
+            "0.05",
+        ])
+        .geometry
+        .resolve(StreamParams::batch());
+        let preset = StreamParams::batch();
+        assert_eq!(batch.block, preset.block);
+        assert_eq!(batch.context, preset.context);
+        assert_eq!(batch.crossfade, preset.crossfade);
+    }
+
+    /// One flag named overrides only itself; the rest still come from the
+    /// preset. The mixed case is the one worth pinning, because it is where a
+    /// "resolve everything or nothing" shortcut would silently reset two values
+    /// the user never mentioned.
+    #[test]
+    fn a_named_length_overrides_only_itself() {
+        let resolved = convert(&["--block-secs", "3"])
+            .geometry
+            .resolve(StreamParams::batch());
+        assert_eq!(resolved.block, 3 * ANALYSIS_SR as usize);
+        assert_eq!(resolved.context, StreamParams::batch().context);
+        assert_eq!(resolved.crossfade, StreamParams::batch().crossfade);
+    }
+
+    /// The crossfade is an overlap taken out of the context each block drops,
+    /// so a crossfade longer than the context makes every block emit its
+    /// context prefix as audio. Refused, naming both numbers — and refused in
+    /// the *mixed* case, where only one of them was typed.
+    #[test]
+    fn a_crossfade_longer_than_the_context_is_refused() {
+        let err = filter(&["--crossfade-secs", "0.3"])
+            .verify()
+            .expect_err("0.3 s of crossfade against 0.25 s of context must be refused")
+            .to_string();
+        assert!(err.contains("--crossfade-secs"), "{err}");
+        assert!(err.contains("--context-secs"), "{err}");
+        // The context came from the preset, and the message has to say so or a
+        // reader goes looking for a flag they never passed.
+        assert!(err.contains("default"), "{err}");
+    }
+
+    /// A context longer than a block cannot be filled — `process_block` clamps
+    /// it to the block it just processed — so honouring it silently would hand
+    /// back less look-back than was asked for.
+    #[test]
+    fn a_context_longer_than_the_block_is_refused() {
+        let err = filter(&["--context-secs", "2"])
+            .verify()
+            .expect_err("2 s of context against a 0.5 s block must be refused")
+            .to_string();
+        assert!(err.contains("--context-secs"), "{err}");
+        assert!(err.contains("--block-secs"), "{err}");
+    }
+
+    /// A block that rounds to zero samples is a hang, not bad audio: `push`
+    /// loops while the buffer is at least `block` long and drains nothing.
+    #[test]
+    fn a_block_that_rounds_to_nothing_is_refused() {
+        for secs in ["0", "0.00001"] {
+            let err = filter(&["--block-secs", secs])
+                .verify()
+                .expect_err("a block that rounds to zero samples must be refused")
+                .to_string();
+            assert!(err.contains("--block-secs"), "{secs}: {err}");
+        }
+    }
+
+    /// Non-finite and negative seconds are caught before the conversion to
+    /// samples, where a saturating cast would turn them into a plausible zero.
+    #[test]
+    fn a_nonsense_length_is_refused_rather_than_cast() {
+        for arg in ["--crossfade-secs=nan", "--crossfade-secs=-1", "--crossfade-secs=inf"] {
+            let err = convert(&[arg])
+                .verify()
+                .expect_err("a non-finite or negative crossfade must be refused")
+                .to_string();
+            assert!(err.contains("--crossfade-secs"), "{arg}: {err}");
+        }
+    }
+
+    /// `--f0-threshold` defaults to the constant `rvc-core` hands every
+    /// non-ONNX estimator, so the flag's default cannot drift away from the
+    /// value the toolkit uses when nobody passes it.
+    #[test]
+    fn the_voicing_floor_defaults_to_the_toolkits_own() {
+        assert_eq!(
+            convert(&[]).models.f0_threshold,
+            rvc_core::FeatureExtractor::F0_THRESHOLD
+        );
+        assert_eq!(
+            filter(&[]).models.f0_threshold,
+            rvc_core::FeatureExtractor::F0_THRESHOLD
+        );
+    }
+
+    /// It is an RMVPE salience, so it lives in [0, 1]. Outside that the flag
+    /// describes nothing, and `NaN` compares false against every bound — which
+    /// is the reason the check is a range test rather than two comparisons.
+    #[test]
+    fn a_voicing_floor_outside_zero_to_one_is_refused() {
+        for arg in ["--f0-threshold=1.5", "--f0-threshold=-0.1", "--f0-threshold=nan"] {
+            let err = convert(&[arg])
+                .verify()
+                .expect_err("a salience outside [0, 1] must be refused")
+                .to_string();
+            assert!(err.contains("--f0-threshold"), "{arg}: {err}");
+        }
+        convert(&["--f0-threshold", "0.0"])
+            .verify()
+            .expect("0 is a legal, if extreme, floor");
+        convert(&["--f0-threshold", "1.0"])
+            .verify()
+            .expect("1 is a legal, if extreme, floor");
     }
 }
