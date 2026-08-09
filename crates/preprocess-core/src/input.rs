@@ -163,15 +163,15 @@ mod tests {
 
         // The same directory twice, plus one file named directly: the file is
         // already in the walk, so it must not appear twice.
-        let files = plan(
-            &[dir.clone(), dir.clone(), dir.join("a.mp3")],
-            &out,
-        )
-        .expect("plan");
+        let files = plan(&[dir.clone(), dir.clone(), dir.join("a.mp3")], &out).expect("plan");
         let paths: Vec<_> = files.iter().map(|f| f.path.clone()).collect();
         assert_eq!(
             paths,
-            vec![dir.join("a.mp3"), dir.join("b.wav"), dir.join("nested/c.flac")]
+            vec![
+                dir.join("a.mp3"),
+                dir.join("b.wav"),
+                dir.join("nested/c.flac")
+            ]
         );
     }
 
@@ -185,7 +185,11 @@ mod tests {
         touch(&out.join("a_000.wav"));
 
         let files = plan(&[dir.clone()], &out).expect("plan");
-        assert_eq!(files.len(), 1, "the output dir's own clips were re-ingested");
+        assert_eq!(
+            files.len(),
+            1,
+            "the output dir's own clips were re-ingested"
+        );
         assert_eq!(files[0].path, dir.join("a.wav"));
 
         // The skip canonicalises `output_dir`, so it can only fire once the

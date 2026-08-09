@@ -47,11 +47,7 @@ pub struct ClipReport {
 /// The caller creates `output_dir` (see [`crate::plan`], which needs it to
 /// exist) and decides what to do with a file that will not decode — one bad
 /// recording in a corpus of hundreds must not abort the batch.
-pub async fn file(
-    input: &InputFile,
-    opts: &ClipOptions,
-    output_dir: &Path,
-) -> Result<ClipReport> {
+pub async fn file(input: &InputFile, opts: &ClipOptions, output_dir: &Path) -> Result<ClipReport> {
     let samples = crate::decode_mono(&input.path, opts.sr).await?;
     let in_secs = samples.len() as f64 / opts.sr as f64;
     let segments = audio_kit::slice(&samples, opts.sr, &opts.slice);
@@ -124,9 +120,7 @@ mod tests {
     fn voiced(secs: f32) -> Vec<f32> {
         let n = (secs * SR as f32) as usize;
         (0..n)
-            .map(|i| {
-                (0.5 * (std::f64::consts::TAU * 220.0 * i as f64 / SR as f64).sin()) as f32
-            })
+            .map(|i| (0.5 * (std::f64::consts::TAU * 220.0 * i as f64 / SR as f64).sin()) as f32)
             .collect()
     }
 
