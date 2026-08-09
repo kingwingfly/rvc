@@ -53,7 +53,7 @@
 //!
 //! Usage:
 //! `cargo run -p burn-mdx --example separate --features tch -- \
-//!      [--backend tch|tch-gpu|cuda] [--out <dir>] <MDX23C-*.ckpt> <speech.wav>`
+//!      [--backend tch|tch-gpu|cuda] [--out <dir>] <MDX23C-*.ckpt> <speech.wav>...`
 
 #[path = "common/mod.rs"]
 mod common;
@@ -64,7 +64,11 @@ use futures::StreamExt;
 
 struct Separate {
     weights: String,
-    clip: String,
+    /// Concatenated in order until a chunk is full. Several clips rather than
+    /// one because this repository's own corpus is 1.5 s per file and looping a
+    /// single clip four times gives the metric a periodicity to latch onto that
+    /// real speech does not have.
+    clips: Vec<String>,
     out: Option<String>,
 }
 
@@ -175,19 +179,27 @@ impl common::Job for Separate {
         let chunk = cfg.chunk_size();
 
         // --- the two known sources -----------------------------------------
-        let mut voice = decode(&self.clip, cfg.sample_rate);
+        let decoded: Vec<Vec<f32>> = self
+            .clips
+            .iter()
+            .map(|c| decode(c, cfg.sample_rate))
+            .collect();
+        let mut voice: Vec<f32> = decoded.concat();
         println!(
-            "clip    : {:.2} s at {} Hz",
+            "clips   : {} file(s), {:.2} s at {} Hz",
+            self.clips.len(),
             voice.len() as f32 / cfg.sample_rate as f32,
             cfg.sample_rate
         );
         if voice.len() < chunk {
-            // Looping rather than zero-padding: silence would let a stem score
-            // well on the silent tail alone.
+            // Cycling the supplied clips rather than zero-padding: silence
+            // would let a stem score well on the silent tail alone, which is
+            // the easiest way to read a good number off a broken port.
             let source = voice.clone();
             while voice.len() < chunk {
                 voice.extend_from_slice(&source);
             }
+            println!("          (short of a {chunk}-sample chunk, so the clips were cycled)");
         }
         voice.truncate(chunk);
         let bed = instrumental_bed(chunk, cfg.sample_rate as f32);
@@ -361,7 +373,7 @@ fn main() {
     if args.len() < 2 {
         eprintln!(
             "usage: separate [--backend tch|tch-gpu|cuda] [--out <dir>] \
-             <MDX23C-*.ckpt> <speech.wav>"
+             <MDX23C-*.ckpt> <speech.wav>..."
         );
         std::process::exit(2);
     }
@@ -370,7 +382,7 @@ fn main() {
         backend,
         Separate {
             weights: args[0].clone(),
-            clip: args[1].clone(),
+            clips: args[1..].to_vec(),
             out,
         },
     );
