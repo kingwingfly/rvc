@@ -184,7 +184,8 @@ impl<B: Backend> ResidualVq<B> {
 
     /// Load this module's slice of the Seed-VC checkpoint.
     pub fn load_pytorch(&mut self, path: impl AsRef<Path>) -> Result<ApplyResult, Box<dyn Error>> {
-        let remaps = [(r"^net\.vq\.module\.", "")];
+        let mut remaps = vec![(r"^net\.vq\.module\.", "")];
+        remaps.extend(crate::WEIGHT_NORM_REMAPS);
         burn_kit::store::load_pytorch_into::<B, _>(self, path.as_ref(), None, &remaps)
     }
 }

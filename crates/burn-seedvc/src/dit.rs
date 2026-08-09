@@ -679,7 +679,7 @@ impl<B: Backend> Dit<B> {
     /// - `adaLN_modulation.1` → `ada_ln_modulation`, likewise, and into a
     ///   snake-case field name.
     pub fn load_pytorch(&mut self, path: impl AsRef<Path>) -> Result<ApplyResult, Box<dyn Error>> {
-        let remaps = [
+        let mut remaps = vec![
             (r"^net\.cfm\.module\.estimator\.", ""),
             (r"\.conv\.conv\.", "."),
             (r"\.mlp\.2\.", ".mlp.1."),
@@ -688,6 +688,11 @@ impl<B: Backend> Dit<B> {
                 "final_layer.ada_ln_modulation.",
             ),
         ];
+        // Last, so the prefix strip and `conv.conv` flattening above have
+        // already run — these match a suffix on whatever path those produced.
+        // This is also WaveNet's only loader: its weight-normalised convolutions
+        // arrive as part of the estimator subtree.
+        remaps.extend(crate::WEIGHT_NORM_REMAPS);
         burn_kit::store::load_pytorch_into::<B, _>(self, path.as_ref(), None, &remaps)
     }
 }

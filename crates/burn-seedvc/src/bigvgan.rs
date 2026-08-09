@@ -615,15 +615,15 @@ impl<B: Backend> BigVgan<B> {
     ///   one-element `ModuleList` inside a `ModuleList`, and each downsampler
     ///   wraps its filter in a `LowPassFilter1d`.
     pub fn load_pytorch(&mut self, path: impl AsRef<Path>) -> Result<ApplyResult, Box<dyn Error>> {
-        burn_kit::store::load_pytorch_into::<B, _>(
-            self,
-            path.as_ref(),
-            Some("generator"),
-            &[
-                (r"^ups\.(\d+)\.0\.", "ups.${1}."),
-                (r"\.downsample\.lowpass\.filter$", ".downsample.filter"),
-            ],
-        )
+        let mut remaps = vec![
+            (r"^ups\.(\d+)\.0\.", "ups.${1}."),
+            (r"\.downsample\.lowpass\.filter$", ".downsample.filter"),
+        ];
+        // The vocoder is the likeliest of the three to change spelling: it is
+        // NVIDIA's release rather than Seed-VC's, so a re-publish from a newer
+        // torch is somebody else's decision entirely.
+        remaps.extend(crate::WEIGHT_NORM_REMAPS);
+        burn_kit::store::load_pytorch_into::<B, _>(self, path.as_ref(), Some("generator"), &remaps)
     }
 
     /// The anti-aliasing kernel this module derived, so `examples/load` can hold
