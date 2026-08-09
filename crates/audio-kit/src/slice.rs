@@ -17,18 +17,31 @@
 //! [`Slicer`] takes it a chunk at a time and hands back each clip as soon as it
 //! provably cannot change again. They share every step past run detection, so a
 //! streamed pass and a batch one cut in exactly the same places.
+//!
+//! The floor itself can be measured instead of guessed: [`noise_floor`] reads a
+//! recording's own quiet and loud percentiles off that same grid, and
+//! [`SliceOptions::with_measured_floor`] turns the reading into a `silence_db`.
 
 /// Tuning knobs for [`slice`]. All durations are in seconds.
 #[derive(Debug, Clone, Copy)]
 pub struct SliceOptions {
     /// Energy floor in dBFS. A frame quieter than this counts as silence.
-    /// Lower it (e.g. `-50`) to keep the very softest passages.
+    /// Lower it (e.g. `-50`) to keep the very softest passages, or let the
+    /// recording decide with [`SliceOptions::with_measured_floor`].
     pub silence_db: f32,
     /// Minimum length of a silent gap (seconds) for it to be a cut point.
     /// Shorter gaps are treated as internal pauses and kept inside the clip, so
     /// a complete sentence is never split.
     pub min_silence: f32,
     /// Drop any kept segment shorter than this (seconds).
+    ///
+    /// A corpus slicer has a floor under this that it cannot see from here:
+    /// `rvc-train` draws 0.48 s windows (48 frames on its 100 Hz grid), and a
+    /// clip shorter than one window is decoded, feature-extracted and *then*
+    /// discarded with a warning. Below 0.48 s this knob therefore buys nothing
+    /// and costs the analysis of every fragment it lets through. The number is
+    /// deliberately not a constant here — a `*-kit` crate that knew a trainer's
+    /// window would be depending on an engine — so it is stated, not enforced.
     pub min_clip: f32,
     /// Hard cap on segment length (seconds); `0` means never split. Longer runs
     /// are split at their quietest interior frame until every piece fits.
@@ -40,6 +53,11 @@ pub struct SliceOptions {
 impl Default for SliceOptions {
     fn default() -> Self {
         Self {
+            // Deliberately a fixed number and not a measured one. Every corpus
+            // prepared so far was cut at -40 dBFS, and deriving the floor by
+            // default would silently re-cut all of them — the same reason the
+            // mel front end's clip floor has not moved. A caller that wants the
+            // measurement asks for it, and the change gets re-baselined.
             silence_db: -40.0,
             min_silence: 0.3,
             min_clip: 1.0,
@@ -47,6 +65,117 @@ impl Default for SliceOptions {
             pad: 0.15,
         }
     }
+}
+
+/// Frames quieter than this are digital silence rather than a noise floor, and
+/// the ratio against them is unbounded — 1e-6 full scale, which is what
+/// `rvc-train`'s per-clip SNR clamped its linear floor at before this function
+/// existed.
+const SILENT_FLOOR_DB: f32 = -120.0;
+
+/// A recording needs at least this many frames (~80 ms) before its percentiles
+/// mean anything.
+const MIN_MEASURED_FRAMES: usize = 8;
+
+/// How far above the measured floor a derived `silence_db` sits.
+///
+/// Room tone is a distribution, not a level: [`NoiseFloor::floor_db`] is the
+/// middle of the dead-air frames, so a threshold sitting *on* it would call
+/// half the dead air voiced. Measured over this repository's own breathy
+/// close-mic corpus the per-clip spread between the 10th and 25th percentile
+/// runs 1.5–6 dB, and the gap up to the first genuinely voiced frame is far
+/// wider than that, so 8 dB clears the tone on every clip while staying well
+/// under the softest breath.
+const FLOOR_MARGIN_DB: f32 = 8.0;
+
+/// ...and how far below the loud percentile it must stay regardless.
+///
+/// This is the guard for the inverted failure: on a noisy recording the floor
+/// and the speech are close, and `floor + margin` alone would land on top of
+/// the voice and gate it. Whichever of the two bounds is lower wins, so a
+/// hissy take gets a threshold that still keeps its speech.
+const SPEECH_GUARD_DB: f32 = 12.0;
+
+impl SliceOptions {
+    /// Replace `silence_db` with a floor measured from `samples`, leaving it
+    /// untouched when there is nothing to measure ([`noise_floor`] returns
+    /// `None`).
+    ///
+    /// **This is a whole-signal statistic, which is why it is the caller's step
+    /// and not the slicer's.** [`Slicer`] never sees the whole signal — it
+    /// exists precisely so a ten-minute file does not have to be buffered — so
+    /// measuring inside it would give the streaming path a floor that moved as
+    /// audio arrived, and the two paths would cut in different places. Instead
+    /// the measurement happens once, before slicing, and hands both paths the
+    /// same concrete number; `streaming_matches_batch` is untouched by it. The
+    /// honest cost is that a true stdin filter has no whole signal to measure,
+    /// so this is reachable only where the audio is already in memory.
+    #[must_use]
+    pub fn with_measured_floor(mut self, samples: &[f32], sample_rate: u32) -> Self {
+        if let Some(measured) = noise_floor(samples, sample_rate) {
+            self.silence_db = measured.silence_db();
+        }
+        self
+    }
+}
+
+/// What a recording's own frames say about its noise floor, read off the grid
+/// [`slice`] cuts on.
+#[derive(Debug, Clone, Copy)]
+pub struct NoiseFloor {
+    /// dBFS of the quiet percentile: between-sentence dead air, room tone, and
+    /// whatever the preamp contributes.
+    pub floor_db: f32,
+    /// dBFS of the loud percentile — a representative speech level, not a peak.
+    pub signal_db: f32,
+}
+
+impl NoiseFloor {
+    /// Signal over floor in dB. The floor is clamped at [`SILENT_FLOOR_DB`], so
+    /// a digitally-silent recording reports a large ratio rather than an
+    /// unbounded one.
+    pub fn snr_db(&self) -> f32 {
+        self.signal_db - self.floor_db.max(SILENT_FLOOR_DB)
+    }
+
+    /// [`NoiseFloor::snr_db`] as a linear amplitude ratio.
+    pub fn snr(&self) -> f32 {
+        10f32.powf(self.snr_db() / 20.0)
+    }
+
+    /// The energy floor to slice this recording at: far enough above the
+    /// measured floor to clear the room tone, and far enough below the speech
+    /// not to gate it. Never above 0 dBFS, which would call every sample
+    /// silence.
+    pub fn silence_db(&self) -> f32 {
+        (self.floor_db + FLOOR_MARGIN_DB)
+            .min(self.signal_db - SPEECH_GUARD_DB)
+            .min(0.0)
+    }
+}
+
+/// Measure `samples`' noise floor and speech level, or `None` when there is too
+/// little to measure (empty input, a zero rate, under [`MIN_MEASURED_FRAMES`]).
+///
+/// The grid is [`slice`]'s — ~30 ms windows at a ~10 ms hop — and it derives
+/// from `sample_rate` alone, so the measurement never depends on the very knob
+/// it is there to decide. Percentiles are taken over dBFS directly rather than
+/// over RMS, which is the same ordering: `20 * log10` is monotone.
+pub fn noise_floor(samples: &[f32], sample_rate: u32) -> Option<NoiseFloor> {
+    if sample_rate == 0 {
+        return None;
+    }
+    let (hop, win) = frame_geometry(sample_rate);
+    let mut db = frame_db(samples, hop, win);
+    if db.len() < MIN_MEASURED_FRAMES {
+        return None;
+    }
+    db.sort_by(f32::total_cmp);
+    let pct = |p: f32| db[((db.len() - 1) as f32 * p) as usize];
+    Some(NoiseFloor {
+        floor_db: pct(0.10),
+        signal_db: pct(0.75),
+    })
 }
 
 /// A contiguous voiced run measured in frame indices, `[start, end)`.
@@ -92,11 +221,18 @@ struct Grid {
     max_clip: usize,
 }
 
+/// The analysis grid as `(hop, win)`: ~10 ms hop, ~30 ms window, at least one
+/// sample each. It depends on nothing but the rate, which is what lets
+/// [`noise_floor`] measure on the grid the cuts will be made on.
+fn frame_geometry(sample_rate: u32) -> (usize, usize) {
+    let hop = ((sample_rate as f32 * 0.010).round() as usize).max(1);
+    let win = ((sample_rate as f32 * 0.030).round() as usize).max(hop);
+    (hop, win)
+}
+
 impl Grid {
     fn new(sample_rate: u32, opts: &SliceOptions) -> Self {
-        // ~10 ms hop, ~30 ms window, at least one sample each.
-        let hop = ((sample_rate as f32 * 0.010).round() as usize).max(1);
-        let win = ((sample_rate as f32 * 0.030).round() as usize).max(hop);
+        let (hop, win) = frame_geometry(sample_rate);
         let samples = |secs: f32| (secs * sample_rate as f32).round() as usize;
         Self {
             hop,
@@ -636,6 +772,23 @@ mod tests {
         buf.extend(std::iter::repeat_n(0.0, n));
     }
 
+    /// Append `secs` seconds of white noise at a *known* RMS, which is what
+    /// lets a measured floor be checked against a number instead of against
+    /// itself. Uniform on `[-amp, amp]` has RMS `amp / sqrt(3)`.
+    fn push_noise(buf: &mut Vec<f32>, rng: &mut Rng, secs: f32, rms: f32) {
+        let amp = rms * 3f32.sqrt();
+        let n = (secs * SR as f32) as usize;
+        for _ in 0..n {
+            buf.push((rng.unit() * 2.0 - 1.0) * amp);
+        }
+    }
+
+    /// dBFS of a linear amplitude, for stating a test's expectation in the
+    /// units the measurement reports.
+    fn dbfs(amplitude: f32) -> f32 {
+        20.0 * amplitude.log10()
+    }
+
     /// Run a signal through [`Slicer`] in fixed-size chunks.
     fn stream(sig: &[f32], sample_rate: u32, opts: &SliceOptions, chunk: usize) -> Vec<Clip> {
         let mut slicer = Slicer::new(sample_rate, opts);
@@ -855,6 +1008,132 @@ mod tests {
                 c.end
             );
         }
+    }
+
+    #[test]
+    fn measurement_recovers_a_known_noise_floor() {
+        // Two decades apart, so a measurement that merely echoed the signal
+        // level or a constant could not pass both.
+        for floor_rms in [1e-3f32, 1e-4] {
+            let mut rng = Rng(0x1234_5678_9abc_def0);
+            let mut sig = Vec::new();
+            // 60% floor / 40% voice puts the 10th percentile inside the noise
+            // and the 75th inside the tone.
+            push_noise(&mut sig, &mut rng, 3.0, floor_rms);
+            push_voiced(&mut sig, 2.0);
+
+            let m = noise_floor(&sig, SR).expect("5 s is plenty to measure");
+            assert!(
+                (m.floor_db - dbfs(floor_rms)).abs() < 1.5,
+                "floor {:.2} dBFS should be within 1.5 dB of {:.2}",
+                m.floor_db,
+                dbfs(floor_rms)
+            );
+            assert!(
+                (m.signal_db - dbfs(0.5)).abs() < 0.5,
+                "signal {:.2} dBFS should be within 0.5 dB of {:.2} (a +/-0.5 square)",
+                m.signal_db,
+                dbfs(0.5)
+            );
+            // The ratio is the reading `rvc-train` weights its sampling by.
+            assert!(
+                (m.snr_db() - (dbfs(0.5) - dbfs(floor_rms))).abs() < 2.0,
+                "snr {:.1} dB",
+                m.snr_db()
+            );
+        }
+    }
+
+    #[test]
+    fn a_derived_floor_clears_the_room_tone_without_reaching_the_speech() {
+        let mut rng = Rng(0xdead_beef_0000_0001);
+        let mut sig = Vec::new();
+        push_noise(&mut sig, &mut rng, 3.0, 1e-3); // -60 dBFS room tone
+        push_voiced(&mut sig, 2.0); // -6 dBFS speech
+
+        let m = noise_floor(&sig, SR).unwrap();
+        let derived = m.silence_db();
+        assert!(
+            derived > m.floor_db && derived < m.signal_db,
+            "derived floor {derived:.2} must sit between {:.2} and {:.2}",
+            m.floor_db,
+            m.signal_db
+        );
+        // On a clean take the margin above the floor is what binds, not the
+        // guard under the speech.
+        assert!((derived - (m.floor_db + FLOOR_MARGIN_DB)).abs() < 1e-4);
+        // ...and the whole point: it is far below the fixed default, so the
+        // soft content between -52 and -40 dBFS survives.
+        assert!(derived < -40.0, "derived {derived:.2} should be under -40");
+
+        let opts = SliceOptions::default().with_measured_floor(&sig, SR);
+        assert_eq!(opts.silence_db, derived);
+    }
+
+    #[test]
+    fn a_noisy_take_gets_a_floor_that_does_not_gate_its_speech() {
+        // Room tone only 14 dB under the voice: `floor + margin` alone would
+        // land inside the speech, so the guard has to win.
+        let mut rng = Rng(0x0bad_c0de_1111_2222);
+        let mut sig = Vec::new();
+        push_noise(&mut sig, &mut rng, 3.0, 0.1); // -20 dBFS
+        push_voiced(&mut sig, 2.0); // -6 dBFS
+
+        let m = noise_floor(&sig, SR).unwrap();
+        let derived = m.silence_db();
+        assert!(
+            (derived - (m.signal_db - SPEECH_GUARD_DB)).abs() < 1e-4,
+            "guard must bind: derived {derived:.2}, floor {:.2}, signal {:.2}",
+            m.floor_db,
+            m.signal_db
+        );
+        assert!(derived < m.signal_db);
+    }
+
+    #[test]
+    fn a_derived_floor_is_never_positive() {
+        // Full-scale noise: `floor + margin` is above 0 dBFS, which would call
+        // every sample silence and produce no clips at all.
+        let mut rng = Rng(0x4444_5555_6666_7777);
+        let mut sig = Vec::new();
+        push_noise(&mut sig, &mut rng, 2.0, 1.0);
+        let m = noise_floor(&sig, SR).unwrap();
+        assert!(m.silence_db() <= 0.0, "{:.2} dBFS", m.silence_db());
+    }
+
+    #[test]
+    fn digital_silence_is_clamped_rather_than_unbounded() {
+        // `window_db`'s +1e-9 puts true silence near -180 dBFS. Unclamped, the
+        // ratio against it is ~1e9, and an SNR-weighted sampler would hand such
+        // a clip the whole distribution.
+        let mut sig = Vec::new();
+        push_silence(&mut sig, 3.0);
+        push_voiced(&mut sig, 2.0);
+        let m = noise_floor(&sig, SR).unwrap();
+        assert!(m.floor_db < SILENT_FLOOR_DB, "{:.1} dBFS", m.floor_db);
+        // 0.5 full scale over the 1e-6 clamp is 5e5 — the same number the
+        // linear `.max(1e-6)` this replaces produced.
+        assert!(
+            (m.snr() - 5e5).abs() < 5e4,
+            "clamped snr {:.3e} should be ~5e5",
+            m.snr()
+        );
+    }
+
+    #[test]
+    fn nothing_to_measure_leaves_the_floor_alone() {
+        let short = vec![0.5f32; 100]; // 3 frames at 48 kHz, under the minimum
+        assert!(noise_floor(&short, SR).is_none());
+        assert!(noise_floor(&[], SR).is_none());
+        assert!(noise_floor(&[0.5; 48_000], 0).is_none());
+
+        let opts = SliceOptions::default();
+        assert_eq!(opts.silence_db, -40.0, "the default floor must not move");
+        assert_eq!(
+            opts.with_measured_floor(&short, SR).silence_db,
+            -40.0,
+            "an unmeasurable signal must leave silence_db untouched"
+        );
     }
 
     #[test]

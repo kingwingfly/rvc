@@ -98,4 +98,4 @@ pub use denoise::{DenoiseParams, Denoiser};
 pub use encode::{write_wav, write_wav_file, write_wav_stereo, write_wav_stereo_file};
 pub use filter::AudioFilter;
 pub use pcm::{read_f32le, resample_linear, write_f32le, write_f32le_chunk};
-pub use slice::{Clip, SliceOptions, Slicer, slice};
+pub use slice::{Clip, NoiseFloor, SliceOptions, Slicer, noise_floor, slice};
