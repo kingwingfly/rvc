@@ -18,6 +18,7 @@ members = [
     "crates/burn-hubert",
     "crates/burn-whisper",
     "crates/burn-rmvpe",
+    "crates/burn-mdx",
     "crates/burn-seedvc",
     "crates/seedvc-core",
     "crates/seedvc-cli",
@@ -61,6 +62,8 @@ burn-gptsovits = { path = "crates/burn-gptsovits" }
 burn-hubert = { path = "crates/burn-hubert" }
 burn-whisper = { path = "crates/burn-whisper" }
 burn-rmvpe = { path = "crates/burn-rmvpe" }
+# Source separation: the network `preprocess` strips a music bed with.
+burn-mdx = { path = "crates/burn-mdx" }
 burn-seedvc = { path = "crates/burn-seedvc" }
 seedvc-core = { path = "crates/seedvc-core" }
 # `default-features = false` for the same reason as the other `*-cli` crates:

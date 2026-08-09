@@ -104,8 +104,9 @@ and what it does change sits outside the network entirely:
   - *packaging and WebUI ergonomics* — installation, defaults, the browser front
     end. None of it reaches the model.
   - *vocal separation swapped from UVR5 to PyMSS* — a corpus-preparation tool that
-    runs before training ever starts. This toolkit does not use either; its
-    corpus preparation is the sentence-safe slicer of §10.
+    runs before training ever starts. This toolkit uses neither: it ports
+    MDX23C, the TFC-TDF-UNet UVR itself ships, into `burn-mdx`, and its corpus
+    preparation is that plus the sentence-safe slicer of §10.
   - *FCPE added as a pitch extractor* — an alternative to RMVPE (§4) in the
     analysis front end, which is *frozen and speaker-independent* and therefore
     swappable without touching a single trained weight.

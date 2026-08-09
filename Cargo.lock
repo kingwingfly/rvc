@@ -902,6 +902,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "burn-mdx"
+version = "0.1.0"
+dependencies = [
+ "audio-kit",
+ "burn",
+ "burn-kit",
+ "burn-ndarray",
+ "burn-store",
+ "futures",
+ "rustfft",
+ "tokio",
+]
+
+[[package]]
 name = "burn-ndarray"
 version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
