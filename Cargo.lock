@@ -669,6 +669,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "burn-campplus"
+version = "0.1.0"
+dependencies = [
+ "burn",
+ "burn-kit",
+ "burn-ndarray",
+ "burn-store",
+]
+
+[[package]]
 name = "burn-candle"
 version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1004,6 +1014,7 @@ name = "burn-seedvc"
 version = "0.1.0"
 dependencies = [
  "burn",
+ "burn-campplus",
  "burn-kit",
  "burn-ndarray",
  "burn-store",

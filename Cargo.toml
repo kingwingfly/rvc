@@ -16,6 +16,7 @@ members = [
     "crates/burn-vits",
     "crates/burn-gptsovits",
     "crates/burn-hubert",
+    "crates/burn-campplus",
     "crates/burn-whisper",
     "crates/burn-rmvpe",
     "crates/burn-seedvc",
@@ -59,6 +60,9 @@ burn-vits = { path = "crates/burn-vits" }
 burn-gptsovits = { path = "crates/burn-gptsovits" }
 # One network, two engines: GPT-SoVITS's cnhubert and RVC's ContentVec.
 burn-hubert = { path = "crates/burn-hubert" }
+# One network, two engines again: Seed-VC's timbre encoder, and the speaker
+# embedding a diarising preprocessor compares clips by.
+burn-campplus = { path = "crates/burn-campplus" }
 burn-whisper = { path = "crates/burn-whisper" }
 burn-rmvpe = { path = "crates/burn-rmvpe" }
 burn-seedvc = { path = "crates/burn-seedvc" }

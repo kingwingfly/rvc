@@ -40,15 +40,24 @@ pub mod config;
 // All public: the weight-coverage example is this crate's only test, and it has
 // to construct every module it checks.
 pub mod bigvgan;
-pub mod campplus;
 pub mod content;
 pub mod dit;
-pub mod fbank;
 pub mod flow;
 pub mod length_regulator;
 pub mod style_encoder;
 pub mod vq;
 pub mod wavenet;
+
+// The timbre encoder and its filterbank live in `burn-campplus`, because a
+// second engine is about to read them and the workspace rule is that anything
+// two of them need moves to a neutral crate first — `burn-hubert`'s move out of
+// `burn-gptsovits`, one crate over. Re-exported under the names they had, so
+// `burn_seedvc::campplus::CamPPlus` and `burn_seedvc::fbank::Fbank` still
+// resolve and not one call site changed. Burn derives parameter paths from the
+// field names of the *containing* struct rather than from the crate a module was
+// declared in, so the move cannot touch a checkpoint key: CAMPPlus still loads
+// at 815/0/122.
+pub use burn_campplus::{self as campplus, CamPPlus, CamPPlusConfig, fbank};
 
 pub use bigvgan::{BigVgan, BigVganConfig};
 pub use config::SeedVcConfig;

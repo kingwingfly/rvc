@@ -22,6 +22,8 @@ wgpu = ["burn/wgpu"]
 [dependencies]
 burn = { version = "0.21", default-features = false, features = ["std"] }
 burn-vits.workspace = true
+# CAMPPlus and its Kaldi filterbank, re-exported so no call site moved.
+burn-campplus.workspace = true
 burn-whisper.workspace = true
 burn-store.workspace = true
 burn-kit = { workspace = true, features = ["store"] }
