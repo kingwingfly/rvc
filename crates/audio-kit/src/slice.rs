@@ -77,24 +77,35 @@ const SILENT_FLOOR_DB: f32 = -120.0;
 /// mean anything.
 const MIN_MEASURED_FRAMES: usize = 8;
 
-/// How far above the measured floor a derived `silence_db` sits.
+/// How far above the measured floor a derived `silence_db` sits, when the
+/// recording has room for it.
 ///
 /// Room tone is a distribution, not a level: [`NoiseFloor::floor_db`] is the
 /// middle of the dead-air frames, so a threshold sitting *on* it would call
-/// half the dead air voiced. Measured over this repository's own breathy
-/// close-mic corpus the per-clip spread between the 10th and 25th percentile
-/// runs 1.5–6 dB, and the gap up to the first genuinely voiced frame is far
-/// wider than that, so 8 dB clears the tone on every clip while staying well
-/// under the softest breath.
+/// half the dead air voiced and the dead air would survive into the corpus.
+/// 8 dB clears the spread without approaching speech on any recording with a
+/// normal dynamic range.
 const FLOOR_MARGIN_DB: f32 = 8.0;
 
-/// ...and how far below the loud percentile it must stay regardless.
+/// ...but never more than this far from the floor towards the speech.
 ///
-/// This is the guard for the inverted failure: on a noisy recording the floor
-/// and the speech are close, and `floor + margin` alone would land on top of
-/// the voice and gate it. Whichever of the two bounds is lower wins, so a
-/// hissy take gets a threshold that still keeps its speech.
-const SPEECH_GUARD_DB: f32 = 12.0;
+/// The margin above cannot be the whole story, because a close-mic breathy take
+/// has almost no range to spend it in: on this repository's own corpus,
+/// rebuilt into a raw recording (ten sentences with a second of the corpus's
+/// own room tone between them), the floor measures -51.4 dBFS and the speech
+/// -41.6 — a **9.8 dB** gap, where a flat 8 dB margin lands 1.8 dB under the
+/// voice. Taking a fraction of the measured gap instead makes the threshold
+/// structurally unable to reach the speech, which is the guard, and the two
+/// failures are then bounded from the same measurement rather than by two
+/// unrelated constants.
+///
+/// 0.4 is where the sweep put it. Every value from 0.3 to 0.6 recovers all ten
+/// sentences on that recording — against **five** for the fixed -40 dBFS — but
+/// they differ in what they keep of the soft tails: 28.5 s at 0.3, 27.9 s at
+/// 0.4, 27.0 s at 0.5, 25.9 s at 0.6, out of a 29.7 s ceiling (speech plus the
+/// full 0.15 s pad each side). The fixed floor keeps 8.2 s. 0.4 keeps 94% of
+/// that ceiling while still sitting 3.9 dB clear of the tone.
+const MARGIN_FRACTION: f32 = 0.4;
 
 impl SliceOptions {
     /// Replace `silence_db` with a floor measured from `samples`, leaving it
@@ -143,14 +154,13 @@ impl NoiseFloor {
         10f32.powf(self.snr_db() / 20.0)
     }
 
-    /// The energy floor to slice this recording at: far enough above the
-    /// measured floor to clear the room tone, and far enough below the speech
-    /// not to gate it. Never above 0 dBFS, which would call every sample
-    /// silence.
+    /// The energy floor to slice this recording at: [`FLOOR_MARGIN_DB`] above
+    /// the measured floor, or [`MARGIN_FRACTION`] of the way up to the speech,
+    /// whichever is nearer the floor. Never above 0 dBFS, which would call
+    /// every sample silence.
     pub fn silence_db(&self) -> f32 {
-        (self.floor_db + FLOOR_MARGIN_DB)
-            .min(self.signal_db - SPEECH_GUARD_DB)
-            .min(0.0)
+        let gap = (self.signal_db - self.floor_db).max(0.0);
+        (self.floor_db + FLOOR_MARGIN_DB.min(MARGIN_FRACTION * gap)).min(0.0)
     }
 }
 
@@ -1059,8 +1069,8 @@ mod tests {
             m.floor_db,
             m.signal_db
         );
-        // On a clean take the margin above the floor is what binds, not the
-        // guard under the speech.
+        // A 54 dB range is room enough for the flat margin, so that is the
+        // branch that binds rather than the fraction.
         assert!((derived - (m.floor_db + FLOOR_MARGIN_DB)).abs() < 1e-4);
         // ...and the whole point: it is far below the fixed default, so the
         // soft content between -52 and -40 dBFS survives.
@@ -1072,8 +1082,9 @@ mod tests {
 
     #[test]
     fn a_noisy_take_gets_a_floor_that_does_not_gate_its_speech() {
-        // Room tone only 14 dB under the voice: `floor + margin` alone would
-        // land inside the speech, so the guard has to win.
+        // Room tone only ~14 dB under the voice, which is the close-mic case
+        // this corpus is full of: a flat 8 dB margin would land 6 dB under the
+        // speech and start cutting into it, so the fraction has to win.
         let mut rng = Rng(0x0bad_c0de_1111_2222);
         let mut sig = Vec::new();
         push_noise(&mut sig, &mut rng, 3.0, 0.1); // -20 dBFS
@@ -1081,13 +1092,60 @@ mod tests {
 
         let m = noise_floor(&sig, SR).unwrap();
         let derived = m.silence_db();
+        let gap = m.signal_db - m.floor_db;
+        assert!(gap < FLOOR_MARGIN_DB / MARGIN_FRACTION, "gap {gap:.1} dB");
         assert!(
-            (derived - (m.signal_db - SPEECH_GUARD_DB)).abs() < 1e-4,
-            "guard must bind: derived {derived:.2}, floor {:.2}, signal {:.2}",
+            (derived - (m.floor_db + MARGIN_FRACTION * gap)).abs() < 1e-4,
+            "the fraction must bind: derived {derived:.2}, floor {:.2}, signal {:.2}",
             m.floor_db,
             m.signal_db
         );
-        assert!(derived < m.signal_db);
+        // The whole point of the fraction: the threshold cannot reach the
+        // speech, whatever the recording's range.
+        assert!(derived < m.floor_db + gap * 0.5);
+    }
+
+    #[test]
+    fn a_loud_room_is_cut_where_the_fixed_floor_keeps_the_dead_air() {
+        // Room tone at -35 dBFS under speech at -25: a recording whose noise
+        // sits *above* the fixed -40, so nothing in it is ever silent and the
+        // whole take comes back as one clip — dead air and all, which is what
+        // collapsed a generator to silence. The derived floor lands between the
+        // two and finds the sentences.
+        let mut rng = Rng(0x9999_1111_2222_3333);
+        let mut sig = Vec::new();
+        for i in 0..3 {
+            push_noise(&mut sig, &mut rng, 1.0, 10f32.powf(-35.0 / 20.0));
+            if i < 2 {
+                let n = (1.5 * SR as f32) as usize;
+                let amp = 10f32.powf(-25.0 / 20.0);
+                sig.extend((0..n).map(|j| if j.is_multiple_of(2) { amp } else { -amp }));
+            }
+        }
+
+        let m = noise_floor(&sig, SR).unwrap();
+        let derived = m.silence_db();
+        assert!(
+            derived > m.floor_db && derived < m.signal_db,
+            "derived {derived:.1} must separate tone {:.1} from speech {:.1}",
+            m.floor_db,
+            m.signal_db
+        );
+        assert_eq!(
+            slice(&sig, SR, &SliceOptions::default()).len(),
+            1,
+            "the fixed -40 floor cannot see this recording's dead air at all"
+        );
+        assert_eq!(
+            slice(
+                &sig,
+                SR,
+                &SliceOptions::default().with_measured_floor(&sig, SR)
+            )
+            .len(),
+            2,
+            "the derived floor must recover both sentences"
+        );
     }
 
     #[test]
