@@ -1,12 +1,28 @@
-//! Mix a known voice with a known instrumental bed, separate, and report the
-//! **gap** between how well each stem tracks what it should and what it should
-//! not.
+//! Separate, and report the **gap** between how well each stem tracks what it
+//! should and what it should not.
 //!
 //! This is the check weight coverage cannot make. `examples/load` reports
 //! 319/0/0, and that says the module tree matches the checkpoint — it says
 //! nothing about the U-net running with time as the image height, or about the
 //! norms being instance norms rather than batch norms in evaluation mode. Both
 //! would load perfectly and separate nothing.
+//!
+//! # Two modes, and why neither replaces the other
+//!
+//! **Default: a synthetic mixture.** A known voice over a known bed, so every
+//! reading has a reference and SI-SDR against a *source* is available. That is
+//! what proves the port, and it is confined to material MDX23C was not trained
+//! on — this repository's corpus is dry close-mic speech and the bed below is a
+//! synthesised chord.
+//!
+//! **`--mixture <file>`: a real recording.** In distribution, and with no
+//! ground truth whatsoever — nobody holds the stems of somebody else's stream.
+//! So it answers the question the synthetic mode cannot (*does this separate
+//! real material?*) and cannot answer the one the synthetic mode does (*is the
+//! forward pass right?*), because every reading it makes is relative. Keeping
+//! both is the point: a partition SI-SDR proves arithmetic, a speech-gap
+//! contrast measures usefulness, and reading either as the other is the mistake
+//! this file is arranged to prevent.
 //!
 //! # The baseline is the mixture, not chance
 //!
@@ -58,26 +74,94 @@
 //! **What it does not establish is separation quality**, and the numbers are
 //! honest about that: 4.7 dB of rejection on a solo source is far below the
 //! 20 dB-plus a vocal separator manages on the material it was trained for, and
-//! every mixture row sits within a decibel of doing nothing. The most likely
-//! reason is the input rather than the port — MDX23C was trained on *sung*
-//! vocals inside real productions, and this feeds it dry, close-mic Chinese
-//! speech over a synthesised organ chord, which is out of distribution on both
-//! sides. **Closing that gap needs a real music mixture, which this repository
-//! does not contain**, so it is stated as an open question rather than
-//! explained away. The unit tests are what pin the two components this example
-//! cannot isolate: `net::tests` compares the norm against Burn's own
-//! `InstanceNorm` and GELU against hand-computed erf values.
+//! every mixture row sits within a decibel of doing nothing. The reason is the
+//! input rather than the port — MDX23C was trained on *sung* vocals inside real
+//! productions, and this feeds it dry, close-mic Chinese speech over a
+//! synthesised organ chord, which is out of distribution on both sides. That
+//! was an open question until a real mixture was measured; the next section is
+//! the answer, and it is the input. The unit tests are what pin the two
+//! components this example cannot isolate: `net::tests` compares the norm
+//! against Burn's own `InstanceNorm` and GELU against hand-computed erf values.
+//!
+//! # What `--mixture` established on real material
+//!
+//! One 19.8-minute stereo stream at 44.1 kHz — a streamer talking over
+//! somebody else's music — on LibTorch/CUDA at 50% overlap-add. `contrast` is
+//! the loudest against the quietest tenth of 250 ms frames, chosen by the
+//! *mixture* so all three rows are read over the same instants; `bed out` is
+//! how far `est_vocals` sits under the mixture in the quiet frames, which is
+//! the music that came out of it.
+//!
+//! | excerpt | side below mid | partition | vocals rms | instr rms | contrast mix/voc/instr | bed out |
+//! |---|---|---|---|---|---|---|
+//! | 900–960 s | 18.6 dB | 34.9 dB | −2.5 dB | −5.1 dB | 19.9 / **24.4** / 10.5 dB | **−6.5 dB** |
+//! | 900–930 s | 17.1 dB | 36.3 dB | −3.0 dB | −5.2 dB | 22.1 / **25.7** / 11.6 dB | −6.0 dB |
+//! | 180–210 s | 14.3 dB | 34.2 dB | −2.6 dB | −3.5 dB | 12.9 / **16.8** / 7.7 dB | −5.5 dB |
+//! | 480–510 s | 16.2 dB | 34.6 dB | −0.7 dB | −7.3 dB | 22.5 / 23.5 / 16.7 dB | −2.0 dB |
+//! | 900–960 s folded to mono | — | 37.5 dB | −2.6 dB | −5.4 dB | 19.9 / 22.9 / 10.7 dB | −5.1 dB |
+//!
+//! **It separates, and the amount is modest.** The three rows move together in
+//! the way a working separation has to: the vocals stem's contrast comes out
+//! *above* the mixture's and the instrumental stem's *below* it, which is one
+//! stem following the intermittent speech and the other following the
+//! continuous bed. Neither stem is near-silent. But 5–6.5 dB of bed removal is
+//! a long way from the 15–20 dB this model reaches on a song, so the music is
+//! attenuated rather than gone.
+//!
+//! **The 480 s row is the control, not an outlier.** That region's bed stops
+//! between phrases instead of running under them, so there is little bed in the
+//! quiet frames to remove — and the instrumental stem's contrast rises to
+//! 16.7 dB, tracking a bed that is itself intermittent. Less removal where
+//! there is less to remove is the model behaving, and it is why one excerpt is
+//! not a measurement.
+//!
+//! **Near-mono costs about 1.4 dB, so it is not the explanation.** The side
+//! channel sits 14–19 dB under the mid on every excerpt, which removes most of
+//! the spatial cue a stereo-native separator would use. Folding the mixture to
+//! true mono and re-running takes the removal from 6.5 dB to 5.1 dB — real, and
+//! far too small to be the gap. What is left is the material: a speaking voice
+//! is not a sung one, and a stream's backing track is not a mastered production.
+//!
+//! **The partition is 34–37 dB here against 41.5 dB on one chunk.** The
+//! difference is the seams: this runs 50% overlap-add across a whole file where
+//! upstream's config asks for `num_overlap: 8`. It is a property of the chunking
+//! and not of the weights.
+//!
+//! ## What `stt` says, which is the closest thing to listening
+//!
+//! Transcribing the mixture and the vocals stem of the same 60 s with the same
+//! flags (`stt convert -l zh --backend tch`; **pin the language**, since letting
+//! it detect gives the two files different ones and the comparison stops
+//! meaning anything):
+//!
+//! - **The words are the same.** Same content, same order, differing in one
+//!   character across 60 s.
+//! - **The segmentation is not, and that is the finding.** The mixture yields
+//!   **5** segments, one of them 18.8 s of merged speech; the stem yields
+//!   **14**, one per utterance. `audio_kit`'s slicer cuts on silence, and a
+//!   continuous bed means the recording *has* no silence — so a corpus behind
+//!   music cannot be sliced into sentences at all until the bed comes off. That
+//!   is a larger practical gain than the 6.5 dB suggests.
+//! - **Two of the 14 are hallucinations** (`Pelsa made a bangle`, `拜拜`) in
+//!   near-silent frames the mixture's longer segments had swallowed. Emptier
+//!   gaps give Whisper more room to invent, so anything consuming the stems
+//!   wants a duration or confidence floor.
 //!
 //! # Cost
 //!
 //! One chunk: 261,120 samples, 5.92 s, one forward pass over `[1, 16, 1024,
 //! 256]` — around 1 TFLOP and 134 MB per activation at the widest. That is why
 //! this example carries `required-features = ["tch"]` and why `--backend
-//! tch-gpu` is the sensible way to run it.
+//! tch-gpu` is the sensible way to run it. Measured there: **0.83 s per chunk**,
+//! so `--mixture` runs at roughly 3.5x realtime at 50% overlap.
 //!
 //! Usage:
-//! `cargo run -p burn-mdx --example separate --features tch -- \
-//!      [--backend tch|tch-gpu|cuda] [--out <dir>] <MDX23C-*.ckpt> <speech.wav>...`
+//! ```text
+//! cargo run -p burn-mdx --example separate --features tch -- \
+//!     [--backend tch|tch-gpu|cuda] [--out <dir>] <MDX23C-*.ckpt> <speech.wav>...
+//! cargo run -p burn-mdx --example separate --features tch -- \
+//!     [--backend ...] [--out <dir>] --mixture <song.wav> <MDX23C-*.ckpt>
+//! ```
 
 #[path = "common/mod.rs"]
 mod common;
