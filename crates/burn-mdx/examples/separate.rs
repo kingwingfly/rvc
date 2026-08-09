@@ -8,41 +8,65 @@
 //! norms being instance norms rather than batch norms in evaluation mode. Both
 //! would load perfectly and separate nothing.
 //!
-//! # Why a gap and not a correlation
+//! # The baseline is the mixture, not chance
 //!
 //! `burn-gptsovits`'s `reconstruct` correlates its output against its input,
 //! which is right for a round trip and **wrong here**: a network that returned
-//! its input unchanged would score beautifully. So each estimated stem is
-//! scored against *both* sources, and the claim is the ordering:
+//! its input unchanged would score beautifully. For separation the meaningful
+//! do-nothing is the *unprocessed mixture*, so it is printed as a row of every
+//! table and the number that means anything is the delta from it. Chance is the
+//! wrong reference; a chance-level result and an identity result are miles
+//! apart and only one of them is a bug.
 //!
-//! ```text
-//! corr(est_vocals,       voice) >> corr(est_vocals,       bed)
-//! corr(est_instrumental, bed)   >> corr(est_instrumental, voice)
-//! ```
+//! Three readings, because no single one of them is sufficient:
 //!
-//! # Why log-spectra and not RMS
+//! 1. **Partition** — do the stems sum back to the mixture? Independent of how
+//!    well the model separates, and the check that actually proves the port.
+//! 2. **Solo rejection** — feed one source alone; the other stem must go quiet.
+//!    Independent of the mixture being realistic.
+//! 3. **SI-SDR and correlations against both sources** — the quality question,
+//!    and the only one that depends on the bed being convincing.
 //!
-//! CLAUDE.md records the lesson at length: sample-wise RMS on a waveform is
-//! phase-sensitive, and two runs of the *same* model can differ hugely by it.
-//! The primary number here is the correlation of **log-magnitude
-//! spectrograms**, computed by a second, small STFT that has nothing to do with
-//! the model's front end. The energy envelope is reported beside it as the
-//! coarser reading, and a frame-shuffled log-spectrum gives the chance baseline
-//! — without one, "0.6" means nothing.
+//! SI-SDR leads the third because it is the field's standard measure and, unlike
+//! a correlation, is not saturated near 1.0 — a correlation has no room left to
+//! show an improvement when the mixture already scores 0.9. CLAUDE.md's warning
+//! that sample-wise metrics are phase-sensitive is about *vocoders*, which
+//! invent phase; this model predicts the complex spectrum. The phase-free
+//! energy-envelope correlation is reported beside it so neither stands alone.
 //!
-//! # Expected, on `MDX23C-8KFFT-InstVoc_HQ.ckpt` at 0 dB mix
+//! # What this actually established, and what it did not
 //!
-//! | | vs voice | vs bed |
-//! |---|---|---|
-//! | `est_vocals` | high | low |
-//! | `est_instrumental` | low | high |
+//! Measured on `MDX23C-8KFFT-InstVoc_HQ.ckpt`, LibTorch/CUDA, six clips of this
+//! repository's own corpus against the bed below at a 0 dB mix:
 //!
-//! A working port puts each stem's own source **well above** both the other
-//! source and the shuffled baseline; the mixture's own correlation against each
-//! source is printed as the do-nothing reference, and a stem that does not beat
-//! it has not separated anything. The measured numbers are in this crate's
-//! commit message and in the PR — they are hardware- and clip-dependent enough
-//! that pinning an exact figure in a doc comment would rot.
+//! | reading | value |
+//! |---|---|
+//! | **partition** — `est_vocals + est_instrumental` vs the mixture | **41.5 dB** SI-SDR |
+//! | solo voice in — vocals / instrumental rms | 0.0516 / 0.0299 (**4.7 dB** rejection) |
+//! | solo bed in — vocals / instrumental rms | 0.0226 / 0.0526 (**7.3 dB** rejection) |
+//! | SI-SDR of `est_vocals` vs voice / vs bed | −0.25 / −0.54 dB |
+//! | envelope corr, `est_vocals` vs voice / vs bed | 0.678 / 0.645 |
+//! | envelope corr, `est_instrumental` vs voice / vs bed | 0.508 / 0.583 |
+//!
+//! **Read the first row first.** The two stems reconstruct their input to
+//! 41.5 dB, and the solo probes split *in opposite directions* depending on
+//! which source went in. Together those say the forward pass is coherent and
+//! content-dependent: a transposed U-net, a batch norm where an instance norm
+//! belongs, a mis-scaled block or a scrambled stem axis destroys one or both,
+//! because nothing downstream re-imposes either property.
+//!
+//! **What it does not establish is separation quality**, and the numbers are
+//! honest about that: 4.7 dB of rejection on a solo source is far below the
+//! 20 dB-plus a vocal separator manages on the material it was trained for, and
+//! every mixture row sits within a decibel of doing nothing. The most likely
+//! reason is the input rather than the port — MDX23C was trained on *sung*
+//! vocals inside real productions, and this feeds it dry, close-mic Chinese
+//! speech over a synthesised organ chord, which is out of distribution on both
+//! sides. **Closing that gap needs a real music mixture, which this repository
+//! does not contain**, so it is stated as an open question rather than
+//! explained away. The unit tests are what pin the two components this example
+//! cannot isolate: `net::tests` compares the norm against Burn's own
+//! `InstanceNorm` and GELU against hand-computed erf values.
 //!
 //! # Cost
 //!
@@ -303,7 +327,10 @@ impl common::Job for Separate {
             res.missing.len(),
             res.unused.len()
         );
-        assert!(res.missing.is_empty() && !res.applied.is_empty(), "bad load");
+        assert!(
+            res.missing.is_empty() && !res.applied.is_empty(),
+            "bad load"
+        );
 
         let stft = cfg.stft();
         let separate = |signal: &[f32]| -> Vec<Vec<f32>> {
@@ -367,6 +394,28 @@ impl common::Job for Separate {
                 )
             }))
             .collect();
+
+        // --- the partition check --------------------------------------------
+        //
+        // The one number here that does not depend on the model being *good*.
+        // MDX23C's two stems are trained to partition their input, so a
+        // coherent forward pass must satisfy
+        // `est_vocals + est_instrumental ≈ mixture` no matter how well it
+        // actually separates — and a port with a transposed U-net or a
+        // mis-scaled block cannot produce that by accident, because nothing
+        // downstream re-imposes it. This is what separates "the port is wrong"
+        // from "this input is nothing like the music the weights were trained
+        // on", and those two hypotheses are otherwise indistinguishable from
+        // the table below.
+        let partition: Vec<f32> = estimates[0]
+            .iter()
+            .zip(&estimates[1])
+            .map(|(a, b)| a + b)
+            .collect();
+        println!(
+            "\npartition: est_vocals + est_instrumental vs the mixture, SI-SDR {:.2} dB",
+            si_sdr(&partition, &mix)
+        );
 
         println!("\nSI-SDR, dB (the number to read; the mixture row is do-nothing)");
         println!("  {:<22} {:>9} {:>9}", "", "vs voice", "vs bed");

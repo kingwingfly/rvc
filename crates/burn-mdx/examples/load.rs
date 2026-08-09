@@ -121,7 +121,10 @@ impl common::Job for Load {
         // through a value check.
         assert!(v.iter().all(|x| x.is_finite()), "output must be finite");
         let peak = v.iter().fold(0.0f32, |a, b| a.max(b.abs()));
-        assert!(peak > 0.0, "noise in, silence out — the network did nothing");
+        assert!(
+            peak > 0.0,
+            "noise in, silence out — the network did nothing"
+        );
         println!(
             "\nforward : {:?} peak={peak:.6}",
             [1, cfg.stems, 2 * cfg.audio_channels, cfg.dim_f, frames]

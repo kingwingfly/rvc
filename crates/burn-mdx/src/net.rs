@@ -116,9 +116,13 @@ impl<B: Backend> Tdf<B> {
         let narrow = bins / bottleneck;
         Self {
             norm1: Norm::new(channels, device),
-            down: LinearConfig::new(bins, narrow).with_bias(false).init(device),
+            down: LinearConfig::new(bins, narrow)
+                .with_bias(false)
+                .init(device),
             norm2: Norm::new(channels, device),
-            up: LinearConfig::new(narrow, bins).with_bias(false).init(device),
+            up: LinearConfig::new(narrow, bins)
+                .with_bias(false)
+                .init(device),
         }
     }
 
@@ -201,9 +205,7 @@ impl<B: Backend> TfcTdf<B> {
     }
 
     pub(crate) fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
-        self.blocks
-            .iter()
-            .fold(x, |acc, block| block.forward(acc))
+        self.blocks.iter().fold(x, |acc, block| block.forward(acc))
     }
 }
 
@@ -220,12 +222,7 @@ pub struct Downscale<B: Backend> {
 }
 
 impl<B: Backend> Downscale<B> {
-    fn new(
-        in_channels: usize,
-        out_channels: usize,
-        scale: [usize; 2],
-        device: &B::Device,
-    ) -> Self {
+    fn new(in_channels: usize, out_channels: usize, scale: [usize; 2], device: &B::Device) -> Self {
         Self {
             norm: Norm::new(in_channels, device),
             conv: Conv2dConfig::new([in_channels, out_channels], scale)
@@ -250,12 +247,7 @@ pub struct Upscale<B: Backend> {
 }
 
 impl<B: Backend> Upscale<B> {
-    fn new(
-        in_channels: usize,
-        out_channels: usize,
-        scale: [usize; 2],
-        device: &B::Device,
-    ) -> Self {
+    fn new(in_channels: usize, out_channels: usize, scale: [usize; 2], device: &B::Device) -> Self {
         Self {
             norm: Norm::new(in_channels, device),
             conv: ConvTranspose2dConfig::new([in_channels, out_channels], scale)
@@ -391,7 +383,11 @@ mod tests {
         let mine = Norm::<B>::new(channels, &device);
         let theirs = burn::nn::InstanceNormConfig::new(channels).init::<B>(&device);
 
-        let x = Tensor::<B, 4>::random([2, channels, 7, 11], Distribution::Normal(0.0, 3.0), &device);
+        let x = Tensor::<B, 4>::random(
+            [2, channels, 7, 11],
+            Distribution::Normal(0.0, 3.0),
+            &device,
+        );
         let (a, b): (Vec<f32>, Vec<f32>) = (
             mine.forward(x.clone()).into_data().to_vec().unwrap(),
             theirs.forward(x).into_data().to_vec().unwrap(),
@@ -401,7 +397,10 @@ mod tests {
             .zip(&b)
             .map(|(p, q)| (p - q).abs())
             .fold(0.0f32, f32::max);
-        assert!(a.iter().all(|v| v.is_finite()), "normalisation must be finite");
+        assert!(
+            a.iter().all(|v| v.is_finite()),
+            "normalisation must be finite"
+        );
         assert!(diff < 1e-4, "instance normalisation differs by {diff}");
     }
 

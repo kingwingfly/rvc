@@ -332,7 +332,7 @@ cargo run -p burn-seedvc --example speaker    # pairwise cosine: same speaker vs
 cargo run -p burn-seedvc --example vocode     # BigVGAN: does the waveform track the mel
 cargo run -p burn-seedvc --example content    # whisper-small + the length regulator
 cargo run -p burn-rvc    --example infer      # one generator forward pass
-cargo run -p burn-mdx --example separate --features tch  # each stem vs both sources
+cargo run -p burn-mdx --example separate --features tch  # stems partition the mix, 41.5 dB
 cargo run -p seedvc-core --features tch --example convert  # the engine, end to end
 cargo run -p seedvc-core --features tch --example stream   # the same, through the filter
 cargo run -p rvc-core --features tch --example f0_runtimes # Burn vs ORT F0, median 0.005–1.40 Hz
@@ -825,6 +825,18 @@ Each model therefore needs a second check that exercises arithmetic:
 - `tts` end to end — synthesise, then transcribe the result with `stt`. Text in
   and text out are compared by an independent model, which is as close to
   listening as an automated check gets.
+- `burn-mdx` — `examples/separate` mixes a known voice with a known
+  instrumental bed and reads three things, of which **the first is the one that
+  proves the port**: the two stems sum back to the mixture at **41.5 dB**
+  SI-SDR, and a solo source splits in *opposite directions* depending on which
+  one went in (4.7 dB and 7.3 dB rejection). Neither survives a transposed
+  U-net, a batch norm where an instance norm belongs or a scrambled stem axis,
+  because nothing downstream re-imposes them. **Separation quality is a
+  separate question and is deliberately left open**: every mixture-level SI-SDR
+  sits within a decibel of doing nothing, which is most likely the input —
+  MDX23C was trained on sung vocals inside real productions, and the check
+  feeds it dry close-mic speech over a synthesised chord. Settling it needs a
+  real music mixture, which this repository does not have.
 
 ### The semantic-token boundary (`burn-gptsovits::quantizer`)
 25 Hz token ids over a 1024-entry codebook are what the two stages agree on: T2S

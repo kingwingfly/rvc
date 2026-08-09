@@ -231,7 +231,7 @@ impl<B: Backend> TfcTdfNet<B> {
         let folded = cfg.dim_f / cfg.num_subbands;
         let divisor = cfg.scale[1].pow(cfg.num_scales as u32);
         assert!(
-            cfg.dim_f.is_multiple_of(cfg.num_subbands) && folded.is_multiple_of(divisor),
+            cfg.dim_f % cfg.num_subbands == 0 && folded % divisor == 0,
             "dim_f {} does not survive {} subbands and {} halvings",
             cfg.dim_f,
             cfg.num_subbands,
@@ -295,12 +295,7 @@ impl<B: Backend> TfcTdfNet<B> {
             decoder_blocks,
             // The head eats the network's output *and* the mixture, hence
             // `channels + dim_c`.
-            final_conv: FinalConv::new(
-                channels + dim_c,
-                channels,
-                cfg.stems * dim_c,
-                device,
-            ),
+            final_conv: FinalConv::new(channels + dim_c, channels, cfg.stems * dim_c, device),
             num_subbands: cfg.num_subbands,
             stems: cfg.stems,
             scale: cfg.scale,
@@ -322,7 +317,7 @@ impl<B: Backend> TfcTdfNet<B> {
         let [batch, channels, dim_f, frames] = spec.dims();
         let stride = self.scale[0].pow(self.encoder_blocks.len() as u32);
         assert!(
-            frames.is_multiple_of(stride),
+            frames % stride == 0,
             "{frames} frames is not a multiple of {stride}; pad the chunk, not the tensor"
         );
 

@@ -85,7 +85,7 @@ impl Stft {
     /// upstream's behaviour and is why a round trip through this pair is lossy
     /// by construction whenever `dim_f < n_bins`.
     pub fn new(n_fft: usize, hop: usize, dim_f: usize) -> Self {
-        assert!(n_fft.is_multiple_of(2), "n_fft must be even");
+        assert!(n_fft % 2 == 0, "n_fft must be even");
         assert!(hop > 0 && hop <= n_fft, "hop must be in 1..=n_fft");
         assert!(
             dim_f <= n_fft / 2 + 1,
@@ -259,7 +259,7 @@ impl Stft {
     pub fn inverse<B: Backend>(&self, spec: Tensor<B, 4>) -> Vec<Vec<Vec<f32>>> {
         let [n, channels2, bins, frames] = spec.dims();
         assert_eq!(bins, self.dim_f, "spectrum has {bins} bins, expected dim_f");
-        assert!(channels2.is_multiple_of(2), "re/im channels must pair up");
+        assert!(channels2 % 2 == 0, "re/im channels must pair up");
         let data: Vec<f32> = spec.into_data().to_vec().expect("f32 spectrum");
         let stride = channels2 * bins * frames;
         (0..n)
@@ -298,7 +298,9 @@ mod tests {
         let mut state = 0x2545_F491_4F6C_DD1Du64;
         (0..n)
             .map(|_| {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 ((state >> 40) as f32 / 8388608.0) - 1.0
             })
             .collect()
@@ -306,7 +308,10 @@ mod tests {
 
     fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
         assert_eq!(a.len(), b.len());
-        a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0, f32::max)
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0, f32::max)
     }
 
     /// Periodic Hann starts at exactly zero and never reaches 1 at the end;
@@ -336,7 +341,10 @@ mod tests {
         let hop = 8;
         let stft = Stft::new(n_fft, hop, n_fft / 2 + 1);
         let samples = hop * 31;
-        let audio = vec![noise(samples), noise(samples).iter().rev().copied().collect()];
+        let audio = vec![
+            noise(samples),
+            noise(samples).iter().rev().copied().collect(),
+        ];
 
         let (spec, frames) = stft.analyze(&audio);
         assert_eq!(frames, 32);
@@ -390,7 +398,10 @@ mod tests {
         // *that* is broadband, so the outermost window's worth of samples is
         // legitimately altered by the truncation. Compare the interior.
         let edge = n_fft;
-        let diff = max_abs_diff(&audio[0][edge..samples - edge], &back[0][edge..samples - edge]);
+        let diff = max_abs_diff(
+            &audio[0][edge..samples - edge],
+            &back[0][edge..samples - edge],
+        );
         assert!(diff < 1e-3, "band-limited tone came back off by {diff}");
     }
 
@@ -425,7 +436,10 @@ mod tests {
         let from_narrow = truncating.synthesize(&narrow, 1, frames);
         let from_wide = full.synthesize(&wide, 1, frames);
         let diff = max_abs_diff(&from_narrow[0], &from_wide[0]);
-        assert!(diff < 1e-5, "the two spellings of truncation differ by {diff}");
+        assert!(
+            diff < 1e-5,
+            "the two spellings of truncation differ by {diff}"
+        );
     }
 
     /// The frame arithmetic the checkpoint's `chunk_size` depends on. A
@@ -446,6 +460,9 @@ mod tests {
     #[test]
     fn reflection_excludes_the_edge_sample() {
         let x = [1.0f32, 2.0, 3.0, 4.0, 5.0];
-        assert_eq!(reflect_pad(&x, 2), vec![3.0, 2.0, 1.0, 2.0, 3.0, 4.0, 5.0, 4.0, 3.0]);
+        assert_eq!(
+            reflect_pad(&x, 2),
+            vec![3.0, 2.0, 1.0, 2.0, 3.0, 4.0, 5.0, 4.0, 3.0]
+        );
     }
 }
