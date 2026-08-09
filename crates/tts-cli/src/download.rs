@@ -22,9 +22,14 @@ pub struct DownloadArgs {
     /// flatter on Chinese and unchanged on English, which is fed zeros anyway.
     #[arg(long)]
     pub no_prosody: bool,
+    #[command(flatten)]
+    pub download: cli_kit::DownloadOpts,
 }
 
 pub async fn run(args: DownloadArgs) -> Result<()> {
+    // Before the first fetch, so a stalled transfer is bounded rather than
+    // discovered.
+    args.download.install()?;
     let dir = hub_kit::fetch_gptsovits(&args.cache_dir)
         .await
         .context("failed to fetch the GPT-SoVITS models")?;

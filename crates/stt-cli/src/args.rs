@@ -70,9 +70,14 @@ pub struct DownloadArgs {
     /// unless `$STT_CACHE_DIR` (or `$VOICE_CACHE_DIR`) says otherwise.
     #[arg(long, default_value_os_t = hub_kit::cache_dir_for("STT_CACHE_DIR"))]
     pub cache_dir: PathBuf,
+    #[command(flatten)]
+    pub download: cli_kit::DownloadOpts,
 }
 
 pub async fn download(args: DownloadArgs) -> Result<()> {
+    // Before the first fetch, so a stalled transfer is bounded rather than
+    // discovered.
+    args.download.install()?;
     let assets = hub_kit::fetch_whisper(args.repo.as_deref(), &args.cache_dir)
         .await
         .context("failed to fetch the Whisper model")?;

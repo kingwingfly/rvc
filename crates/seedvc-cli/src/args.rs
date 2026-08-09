@@ -223,4 +223,6 @@ pub struct DownloadArgs {
     /// unless `$SEEDVC_CACHE_DIR` (or `$VOICE_CACHE_DIR`) says otherwise.
     #[arg(long, default_value_os_t = hub_kit::cache_dir_for("SEEDVC_CACHE_DIR"))]
     pub cache_dir: PathBuf,
+    #[command(flatten)]
+    pub download: cli_kit::DownloadOpts,
 }

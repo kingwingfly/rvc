@@ -5,6 +5,10 @@ use anyhow::{Context, Result};
 use crate::args::DownloadArgs;
 
 pub async fn run(args: DownloadArgs) -> Result<()> {
+    // Before the first fetch, so a stalled transfer is bounded rather than
+    // discovered — and this engine fetches from four repos, so there are four
+    // chances to hit one.
+    args.download.install()?;
     let paths = hub_kit::fetch_seedvc(&args.cache_dir)
         .await
         .context("failed to fetch the Seed-VC models")?;

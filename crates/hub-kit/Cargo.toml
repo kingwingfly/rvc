@@ -14,6 +14,10 @@ hf-hub.workspace = true
 reqwest.workspace = true
 flate2.workspace = true
 tar.workspace = true
-tokio.workspace = true
+# `time` for the stall watchdog's clock — named here rather than relied on from
+# the workspace set, because feature unification would supply it today (hf-hub
+# and reqwest both want it) and the failure if that ever stopped being true is a
+# compile error in a crate nobody was editing.
+tokio = { workspace = true, features = ["time"] }
 thiserror.workspace = true
 tracing.workspace = true

@@ -7,6 +7,10 @@ use crate::args::{DownloadArgs, weight_format};
 use crate::commands::common::parse_model_ref;
 
 pub async fn run(a: DownloadArgs) -> Result<()> {
+    // Before the first fetch, so a stalled transfer is bounded rather than
+    // discovered — and before `parse_model_ref` too, since a bad
+    // `--download-timeout` should not wait for a bad `--content` to be reported.
+    a.download.install()?;
     let content = a.content.as_deref().map(parse_model_ref).transpose()?;
     let rmvpe = a.rmvpe.as_deref().map(parse_model_ref).transpose()?;
 

@@ -1491,6 +1491,7 @@ dependencies = [
  "burn-kit",
  "clap",
  "clap_complete",
+ "hub-kit",
  "tokio",
  "tracing-subscriber",
 ]
