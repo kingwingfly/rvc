@@ -46,9 +46,16 @@ pub enum HubError {
     /// one failure here that the server never reported: the bytes simply stopped
     /// arriving. That is the case this crate used to sit in forever with no
     /// diagnostic at all, so it says what expired and what to turn.
+    // Naming *where* the two flags live, not just what they are called: a
+    // stall during a conversion or a training run reaches this message too, and
+    // those subcommands do not take them. Sending that user to `download`,
+    // which does, is both true everywhere and the thing that actually helps —
+    // prefetching with a longer window is how an unreliable link is worked
+    // around before the run that matters.
     #[error(
-        "{what}: no data for {}s, abandoned after {tries} attempt(s) — raise \
-         --download-timeout if the link is just slow to get going, --retries if it is flaky",
+        "{what}: no data for {}s, abandoned after {tries} attempt(s) — the `download` \
+         subcommand takes --download-timeout for a link that is slow to get going, \
+         and --retries for one that is flaky",
         stall.as_secs()
     )]
     Stalled {
@@ -87,9 +94,9 @@ pub struct Retry {
     /// is the whole reason this is not a `tokio::time::timeout` around the
     /// fetch: Whisper large-v3-turbo is 1.6 GB, and any deadline generous
     /// enough for that on a slow link is far too long to notice a stall. What
-    /// is measured instead is silence — hf-hub reports every chunk it writes,
-    /// so a transfer moving at any rate at all keeps resetting this, and only
-    /// one that has stopped runs it out.
+    /// is measured instead is **bytes arriving**: a transfer moving at any rate
+    /// at all keeps resetting this, and only one that has stopped runs it out.
+    /// Bytes rather than progress reports, for the reason [`Heartbeat`] gives.
     pub stall: Duration,
     /// How many times a fetch that stalled is started again from the top.
     ///
