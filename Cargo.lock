@@ -910,6 +910,7 @@ dependencies = [
  "burn-kit",
  "burn-ndarray",
  "burn-store",
+ "futures",
  "rustfft",
  "tokio",
 ]

@@ -315,6 +315,7 @@ cargo build --release --no-default-features --features cuda
 cargo run -p burn-rvc --example load -- <path/to/f0G48k.pth>       # 560/0, 165/0
 cargo run -p burn-rvc --example load -- contentvec <path/to/hubert_base>  # 210/0
 cargo run -p burn-rmvpe --example load -- <path/to/rmvpe.pt>       # 623/0/118
+cargo run -p burn-mdx --example load -- <path/to/MDX23C-8KFFT-InstVoc_HQ.ckpt>  # 319/0/0
 cargo run -p burn-whisper --example load -- <path/to/model.safetensors>  # 587/0
 cargo run -p burn-gptsovits --example load -- hubert <chinese-hubert-base/pytorch_model.bin>  # 210/0
 cargo run -p burn-seedvc --example load -- <DiT_seed_v2_...pruned.pth>   # module by module
@@ -331,6 +332,7 @@ cargo run -p burn-seedvc --example speaker    # pairwise cosine: same speaker vs
 cargo run -p burn-seedvc --example vocode     # BigVGAN: does the waveform track the mel
 cargo run -p burn-seedvc --example content    # whisper-small + the length regulator
 cargo run -p burn-rvc    --example infer      # one generator forward pass
+cargo run -p burn-mdx --example separate --features tch  # each stem vs both sources
 cargo run -p seedvc-core --features tch --example convert  # the engine, end to end
 cargo run -p seedvc-core --features tch --example stream   # the same, through the filter
 cargo run -p rvc-core --features tch --example f0_runtimes # Burn vs ORT F0, median 0.005–1.40 Hz
@@ -505,6 +507,7 @@ Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper
 | `burn-rvc` | what is RVC's alone: `SourceModule` (NSF), the 768-dim `TextEncoder`, `GeneratorNsf`, the synthesizer wiring; re-exports `burn-vits` so it still reads as one model. Also `ContentVec` — RVC's *readout* of `burn-hubert` and nothing more, since the network is shared. **RVC v2 takes the final (12th) encoder layer directly** where v1 took layer 9 through `final_proj`, so that head sits in the checkpoint wired to nothing, and `hubert_base/config.json` is `HubertConfig::chinese_base()` field for field (pinned as a constant rather than parsed, so a disagreeing checkpoint fails as a shape mismatch). `examples/load -- contentvec <hubert_base>` reports 210/0 |
 | `burn-hubert` | the HuBERT SSL encoder, its own crate because **two engines read it**: GPT-SoVITS calls it cnhubert, and RVC's ContentVec is the same architecture with other weights. `hidden_states` returns every layer rather than only the last, which is what makes a variant that reads a different layer a choice of index instead of a second port. Lifted out of `burn-gptsovits` with no field renamed, and that extraction is the cleanest proof on record of **Moving a module between crates is free** — the load example still reports 210/0 afterwards. It carries no `cuda`/`tch` features, because those exist to give a crate's *examples* a backend and this network's coverage harness stays `burn-gptsovits`'s |
 | `burn-rmvpe` | the RMVPE pitch network, upstream's `E2E(4, 1, (2, 2))`: a five-level U-net, a `Conv2d(16 → 3, 3×3)` head, one bidirectional GRU (384 → 256 each way) and `Linear(512, 360)`. `[batch, 128, T]` log-mel in, `[batch, T, 360]` cents salience out — the mel front end (`rvc-core`'s `mel.rs`) and the salience→Hz decode (`dsp::rmvpe_decode`) stay in `rvc-core` so both runtimes share them, rather than giving the two backends a chance to disagree about something neither computes. `rmvpe.pt` loads at **623/0/118**, the unused being one `num_batches_tracked` per `BatchNorm`. Aligning the frame count to a multiple of 32 is `forward`'s job, not the caller's |
+| `burn-mdx` | MDX23C (TFC-TDF-UNet v3), the source-separation network UVR ships: a complex STFT front end, five TFC-TDF U-net levels over a subband-folded spectrum, and one waveform per stem. What lets a corpus recorded over music be cleaned before anything else touches it. `MDX23C-8KFFT-InstVoc_HQ.ckpt` loads at **319/0/0** — no unused at all, because the norms are `InstanceNorm2d` and so carry no running statistics and no `num_batches_tracked`. The **older MDX-Net v2 models are ONNX-only and deliberately not ported**; see the crate docs for why a Burn port of them cannot be verified |
 | `burn-whisper` | the Whisper network (standalone Burn port); mirrors HF's `state_dict` layout so `openai/whisper-large-v3-turbo` loads unchanged |
 | `burn-gptsovits` | the GPT-SoVITS network. `hubert` at 210/0, `quantizer` at 3/0, and `s2` complete at 773/0 (the 3 unused are the codebook's EMA training statistics). **`s2` is verified numerically, not just structurally**: `examples/reconstruct` round-trips real audio through cnhubert, the quantiser and the synthesizer, and the output tracks the source's energy envelope at r=0.91 against a chance baseline of 0.30. `t2s` (`s1`) is at 295/0. Every network of GPT-SoVITS is now ported; `tts-core`/`tts-cli` wire them into a working `tts`, and `tts-train` fine-tunes **both** stages — `s1` for delivery, `s2` for timbre. `SovitsPartial::forward_train` composes `enc_q` → `flow.forward` → random segment → `dec` and returns the five tensors the VITS losses need; the matching `s2D2333k.pth` discriminator loads at 111/0/0. `examples/keys` lists any checkpoint's tensors, which is the first thing to run against a new one |
 | `rvc-train` | native Rust/Burn adversarial training loop (see `docs/training.md`) |
@@ -1104,9 +1107,9 @@ releases used unmodified. All four are inference assets, so all four go to the
 shared cache and there is no `pretrained/` counterpart — a warm-start base is a
 training input, and this engine has no training.
 
-**`examples/load` now collides five ways.** `burn-rvc`, `burn-whisper`,
-`burn-gptsovits`, `burn-seedvc` and `burn-rmvpe` each have one, so cargo's
-"output filename collision" warning names five crates rather than two. It is the
+**`examples/load` now collides six ways.** `burn-rvc`, `burn-whisper`,
+`burn-gptsovits`, `burn-seedvc`, `burn-rmvpe` and `burn-mdx` each have one, so cargo's
+"output filename collision" warning names six crates rather than two. It is the
 hazard the next section describes, not noise.
 
 ### The shared target directory is unsafe for concurrent worktrees

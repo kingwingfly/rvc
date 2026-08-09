@@ -96,12 +96,18 @@ impl common::Job for Load {
 
         // A loaded model that cannot run is a port that only looks finished, so
         // push one buffer through. Deliberately a short chunk rather than the
-        // released 256 frames: this example runs on `ndarray` by default and
-        // the point here is that the shapes compose, not that the arithmetic is
-        // right — `separate` is where that is checked.
+        // released 256 frames: this example defaults to `ndarray`, where even
+        // 32 frames is several minutes, and the point here is that the shapes
+        // compose — `separate` is where the arithmetic is checked.
+        //
+        // **Noise rather than silence.** Zeros make this vacuous: the head
+        // multiplies by `first_conv`'s output, and a bias-free 1×1 convolution
+        // of zeros is zero, so a silent input gives an exactly zero output
+        // whatever the 319 tensors in between contain.
         let frames = 32;
-        let spec = burn::tensor::Tensor::<B, 4>::zeros(
+        let spec = burn::tensor::Tensor::<B, 4>::random(
             [1, 2 * cfg.audio_channels, cfg.dim_f, frames],
+            burn::tensor::Distribution::Normal(0.0, 1.0),
             device,
         );
         let out = model.forward(spec);
@@ -115,8 +121,11 @@ impl common::Job for Load {
         // through a value check.
         assert!(v.iter().all(|x| x.is_finite()), "output must be finite");
         let peak = v.iter().fold(0.0f32, |a, b| a.max(b.abs()));
-        println!("\nforward : {:?} peak={peak:.6}", [1, cfg.stems, 4, cfg.dim_f, frames]);
-        println!("          (silence in, so a near-zero peak is what a working model gives)");
+        assert!(peak > 0.0, "noise in, silence out — the network did nothing");
+        println!(
+            "\nforward : {:?} peak={peak:.6}",
+            [1, cfg.stems, 2 * cfg.audio_channels, cfg.dim_f, frames]
+        );
     }
 }
 

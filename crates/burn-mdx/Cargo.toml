@@ -33,6 +33,7 @@ burn-ndarray = "0.21"
 # audio for `examples/separate` lives here and never in `src/`.
 audio-kit.workspace = true
 tokio.workspace = true
+futures.workspace = true
 
 [[example]]
 name = "separate"

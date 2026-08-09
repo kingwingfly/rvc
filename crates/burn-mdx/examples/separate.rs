@@ -88,30 +88,43 @@ fn corr(a: &[f32], b: &[f32]) -> f64 {
     num / (da.sqrt() * db.sqrt()).max(1e-12)
 }
 
-/// `[bins × frames]` log-magnitude, from a small analysis STFT that is
-/// deliberately *not* the model's — measuring a model with its own front end
-/// would hide a mistake in that front end.
+/// `[bins × frames]` log-magnitude with **each bin's mean removed**, from a
+/// small analysis STFT that is deliberately *not* the model's — measuring a
+/// model with its own front end would hide a mistake in that front end.
+///
+/// The demeaning is what makes this discriminative. Raw log-spectra of any two
+/// pieces of audio correlate at 0.8 and up purely because both fall off with
+/// frequency; subtracting each bin's mean across time throws that shared tilt
+/// away and leaves only *when* each bin is loud, which is the thing a
+/// separation either got right or did not. Without it every row of the table
+/// reads 0.9 and the table says nothing.
 fn log_spectrum(analysis: &Stft, x: &[f32]) -> Vec<f32> {
     let (spec, frames) = analysis.analyze(&[x.to_vec()]);
     let plane = analysis.dim_f() * frames;
-    (0..plane)
+    let mut out: Vec<f32> = (0..plane)
         .map(|i| {
             let (re, im) = (spec[i], spec[plane + i]);
             (re * re + im * im).sqrt().max(1e-8).ln()
         })
-        .collect()
+        .collect();
+    for bin in out.chunks_mut(frames) {
+        let mean = bin.iter().sum::<f32>() / frames as f32;
+        bin.iter_mut().for_each(|v| *v -= mean);
+    }
+    out
 }
 
-/// Frame-shuffled log-spectrum: the same values, in an order that carries no
-/// information about the signal. What "uncorrelated" actually scores.
-fn shuffled(spectrum: &[f32], bins: usize, frames: usize) -> Vec<f32> {
-    // A fixed odd stride is a permutation of the frames whenever it is coprime
-    // with the count, and needs no RNG to be reproducible.
-    let stride = 37;
+/// The same values with the frames permuted inside each bin: identical per-bin
+/// statistics, no temporal information left. What "uncorrelated" actually
+/// scores on this metric, which should be ≈ 0 once the tilt is gone.
+fn shuffled(spectrum: &[f32], frames: usize) -> Vec<f32> {
+    // A fixed stride coprime with the frame count is a permutation and needs no
+    // RNG to be reproducible.
+    let stride = if frames % 37 == 0 { 41 } else { 37 };
     let mut out = vec![0.0f32; spectrum.len()];
-    for bin in 0..bins {
+    for (bin, chunk) in spectrum.chunks(frames).enumerate() {
         for frame in 0..frames {
-            out[bin * frames + frame] = spectrum[bin * frames + (frame * stride) % frames];
+            out[bin * frames + frame] = chunk[(frame * stride) % frames];
         }
     }
     out
@@ -180,9 +193,12 @@ impl common::Job for Separate {
         let bed = instrumental_bed(chunk, cfg.sample_rate as f32);
 
         // Equal RMS, so "0 dB" means what it says and neither source can win by
-        // being louder.
-        let voice: Vec<f32> = voice.iter().map(|v| v / rms(&voice).max(1e-9)).collect();
-        let bed: Vec<f32> = bed.iter().map(|v| v / rms(&bed).max(1e-9)).collect();
+        // being louder. The gain is hoisted out of the map deliberately —
+        // recomputing an RMS per sample is quadratic over a 261k-sample chunk.
+        let voice_gain = 1.0 / rms(&voice).max(1e-9);
+        let bed_gain = 1.0 / rms(&bed).max(1e-9);
+        let voice: Vec<f32> = voice.iter().map(|v| v * voice_gain).collect();
+        let bed: Vec<f32> = bed.iter().map(|v| v * bed_gain).collect();
         let mix: Vec<f32> = voice
             .iter()
             .zip(&bed)
@@ -239,12 +255,9 @@ impl common::Job for Separate {
             log_spectrum(&analysis, &voice),
             log_spectrum(&analysis, &bed),
         );
-        let chance = corr(
-            &ls_voice,
-            &shuffled(&ls_bed, analysis.dim_f(), frames_a),
-        );
+        let chance = corr(&ls_voice, &shuffled(&ls_voice, frames_a));
 
-        println!("\nlog-spectrum correlation (the number to read)");
+        println!("\nlog-spectrum correlation, per-bin mean removed (the number to read)");
         println!("  {:<22} {:>8} {:>8}", "", "vs voice", "vs bed");
         let ls_mix = log_spectrum(&analysis, &mix);
         println!(

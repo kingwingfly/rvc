@@ -350,39 +350,82 @@ mod tests {
         }
     }
 
-    /// What *is* true of the truncating pair: dropping the bins above `dim_f`
-    /// is idempotent, so re-analysing a synthesis reproduces the spectrum it
-    /// came from. A window or normalisation error breaks this too — it is the
-    /// same check, made where exactness is unavailable.
+    /// A signal that is already inside the retained band survives the
+    /// *truncating* pair too, because truncation then removes nothing.
+    ///
+    /// This is the check that `dim_f` keeps the bins it claims to. Off by one,
+    /// or counting from the wrong end, and a 5-bin tone is either attenuated or
+    /// deleted outright — where broadband noise would only look "a bit lossy",
+    /// which is what a truncating transform is supposed to look like.
+    ///
+    /// **Note what this deliberately does not claim**: that re-analysing a
+    /// truncated synthesis reproduces the spectrum it came from. It does not,
+    /// and that is not a bug. Zeroing the same bins in every frame is a
+    /// *circular* convolution inside each frame, not a filter on the signal, so
+    /// the overlap-add leaves a spectrogram no signal has — the standard
+    /// inconsistency of a modified STFT. Measured on white noise at
+    /// `dim_f = 12` of 33 it is a 20% effect, which reads exactly like a
+    /// normalisation bug and is not one.
     #[test]
-    fn the_truncated_round_trip_preserves_the_retained_band() {
+    fn a_band_limited_signal_survives_the_truncating_pair() {
         let n_fft = 64;
         let hop = 8;
-        let stft = Stft::new(n_fft, hop, 12);
+        let dim_f = 12;
+        let stft = Stft::new(n_fft, hop, dim_f);
         let samples = hop * 31;
-        let audio = vec![noise(samples)];
+        // Exactly on bin centres 3 and 7, well inside the kept 0..12, so Hann's
+        // leakage into the discarded bins is far below the tolerance.
+        let tone = |bin: usize, amp: f32| {
+            move |i: usize| {
+                amp * (2.0 * std::f32::consts::PI * bin as f32 * i as f32 / n_fft as f32).sin()
+            }
+        };
+        let (a, b) = (tone(3, 1.0), tone(7, 0.5));
+        let audio = vec![(0..samples).map(|i| a(i) + b(i)).collect::<Vec<f32>>()];
 
         let (spec, frames) = stft.analyze(&audio);
         let back = stft.synthesize(&spec, 1, frames);
-        let (again, frames_again) = stft.analyze(&back);
 
-        assert_eq!(frames_again, frames);
-        // The first and last frame see the reflect padding of a signal that is
-        // no longer the original, so they are excluded; every interior frame
-        // must agree.
-        let interior = |s: &[f32]| -> Vec<f32> {
-            (0..2 * 12)
-                .flat_map(|plane| {
-                    (1..frames - 1).map(move |f| s[plane * frames + f])
-                })
-                .collect()
-        };
-        let diff = max_abs_diff(&interior(&spec), &interior(&again));
-        let scale = spec.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
-        assert!(
-            diff < 1e-3 * scale.max(1e-6),
-            "retained band moved by {diff} against a peak of {scale}"
-        );
+        // The reflect padding puts a derivative discontinuity at each end, and
+        // *that* is broadband, so the outermost window's worth of samples is
+        // legitimately altered by the truncation. Compare the interior.
+        let edge = n_fft;
+        let diff = max_abs_diff(&audio[0][edge..samples - edge], &back[0][edge..samples - edge]);
+        assert!(diff < 1e-3, "band-limited tone came back off by {diff}");
+    }
+
+    /// Truncating on the way in is the same operation as keeping every bin and
+    /// zeroing the tail — which is what makes [`Stft::synthesize`]'s zero-fill
+    /// the inverse of [`Stft::analyze`]'s `take`. If the two indexed different
+    /// bins this would diverge, and no round-trip test would notice, because
+    /// each pair is separately self-consistent.
+    #[test]
+    fn truncating_matches_zeroing_the_discarded_bins() {
+        let n_fft = 64;
+        let hop = 8;
+        let dim_f = 12;
+        let samples = hop * 31;
+        let audio = vec![noise(samples)];
+
+        let truncating = Stft::new(n_fft, hop, dim_f);
+        let (narrow, frames) = truncating.analyze(&audio);
+
+        let full = Stft::new(n_fft, hop, n_fft / 2 + 1);
+        let (mut wide, frames_wide) = full.analyze(&audio);
+        assert_eq!(frames_wide, frames);
+        let bins = full.n_bins();
+        for plane in 0..2 {
+            for bin in dim_f..bins {
+                for frame in 0..frames {
+                    wide[plane * bins * frames + bin * frames + frame] = 0.0;
+                }
+            }
+        }
+
+        let from_narrow = truncating.synthesize(&narrow, 1, frames);
+        let from_wide = full.synthesize(&wide, 1, frames);
+        let diff = max_abs_diff(&from_narrow[0], &from_wide[0]);
+        assert!(diff < 1e-5, "the two spellings of truncation differ by {diff}");
     }
 
     /// The frame arithmetic the checkpoint's `chunk_size` depends on. A

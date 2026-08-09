@@ -224,6 +224,20 @@ pub struct TfcTdfNet<B: Backend> {
 impl<B: Backend> TfcTdfNet<B> {
     pub fn new(cfg: &MdxConfig, device: &B::Device) -> Self {
         let dim_c = cfg.dim_c();
+        // The frequency axis is halved once per level and the `Tdf` at each
+        // level sizes two `Linear`s from it, so a `dim_f` that does not divide
+        // evenly would silently truncate and build a network whose weights are
+        // the wrong shape for the checkpoint. Refuse instead.
+        let folded = cfg.dim_f / cfg.num_subbands;
+        let divisor = cfg.scale[1].pow(cfg.num_scales as u32);
+        assert!(
+            cfg.dim_f.is_multiple_of(cfg.num_subbands) && folded.is_multiple_of(divisor),
+            "dim_f {} does not survive {} subbands and {} halvings",
+            cfg.dim_f,
+            cfg.num_subbands,
+            cfg.num_scales
+        );
+
         let mut channels = cfg.num_channels;
         // The frequency axis the *blocks* see: the fold has already moved a
         // factor of `num_subbands` into the channel axis.
