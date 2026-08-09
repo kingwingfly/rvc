@@ -92,46 +92,79 @@ fn corr(a: &[f32], b: &[f32]) -> f64 {
     num / (da.sqrt() * db.sqrt()).max(1e-12)
 }
 
-/// `[bins × frames]` log-magnitude with **each bin's mean removed**, from a
-/// small analysis STFT that is deliberately *not* the model's — measuring a
-/// model with its own front end would hide a mistake in that front end.
+/// Scale-invariant signal-to-distortion ratio, in dB — the field's standard
+/// number for source separation.
 ///
-/// The demeaning is what makes this discriminative. Raw log-spectra of any two
-/// pieces of audio correlate at 0.8 and up purely because both fall off with
-/// frequency; subtracting each bin's mean across time throws that shared tilt
-/// away and leaves only *when* each bin is loud, which is the thing a
-/// separation either got right or did not. Without it every row of the table
-/// reads 0.9 and the table says nothing.
-fn log_spectrum(analysis: &Stft, x: &[f32]) -> Vec<f32> {
-    let (spec, frames) = analysis.analyze(&[x.to_vec()]);
-    let plane = analysis.dim_f() * frames;
-    let mut out: Vec<f32> = (0..plane)
-        .map(|i| {
-            let (re, im) = (spec[i], spec[plane + i]);
-            (re * re + im * im).sqrt().max(1e-8).ln()
-        })
-        .collect();
-    for bin in out.chunks_mut(frames) {
-        let mean = bin.iter().sum::<f32>() / frames as f32;
-        bin.iter_mut().for_each(|v| *v -= mean);
+/// CLAUDE.md warns that sample-wise RMS is phase-sensitive and that two runs of
+/// the *same* model can differ hugely by it. That warning is about **vocoders**,
+/// which invent phase; MDX23C predicts the complex spectrum, so its phase is a
+/// prediction that either matches the source or does not, and a waveform metric
+/// is measuring the thing the model was trained on. The scale invariance
+/// (projecting the reference onto the estimate before differencing) is what
+/// keeps it from being a loudness comparison. The energy-envelope correlation
+/// below is the phase-free companion reading, so neither number stands alone.
+fn si_sdr(est: &[f32], reference: &[f32]) -> f64 {
+    assert_eq!(est.len(), reference.len());
+    let dot: f64 = est
+        .iter()
+        .zip(reference)
+        .map(|(e, r)| *e as f64 * *r as f64)
+        .sum();
+    let energy: f64 = reference.iter().map(|r| (*r as f64).powi(2)).sum();
+    let alpha = dot / energy.max(1e-30);
+    let (mut signal, mut noise) = (0.0, 0.0);
+    for (e, r) in est.iter().zip(reference) {
+        let target = alpha * *r as f64;
+        signal += target * target;
+        noise += (*e as f64 - target).powi(2);
     }
-    out
+    10.0 * (signal.max(1e-30) / noise.max(1e-30)).log10()
 }
 
-/// The same values with the frames permuted inside each bin: identical per-bin
-/// statistics, no temporal information left. What "uncorrelated" actually
-/// scores on this metric, which should be ≈ 0 once the tilt is gone.
-fn shuffled(spectrum: &[f32], frames: usize) -> Vec<f32> {
-    // A fixed stride coprime with the frame count is a permutation and needs no
-    // RNG to be reproducible.
-    let stride = if frames % 37 == 0 { 41 } else { 37 };
-    let mut out = vec![0.0f32; spectrum.len()];
-    for (bin, chunk) in spectrum.chunks(frames).enumerate() {
-        for frame in 0..frames {
-            out[bin * frames + frame] = chunk[(frame * stride) % frames];
-        }
+/// Magnitude-spectrogram correlation **weighted by the reference's own
+/// magnitude**, from a small analysis STFT that is deliberately not the model's
+/// — measuring a model with its own front end would hide a mistake in that
+/// front end.
+///
+/// The weighting is not decoration, it is the whole metric. An unweighted
+/// correlation over every bin is dominated by the bins where the reference has
+/// nothing, and there the estimate follows whatever else is in the mixture:
+/// measured here, the *unseparated mixture* scored 0.980 against the voice and
+/// 0.062 against the bed, which says only that the voice is broadband and the
+/// bed is not. Weighting by `|reference|` asks the question that actually
+/// distinguishes a separation — *where this source has energy, does the
+/// estimate track it?* — and needs no threshold to do it.
+fn weighted_corr(analysis: &Stft, est: &[f32], reference: &[f32]) -> f64 {
+    let (a, b) = (magnitude(analysis, est), magnitude(analysis, reference));
+    let total: f64 = b.iter().map(|v| *v as f64).sum();
+    let mean = |x: &[f32]| -> f64 {
+        x.iter()
+            .zip(&b)
+            .map(|(v, w)| *v as f64 * *w as f64)
+            .sum::<f64>()
+            / total.max(1e-30)
+    };
+    let (ma, mb) = (mean(&a), mean(&b));
+    let (mut num, mut da, mut db) = (0.0, 0.0, 0.0);
+    for ((x, y), w) in a.iter().zip(&b).zip(&b) {
+        let (x, y, w) = (*x as f64 - ma, *y as f64 - mb, *w as f64);
+        num += w * x * y;
+        da += w * x * x;
+        db += w * y * y;
     }
-    out
+    num / (da.sqrt() * db.sqrt()).max(1e-30)
+}
+
+/// `[bins × frames]` linear magnitude.
+fn magnitude(analysis: &Stft, x: &[f32]) -> Vec<f32> {
+    let (spec, frames) = analysis.analyze(&[x.to_vec()]);
+    let plane = analysis.dim_f() * frames;
+    (0..plane)
+        .map(|i| {
+            let (re, im) = (spec[i], spec[plane + i]);
+            (re * re + im * im).sqrt()
+        })
+        .collect()
 }
 
 /// Short-term energy, the coarser reading `reconstruct` uses.
@@ -145,30 +178,53 @@ fn rms(x: &[f32]) -> f32 {
     (x.iter().map(|v| v * v).sum::<f32>() / x.len().max(1) as f32).sqrt()
 }
 
-/// A deterministic instrumental bed: a sustained triad with vibrato over a
-/// pulsed bass. Synthesised rather than taken from a second file so the
-/// "correct" answer is known exactly and the example needs one input.
+/// A deterministic instrumental bed: a sustained triad with vibrato, each note
+/// carrying six harmonics, over a pulsed bass and a noise percussion track.
+/// Synthesised rather than taken from a second file so the "correct" answer is
+/// known exactly.
+///
+/// **The harmonics and the noise are the point, not decoration.** A first
+/// version used five bare sinusoids, and the result was a bed with energy in
+/// six of 513 analysis bins — the mixture's spectrum was then the voice's
+/// almost everywhere, which flattened every spectral metric and gave the model
+/// something that sounds nothing like the music it was trained to strip. A
+/// harmonic-rich, partly broadband bed is both a fairer input and a measurable
+/// one.
 fn instrumental_bed(samples: usize, sample_rate: f32) -> Vec<f32> {
-    // A minor triad well below and around speech, so the two overlap in band
+    // A minor triad spanning speech's own range, so the two overlap in band
     // rather than being trivially separable by a low-pass.
-    let voices = [110.0f32, 164.81, 220.0, 261.63, 329.63];
+    let notes = [110.0f32, 164.81, 220.0, 261.63, 329.63];
+    let mut noise_state = 0x9E37_79B9_7F4A_7C15u64;
+    let mut hiss = 0.0f32;
     (0..samples)
         .map(|i| {
             let t = i as f32 / sample_rate;
-            // 2 Hz tremolo and a 4 Hz bass pulse: enough temporal structure
-            // that an energy envelope can tell the bed from the speech.
+            // 2 Hz tremolo and a 4 Hz pulse: enough temporal structure that an
+            // energy envelope can tell the bed from the speech.
             let tremolo = 0.6 + 0.4 * (2.0 * std::f32::consts::PI * 2.0 * t).sin();
             let pulse = ((4.0 * t).fract() * -6.0).exp();
-            let chord: f32 = voices
+            let vibrato = 1.0 + 0.004 * (2.0 * std::f32::consts::PI * 5.5 * t).sin();
+            let chord: f32 = notes
                 .iter()
                 .enumerate()
-                .map(|(k, f)| {
-                    let vibrato = 1.0 + 0.004 * (2.0 * std::f32::consts::PI * 5.5 * t).sin();
-                    (2.0 * std::f32::consts::PI * f * vibrato * t).sin() / (k as f32 + 2.0)
+                .flat_map(|(k, f)| {
+                    (1..=6).map(move |h| {
+                        let freq = f * vibrato * h as f32;
+                        (2.0 * std::f32::consts::PI * freq * t).sin()
+                            / ((k as f32 + 2.0) * h as f32)
+                    })
                 })
                 .sum();
             let bass = (2.0 * std::f32::consts::PI * 55.0 * t).sin() * pulse;
-            0.7 * chord * tremolo + 0.5 * bass
+            // A one-pole high-passed white noise, gated by the same pulse: a
+            // stand-in for a hi-hat, and the only broadband part of the bed.
+            noise_state = noise_state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let white = ((noise_state >> 40) as f32 / 8388608.0) - 1.0;
+            hiss = 0.85 * hiss + 0.15 * white;
+            let hat = (white - hiss) * pulse * 0.35;
+            0.7 * chord * tremolo + 0.5 * bass + hat
         })
         .collect()
 }
@@ -204,24 +260,41 @@ impl common::Job for Separate {
         voice.truncate(chunk);
         let bed = instrumental_bed(chunk, cfg.sample_rate as f32);
 
-        // Equal RMS, so "0 dB" means what it says and neither source can win by
-        // being louder. The gain is hoisted out of the map deliberately —
-        // recomputing an RMS per sample is quadratic over a 261k-sample chunk.
+        // Equal RMS first, so "0 dB" means what it says and neither source can
+        // win by being louder. The gains are hoisted out of the maps
+        // deliberately — recomputing an RMS per sample is quadratic over a
+        // 261k-sample chunk.
         let voice_gain = 1.0 / rms(&voice).max(1e-9);
         let bed_gain = 1.0 / rms(&bed).max(1e-9);
-        let voice: Vec<f32> = voice.iter().map(|v| v * voice_gain).collect();
-        let bed: Vec<f32> = bed.iter().map(|v| v * bed_gain).collect();
-        let mix: Vec<f32> = voice
+        let mut voice: Vec<f32> = voice.iter().map(|v| v * voice_gain).collect();
+        let mut bed: Vec<f32> = bed.iter().map(|v| v * bed_gain).collect();
+
+        // Then one shared gain that puts the *sum* at a realistic level.
+        //
+        // **This matters, and it is easy to skip.** MDX23C is not
+        // scale-invariant: its instance norms are, but the head multiplies the
+        // U-net's output by `first_conv`'s and then concatenates the raw
+        // mixture beside it, so the two paths scale differently and the whole
+        // network only behaves at the levels it was trained on. Two RMS-1.0
+        // sources summed peak around +8 dBFS, which is not a level any music
+        // ever reaches. Both references get the same gain, so they stay exactly
+        // the parts of the mixture and the metrics below are unaffected.
+        let raw_peak = voice
             .iter()
             .zip(&bed)
-            .map(|(v, b)| 0.25 * (v + b))
-            .collect();
+            .map(|(v, b)| (v + b).abs())
+            .fold(0.0f32, f32::max);
+        let headroom = 0.7 / raw_peak.max(1e-9);
+        voice.iter_mut().for_each(|v| *v *= headroom);
+        bed.iter_mut().for_each(|v| *v *= headroom);
+        let mix: Vec<f32> = voice.iter().zip(&bed).map(|(v, b)| v + b).collect();
         println!(
-            "mix     : {chunk} samples, 0 dB voice/bed, peak {:.3}",
-            mix.iter().fold(0.0f32, |a, b| a.max(b.abs()))
+            "mix     : {chunk} samples, 0 dB voice/bed, peak {:.3}, rms {:.4}",
+            mix.iter().fold(0.0f32, |a, b| a.max(b.abs())),
+            rms(&mix)
         );
 
-        // --- one forward pass ----------------------------------------------
+        // --- the model ------------------------------------------------------
         let mut model = TfcTdfNet::<B>::new(&cfg, device);
         let res = model.load_pytorch(&self.weights).expect("load checkpoint");
         println!(
@@ -233,62 +306,87 @@ impl common::Job for Separate {
         assert!(res.missing.is_empty() && !res.applied.is_empty(), "bad load");
 
         let stft = cfg.stft();
-        // Both channels identical: the network's front end is stereo, and a
-        // mono source duplicated is what every caller will feed it.
-        let spec = stft.forward::<B>(&[mix.clone(), mix.clone()], device);
-        println!("spectrum: {:?}", spec.dims());
+        let separate = |signal: &[f32]| -> Vec<Vec<f32>> {
+            // Both channels identical: the network's front end is stereo, and a
+            // mono source duplicated is what every caller will feed it.
+            let spec = stft.forward::<B>(&[signal.to_vec(), signal.to_vec()], device);
+            let out = model.forward(spec);
+            let [_, stems, channels, bins, frames] = out.dims();
+            stft.inverse(out.reshape([stems, channels, bins, frames]))
+                .iter()
+                // Fold the duplicated stereo back to one channel for scoring.
+                .map(|stem| {
+                    stem[0]
+                        .iter()
+                        .zip(&stem[1])
+                        .map(|(l, r)| 0.5 * (l + r))
+                        .collect()
+                })
+                .collect()
+        };
 
         let started = std::time::Instant::now();
-        let out = model.forward(spec);
-        let [_, stems, channels, bins, frames] = out.dims();
+        let estimates = separate(&mix);
         println!(
-            "forward : {:?} in {:.1} s",
-            out.dims(),
+            "forward : {} stems of {} samples in {:.2} s",
+            estimates.len(),
+            estimates[0].len(),
             started.elapsed().as_secs_f32()
         );
 
-        let waves = stft.inverse(out.reshape([stems, channels, bins, frames]));
-        // Fold the duplicated stereo back to one channel for scoring.
-        let estimates: Vec<Vec<f32>> = waves
-            .iter()
-            .map(|stem| {
-                stem[0]
-                    .iter()
-                    .zip(&stem[1])
-                    .map(|(l, r)| 0.5 * (l + r))
-                    .collect()
-            })
-            .collect();
+        // --- the decisive probe: what does it do to a *solo* source? --------
+        //
+        // The mixture table below is the interesting measurement but the weak
+        // one, because it depends on the synthetic bed being something the
+        // model recognises as music. This does not: feed it the voice alone and
+        // the instrumental stem must be near-silent; feed it the bed alone and
+        // the vocal stem must be. A port with a transposed U-net, a batch norm
+        // where an instance norm belongs, or a scrambled stem axis cannot pass
+        // this — it has no way to know which stem to empty.
+        println!("\nsolo-source rejection, dB (how much of the wrong stem leaks)");
+        for (label, solo) in [("voice only", &voice), ("bed only", &bed)] {
+            let stems = separate(solo);
+            let (a, b) = (rms(&stems[0]), rms(&stems[1]));
+            let wanted = if label == "voice only" { a } else { b };
+            let leaked = if label == "voice only" { b } else { a };
+            println!(
+                "  {label:<12} vocals {:.4}  instrumental {:.4}   rejection {:>6.1} dB",
+                a,
+                b,
+                20.0 * (wanted.max(1e-9) / leaked.max(1e-9)).log10()
+            );
+        }
 
         // --- the gap --------------------------------------------------------
         let analysis = Stft::new(1024, 256, 513);
-        let frames_a = analysis.frames(chunk);
-        let (ls_voice, ls_bed) = (
-            log_spectrum(&analysis, &voice),
-            log_spectrum(&analysis, &bed),
-        );
-        let chance = corr(&ls_voice, &shuffled(&ls_voice, frames_a));
+        let named: Vec<(String, &Vec<f32>)> = std::iter::once(("mixture".to_string(), &mix))
+            .chain(estimates.iter().enumerate().map(|(i, e)| {
+                (
+                    format!("est_{}", STEMS_8K_INSTVOC.get(i).copied().unwrap_or("stem")),
+                    e,
+                )
+            }))
+            .collect();
 
-        println!("\nlog-spectrum correlation, per-bin mean removed (the number to read)");
-        println!("  {:<22} {:>8} {:>8}", "", "vs voice", "vs bed");
-        let ls_mix = log_spectrum(&analysis, &mix);
-        println!(
-            "  {:<22} {:>8.3} {:>8.3}   <- do nothing",
-            "mixture",
-            corr(&ls_mix, &ls_voice),
-            corr(&ls_mix, &ls_bed)
-        );
-        for (i, est) in estimates.iter().enumerate() {
-            let ls = log_spectrum(&analysis, est);
-            let name = STEMS_8K_INSTVOC.get(i).copied().unwrap_or("stem");
+        println!("\nSI-SDR, dB (the number to read; the mixture row is do-nothing)");
+        println!("  {:<22} {:>9} {:>9}", "", "vs voice", "vs bed");
+        for (name, signal) in &named {
             println!(
-                "  {:<22} {:>8.3} {:>8.3}",
-                format!("est_{name}"),
-                corr(&ls, &ls_voice),
-                corr(&ls, &ls_bed)
+                "  {name:<22} {:>9.2} {:>9.2}",
+                si_sdr(signal, &voice),
+                si_sdr(signal, &bed)
             );
         }
-        println!("  {:<22} {:>8.3}          <- chance (frame-shuffled)", "baseline", chance);
+
+        println!("\nmagnitude-spectrogram correlation, weighted by the reference");
+        println!("  {:<22} {:>9} {:>9}", "", "vs voice", "vs bed");
+        for (name, signal) in &named {
+            println!(
+                "  {name:<22} {:>9.3} {:>9.3}",
+                weighted_corr(&analysis, signal, &voice),
+                weighted_corr(&analysis, signal, &bed)
+            );
+        }
 
         println!("\nenergy envelope correlation (32 ms windows)");
         let window = cfg.sample_rate as usize / 32;

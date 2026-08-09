@@ -366,3 +366,62 @@ impl<B: Backend> FinalConv<B> {
         self.conv2.forward(gelu(self.conv1.forward(x)))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use burn::tensor::Distribution;
+
+    type B = burn_ndarray::NdArray;
+
+    /// [`Norm`] against Burn's own `InstanceNorm`, which routes through
+    /// `group_norm` with one group per channel.
+    ///
+    /// Written out here rather than used directly, because Burn spells the
+    /// affine pair `gamma`/`beta` and wraps it in `Option` while the checkpoint
+    /// says `weight`/`bias` — but that is a naming choice, and the *arithmetic*
+    /// had better be identical. This is the test for the trap the struct's doc
+    /// describes: if this were a batch norm in evaluation mode it would
+    /// normalise by a running mean and diverge here immediately, and every
+    /// shape check and coverage count would still pass.
+    #[test]
+    fn the_norm_is_instance_normalisation() {
+        let device = Default::default();
+        let channels = 5;
+        let mine = Norm::<B>::new(channels, &device);
+        let theirs = burn::nn::InstanceNormConfig::new(channels).init::<B>(&device);
+
+        let x = Tensor::<B, 4>::random([2, channels, 7, 11], Distribution::Normal(0.0, 3.0), &device);
+        let (a, b): (Vec<f32>, Vec<f32>) = (
+            mine.forward(x.clone()).into_data().to_vec().unwrap(),
+            theirs.forward(x).into_data().to_vec().unwrap(),
+        );
+        let diff = a
+            .iter()
+            .zip(&b)
+            .map(|(p, q)| (p - q).abs())
+            .fold(0.0f32, f32::max);
+        assert!(a.iter().all(|v| v.is_finite()), "normalisation must be finite");
+        assert!(diff < 1e-4, "instance normalisation differs by {diff}");
+    }
+
+    /// The config says `act: gelu`, which is `nn.GELU()` — the **erf** form,
+    /// not the tanh approximation. Burn spells them `gelu` and
+    /// `gelu_approximate`, and picking the wrong one is a small, finite,
+    /// content-independent error that no coverage count and no finiteness
+    /// assertion can see. Pinned against erf values computed by hand.
+    #[test]
+    fn the_activation_is_exact_gelu_not_the_tanh_approximation() {
+        let device = Default::default();
+        let x = Tensor::<B, 1>::from_floats([-2.0, -1.0, 0.0, 1.0, 2.0], &device);
+        let got: Vec<f32> = gelu(x).into_data().to_vec().unwrap();
+        // 0.5 * x * (1 + erf(x / sqrt(2)))
+        let expected = [-0.045_500_3, -0.158_655_3, 0.0, 0.841_344_7, 1.954_499_7];
+        for (g, e) in got.iter().zip(&expected) {
+            assert!((g - e).abs() < 1e-5, "gelu gave {g}, expected {e}");
+        }
+        // The tanh approximation gives 0.841192 at x = 1; the tolerance above is
+        // tight enough to reject it, which is the whole point of the test.
+        assert!((got[3] - 0.841_192).abs() > 1e-5);
+    }
+}
