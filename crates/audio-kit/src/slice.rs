@@ -412,6 +412,13 @@ pub struct Clip {
 /// `max_clip` it is force-cut at its quietest interior frame, whereas [`slice`]
 /// knows the run's full length and halves it instead. Cutting late is the price
 /// of not buffering the whole recording, which is the point of the type.
+///
+/// A measured floor ([`SliceOptions::with_measured_floor`]) is deliberately
+/// *not* one of the differences: it is a whole-signal statistic taken by the
+/// caller before slicing, so this type receives the same concrete `silence_db`
+/// the batch path does and never measures anything of its own. Measuring here
+/// — from a bounded prefix, say — would be the one thing that cannot be done
+/// silently, because the two paths would then cut in different places.
 pub struct Slicer {
     /// Kept only to reproduce [`slice`]'s tolerance of a zero rate, which has
     /// no frame geometry at all.
