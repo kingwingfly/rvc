@@ -29,7 +29,11 @@ pub struct RvcCli {
 #[derive(Debug, Subcommand)]
 pub enum RvcCommand {
     /// Batch-convert audio files into the target timbre (WAV output).
-    Convert(ConvertArgs),
+    // Boxed for the reason `Train` is, having crossed the same line: the
+    // geometry and voicing flags pushed `ConvertArgs` past 200 bytes, and every
+    // `rvc` parse — `download` and `completions` included — would otherwise
+    // carry a `convert`-sized enum around.
+    Convert(Box<ConvertArgs>),
     /// Train an RVC generator on a corpus (native Rust / burn).
     // Boxed because `TrainArgs` alone is ~320 bytes against 72 for the next
     // largest variant, and clippy is right that every parse shouldn't pay it.
@@ -747,7 +751,7 @@ mod tests {
         let mut argv = vec!["rvc", "convert", "-m", "voice.safetensors", "in.wav"];
         argv.extend_from_slice(extra);
         match parse(&argv) {
-            RvcCommand::Convert(a) => a,
+            RvcCommand::Convert(a) => *a,
             other => panic!("expected `convert`, got {other:?}"),
         }
     }
