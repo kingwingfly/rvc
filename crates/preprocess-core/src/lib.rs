@@ -25,13 +25,32 @@
 //! stages composable: the output of one is a legitimate input to the next.
 //!
 //! Each stage is one module with one per-file function ([`clip::file`],
-//! [`denoise::file`]). Driving the batch — tolerating a file that will not
-//! decode, tallying what happened — belongs to the caller, because what is
-//! worth reporting differs per stage: `clip` counts clips against input
+//! [`denoise::file`], [`separate::file`]). Driving the batch — tolerating a file
+//! that will not decode, tallying what happened — belongs to the caller, because
+//! what is worth reporting differs per stage: `clip` counts clips against input
 //! duration, `denoise` writes exactly one file per input.
+//!
+//! # The first stage that runs a model
+//!
+//! [`separate`] is it, and it is why this crate now has backend features at
+//! all. The stage itself carries none of them — the
+//! [`Separator`](separate::Separator) boundary, the overlap-add and the file
+//! driver compile and are tested with no backend enabled — and inside
+//! [`backend`] only the arms that name a Burn backend are behind
+//! `cuda`/`tch`/`wgpu`. That split is what keeps the seam arithmetic under
+//! `cargo test` on a machine with no checkpoint and no GPU, and it is what lets
+//! a build with no backend at all still *refuse* a request with a reason
+//! instead of failing to have the function.
 
 pub mod clip;
 pub mod denoise;
 mod input;
+pub mod separate;
+
+// Only the loader names a compute backend. Keeping it here rather than in the
+// CLI is `seedvc-core`'s trade, made for the same reason: the erasure has to
+// name a backend, so the module that performs it depends on `cli-kit` for the
+// one `--backend` enum the workspace shares.
+pub mod backend;
 
 pub use input::{AUDIO_EXTS, InputFile, decode_mono, plan};
