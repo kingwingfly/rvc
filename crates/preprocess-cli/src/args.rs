@@ -240,8 +240,9 @@ Expect the music attenuated, not gone.
 
 It separates voice from music, NOT one speaker from another. Every voice lands \
 in the vocals stem, including a singer on the backing track — so somebody \
-talking over another person's singing still gets both. Filtering by who is \
-speaking is a different model.
+talking over another person's singing still gets both. Keeping one speaker is a \
+different model and a stage of its own (`diarize`, not built yet); this one \
+cannot do it and does not try.
 
 Emptying the gaps also gives a recogniser room to invent in them, and can leave \
 very short fragments, so whatever consumes these stems wants a duration floor.
