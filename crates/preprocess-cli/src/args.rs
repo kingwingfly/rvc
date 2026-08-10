@@ -232,11 +232,12 @@ gave 12 holding 39 — sentences rather than minutes. Recognition tells the same
 story, 5 segments against 14 with the same words. That is the gain, and it is \
 larger than the decibels suggest.
 
-The separation itself is modest and measured: 4-6.5 dB of a continuous bed \
-comes out of the vocals stem — read on the mono downmix, which is what \
-everything downstream decodes — against the 15-20 dB this model reaches on a \
-song, because it was trained on sung vocals and a speaking voice is not one. \
-Expect the music attenuated, not gone.
+The separation itself is modest and measured: 5-6.5 dB of a continuous bed \
+comes out of the vocals stem across the excerpts the model was measured on, and \
+4.1 dB through this stage — read on the mono downmix, which is what everything \
+downstream decodes — against the 15-20 dB this model reaches on a song, because \
+it was trained on sung vocals and a speaking voice is not one. Expect the music \
+attenuated, not gone.
 
 It separates voice from music, NOT one speaker from another. Every voice lands \
 in the vocals stem, including a singer on the backing track — so somebody \
