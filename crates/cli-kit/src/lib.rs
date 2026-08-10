@@ -173,7 +173,15 @@ impl DownloadOpts {
 /// that otherwise does not run it; corpus preparation does not, because there
 /// the stage *is* the subcommand and a flag turning it off would leave a
 /// command that copies files. So the gate stays with the caller that has one.
+/// The group id is spelled out because clap derives one from the **struct
+/// name**, and a caller that wraps this in a struct of its own — `rvc-cli` does,
+/// to add the `--denoise` gate around it — then puts two groups called
+/// `DenoiseOpts` in one command. That is a `debug_assert` inside clap's builder,
+/// so it is not a parse error a test on arguments would catch: it panics while
+/// the command tree is being built, before parsing, on **every** subcommand of
+/// the binary that did it.
 #[derive(Debug, Clone, Copy, Args)]
+#[group(id = "denoise_tuning")]
 pub struct DenoiseOpts {
     /// De-hiss strength: raise to remove more hiss, lower if soft/breathy
     /// texture starts to smear.

@@ -187,13 +187,16 @@ mod tests {
             .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
             .collect();
         written.sort();
+        // Sorted, so `_` (0x5F) puts the disambiguated stem *after* the plain
+        // one rather than before it — the order the collision suffix reads in
+        // is not the order the directory lists.
         assert_eq!(
             written,
             vec![
-                "take__1_000.wav",
-                "take__1_001.wav",
                 "take_000.wav",
                 "take_001.wav",
+                "take__1_000.wav",
+                "take__1_001.wav",
             ]
         );
     }
