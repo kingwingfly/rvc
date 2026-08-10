@@ -5,10 +5,31 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "corpus preparation stages: slice on silence, de-hiss, and whatever comes next"
+description = "corpus preparation stages: slice on silence, de-hiss, separate voice from music"
+
+[features]
+# One compute backend each, and they compose — a binary can carry all three and
+# choose at run time. No `default`: a consumer that only wants the stages and
+# their types should not drag in a GPU toolchain, and everything but the loader
+# builds without one. There is no `onnx`, and that is a property of the model
+# rather than an omission: MDX23C is published as a PyTorch checkpoint only.
+cuda = ["burn/cuda", "burn-kit/cuda", "burn-mdx/cuda"]
+tch = ["burn/tch", "burn-kit/tch", "burn-mdx/tch"]
+wgpu = ["burn/wgpu", "burn-kit/wgpu", "burn-mdx/wgpu"]
 
 [dependencies]
 audio-kit.workspace = true
+burn = { version = "0.21", default-features = false, features = ["std"] }
+burn-mdx.workspace = true
+# `store` for the loader's `ApplyResult`: a coverage report is what stands
+# between a renamed tensor and a model separating on freshly-initialised
+# weights, which sounds like a bad recording rather than like a bug.
+burn-kit = { workspace = true, features = ["store"] }
+# For `Backend` alone — the one `--backend` enum the workspace shares. See
+# `backend`'s module docs for why a `*-core` naming it is the sanctioned half of
+# that trade.
+cli-kit.workspace = true
 anyhow.workspace = true
 futures.workspace = true
 tokio = { workspace = true }
+tracing.workspace = true

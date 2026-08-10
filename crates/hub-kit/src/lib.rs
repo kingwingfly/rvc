@@ -491,16 +491,35 @@ fn note_cache_move(cache: &Path) {
 /// Download (or reuse the cached copy of) a single Hub file, returning its local
 /// path. `cache_dir` is resolved by the caller — see [`cache_dir_for`].
 pub async fn fetch(model: &ModelRef, cache_dir: &Path) -> Result<PathBuf> {
+    fetch_at(model, None, cache_dir).await
+}
+
+/// The same, from one named revision of the repo rather than from its tip.
+///
+/// Almost every asset here wants the tip: a repo that publishes one canonical
+/// file has nothing to pin against, and pinning one would freeze a fix nobody
+/// benefits from refusing. The exception is a repo that publishes **many
+/// models** and whose files a port's architecture is derived from — see
+/// [`fetch_mdx23c`], where the checkpoint *is* the configuration — so a repo
+/// that reorganised its directories would otherwise hand a caller a different
+/// network under the same filename.
+pub async fn fetch_at(
+    model: &ModelRef,
+    revision: Option<&str>,
+    cache_dir: &Path,
+) -> Result<PathBuf> {
     note_cache_move(cache_dir);
     let retry = Retry::current();
     let client = hub_client(cache_dir, retry)?;
     let what = format!("{}/{}/{}", model.owner, model.name, model.file);
     guarded(retry, &what, |progress| {
         let repo = client.model(model.owner.clone(), model.name.clone());
+        let revision = revision.map(str::to_string);
         async move {
             Ok(repo
                 .download_file()
                 .filename(model.file.clone())
+                .maybe_revision(revision)
                 .progress(progress)
                 .send()
                 .await?)
@@ -1114,6 +1133,37 @@ pub fn seedvc_paths(dir: &Path) -> Result<SeedVcPaths> {
         .or_else(|_| find("the vocoder's config.json", &|n| n == "config.json"))?,
         whisper,
     })
+}
+
+/// UVR's model collection, which is where the separation checkpoint lives.
+///
+/// A **third-party mirror** of several projects' releases rather than any of
+/// their own repos, and the reason to prefer it is that it holds the MDX23C
+/// checkpoint *and* the older MDX-Net v2 ONNX graphs at one revision, so a
+/// single pin covers both runtimes' assets if the second is ever wired up.
+pub const DEFAULT_MDX23C: (&str, &str) = ("Politrees", "UVR_resources");
+
+/// The revision every MDX asset is fetched from, and it is **not** decoration.
+///
+/// A separation network's architecture *is* its checkpoint — `dim_f`, `n_fft`,
+/// the channel widths and the block counts all differ across the MDX family,
+/// and the Burn port pins them as constants so a disagreeing file fails as a
+/// shape mismatch. This repo publishes dozens of models and has reorganised its
+/// directories before; without the pin, a re-upload under the same filename
+/// would hand a caller a different network, which is a load failure at best.
+const MDX23C_REVISION: &str = "929e057b81aa49bc2e6490bef8671f47b2c120f6";
+
+/// `MDX23C-8KFFT-InstVoc_HQ`, 448 MB: the vocals/instrumental separator.
+///
+/// Its `model_2_stem_full_band_8k.yaml` sits beside it in the repo and is
+/// deliberately **not** fetched: nothing reads it. The port carries the same
+/// values as a constant, for the reason above — a config parsed at run time
+/// could disagree with the weights and be believed, where a constant makes the
+/// disagreement a shape mismatch on load.
+pub async fn fetch_mdx23c(cache_dir: &Path) -> Result<PathBuf> {
+    let (owner, name) = DEFAULT_MDX23C;
+    let model = ModelRef::new(owner, name, "models/MDX23C/MDX23C-8KFFT-InstVoc_HQ.ckpt");
+    fetch_at(&model, Some(MDX23C_REVISION), cache_dir).await
 }
 
 /// Whether starting [`fetch_naist_jdic`]'s download again could plausibly

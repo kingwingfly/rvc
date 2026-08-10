@@ -5666,8 +5666,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "audio-kit",
+ "burn-kit",
  "clap",
  "cli-kit",
+ "hub-kit",
  "preprocess-core",
  "rpath-kit",
  "tokio",
@@ -5679,8 +5681,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "audio-kit",
+ "burn",
+ "burn-kit",
+ "burn-mdx",
+ "cli-kit",
  "futures",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

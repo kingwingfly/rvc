@@ -9,13 +9,12 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 
-// No `Backend` re-export yet: no stage here runs a model, and a `--backend`
-// that decides nothing is worse than none. The first stage that needs one takes
-// `cli_kit::Backend`, like every other binary — there is one such enum for the
-// whole workspace and a second must not appear beside it.
-pub use cli_kit::CompletionsArgs;
+// `Backend` arrived with `separate`, the first stage that runs a model. It is
+// `cli_kit`'s, like every other binary's — there is one such enum for the whole
+// workspace and a second must not appear beside it.
+pub use cli_kit::{Backend, CompletionsArgs};
 
 /// The whole of corpus preparation, defined once and worn two ways: the
 /// `preprocess` binary flattens it at its top level, `voice` nests it under a
@@ -46,6 +45,15 @@ pub enum PreprocessCommand {
     Clip(ClipArgs),
     /// Remove steady background hiss from recordings.
     Denoise(DenoiseArgs),
+    /// Split recordings into a voice stem and a music stem (removes a backing
+    /// track).
+    // The long help sits on the *variant*, not on `SeparateArgs`: clap builds a
+    // subcommand's `about`/`long_about` from the enum, and a `long_about` on the
+    // args struct is silently ignored — the command then answers `--help` with
+    // the one-line summary and everything that makes the stage honest goes
+    // unread.
+    #[command(long_about = SEPARATE_LONG_ABOUT)]
+    Separate(SeparateArgs),
 }
 
 /// What every stage takes: files to read and a directory to write into.
@@ -186,6 +194,128 @@ impl DenoiseArgs {
         preprocess_core::denoise::DenoiseOptions {
             sr: self.io.sr,
             params: self.tuning.params(),
+        }
+    }
+}
+
+/// Which half of a recording is written out.
+///
+/// A clap mirror of [`preprocess_core::separate::Stems`], for the reason
+/// [`ClipArgs::options`] maps its flags one at a time: the stage's types stay
+/// free of `clap`, and the flag's spelling stays here where the rest of the
+/// command line is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Stem {
+    /// The voice. What a corpus wants.
+    Vocals,
+    /// The music that was removed.
+    Instrumental,
+    /// Both files. Free but for the disk: one pass produces the pair.
+    Both,
+}
+
+/// What `separate --help` says beyond its one-line summary.
+///
+/// Every number in it is measured rather than claimed, and the order is the
+/// order a user needs them in: what to do with the stage first, what it is
+/// worth second, and what it does *not* do last — because the last is the one
+/// somebody will otherwise assume.
+const SEPARATE_LONG_ABOUT: &str = "\
+Split recordings into a voice stem and a music stem — for a corpus recorded \
+over a backing track, which nothing downstream can handle until the music is \
+off it.
+
+Run this BEFORE `clip`. Slicing cuts on silence, and a continuous music bed \
+means the recording has none: on a 60 s excerpt of a stream, slicing the \
+mixture gave 5 clips holding 58 of its 60 seconds, and slicing the vocals stem \
+gave 12 holding 39 — sentences rather than minutes. Recognition tells the same \
+story, 5 segments against 14 with the same words. That is the gain, and it is \
+larger than the decibels suggest.
+
+The separation itself is modest and measured: 5-6.5 dB of a continuous bed \
+comes out of the vocals stem across the excerpts the model was measured on, and \
+4.1 dB through this stage — read on the mono downmix, which is what everything \
+downstream decodes — against the 15-20 dB this model reaches on a song, because \
+it was trained on sung vocals and a speaking voice is not one. Expect the music \
+attenuated, not gone.
+
+It separates voice from music, NOT one speaker from another. Every voice lands \
+in the vocals stem, including a singer on the backing track — so somebody \
+talking over another person's singing still gets both. Keeping one speaker is a \
+different model and a stage of its own (`diarize`, not built yet); this one \
+cannot do it and does not try.
+
+Emptying the gaps also gives a recogniser room to invent in them, and can leave \
+very short fragments, so whatever consumes these stems wants a duration floor.
+
+The stems are written at the model's own 44.1 kHz — hence no --sr here — and \
+in stereo, because the model is stereo-native and folding it away would throw \
+out one of the two cues it separates on.";
+
+/// Split recordings into a voice stem and a music stem.
+///
+/// Deliberately without `--sr`, which every other stage has: the separation
+/// model's rate is not a choice, so the stems are written at its own 44.1 kHz.
+/// Writing them at anything else would be a resample on top of a separation,
+/// and the next stage's decode performs one anyway.
+#[derive(Debug, Args)]
+pub struct SeparateArgs {
+    /// Input audio files and/or directories (directories are expanded
+    /// recursively to their audio files: mp3, wav, flac, m4a, ogg, opus, aac,
+    /// wma).
+    #[arg(required = true)]
+    pub input: Vec<PathBuf>,
+    /// Directory to write the `<stem>.vocals.wav` / `<stem>.instrumental.wav`
+    /// stems into.
+    #[arg(short = 'o', long, default_value = "separated")]
+    pub output_dir: PathBuf,
+    /// Which stem to write. Both come out of the same pass, so `both` costs
+    /// only the second file.
+    #[arg(long, value_enum, default_value_t = Stem::Vocals)]
+    pub stem: Stem,
+    /// Separation checkpoint (MDX23C) [default: auto-downloaded from Hugging
+    /// Face].
+    #[arg(short, long)]
+    pub model: Option<PathBuf>,
+    /// Directory the downloaded model is cached in. Shared by every engine
+    /// unless `$VOICE_CACHE_DIR` says otherwise.
+    #[arg(long, default_value_os_t = hub_kit::default_cache_dir())]
+    pub cache_dir: PathBuf,
+    /// Inference backend: `cuda` (aliases `burn`, `burn-cuda`), `tch`
+    /// (`libtorch`, `burn-tch`) or `wgpu` (`webgpu`, `burn-wgpu`); `auto` picks
+    /// the fastest compiled in. There is no `onnx`: this model is published as
+    /// a PyTorch checkpoint only.
+    #[arg(long, value_enum, default_value_t = Backend::Auto)]
+    pub backend: Backend,
+    /// Compute device: `auto` (fastest visible), `cpu`, `gpu`, `gpu:N`, `mps` or
+    /// `vulkan` (`cuda`/`cuda:N` also accepted). The `cuda` backend has GPUs only.
+    #[arg(long, default_value = "auto", value_name = "DEVICE", value_parser = cli_kit::parse_device)]
+    pub device: burn_kit::DeviceSpec,
+    #[command(flatten)]
+    pub download: cli_kit::DownloadOpts,
+}
+
+impl SeparateArgs {
+    /// Reject what cannot run, **before** the 448 MB the model weighs.
+    ///
+    /// Both checks are here for that reason and not for tidiness: a backend
+    /// this build cannot run and a download policy that abandons every transfer
+    /// are equally cheap to notice now and equally expensive to notice after
+    /// the fetch.
+    pub fn verify(&self) -> Result<()> {
+        self.download.verify()?;
+        preprocess_core::backend::resolve(self.backend)?;
+        Ok(())
+    }
+
+    /// The stage settings these flags describe.
+    pub fn options(&self) -> preprocess_core::separate::SeparateOptions {
+        preprocess_core::separate::SeparateOptions {
+            stems: match self.stem {
+                Stem::Vocals => preprocess_core::separate::Stems::Vocals,
+                Stem::Instrumental => preprocess_core::separate::Stems::Instrumental,
+                Stem::Both => preprocess_core::separate::Stems::Both,
+            },
         }
     }
 }
