@@ -6,7 +6,8 @@ members = [
     "crates/hub-kit",
     "crates/stt-core",
     "crates/cli-kit",
-    "crates/preprocess-kit",
+    "crates/preprocess-core",
+    "crates/preprocess-cli",
     "crates/stt-cli",
     "crates/tts-core",
     "crates/tts-train",
@@ -76,7 +77,11 @@ seedvc-core = { path = "crates/seedvc-core" }
 seedvc-cli = { path = "crates/seedvc-cli", default-features = false }
 stt-core = { path = "crates/stt-core" }
 cli-kit = { path = "crates/cli-kit" }
-preprocess-kit = { path = "crates/preprocess-kit" }
+preprocess-core = { path = "crates/preprocess-core" }
+# `default-features = false` for the same reason as the other `*-cli` crates:
+# cargo forbids a member overriding an inherited default, so `voice-cli`
+# re-declares any backend features and forwards them itself.
+preprocess-cli = { path = "crates/preprocess-cli", default-features = false }
 train-kit = { path = "crates/train-kit" }
 # A build-dependency, not a runtime one: it only prints link arguments.
 rpath-kit = { path = "crates/rpath-kit" }

@@ -12,6 +12,9 @@
 //!   and rate-adapts a chunk when the two ends of a pipe disagree.
 //! - [`encode`] writes a stream to a float WAV file.
 //! - [`filter`] applies a streaming libavfilter chain (e.g. de-noise) in-process.
+//! - [`denoise`] is the one such chain more than one caller wants — `anlmdn`
+//!   de-hiss, run by voice conversion on its output and by corpus preparation
+//!   on a whole recording, so it belongs to neither of them.
 //!
 //! # The one stereo path, and why it stops where it does
 //!
@@ -31,6 +34,7 @@
 //! a loose end left by this one.
 
 pub mod decode;
+pub mod denoise;
 pub mod encode;
 mod error;
 pub mod filter;
@@ -90,6 +94,7 @@ impl StereoSamples {
 pub use decode::{
     DecodeOptions, decode_path, decode_path_stereo, decode_paths, decode_paths_stereo,
 };
+pub use denoise::{DenoiseParams, Denoiser};
 pub use encode::{write_wav, write_wav_file, write_wav_stereo, write_wav_stereo_file};
 pub use filter::AudioFilter;
 pub use pcm::{read_f32le, resample_linear, write_f32le, write_f32le_chunk};

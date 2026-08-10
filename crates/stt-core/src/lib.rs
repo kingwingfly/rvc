@@ -67,7 +67,7 @@ pub struct Segment {
 /// How to cut the input up and what to ask the model for.
 #[derive(Debug, Clone)]
 pub struct TranscribeOptions {
-    /// Where to cut. Defaults match `rvc preprocess`: energy is used only to
+    /// Where to cut. Defaults match the corpus slicer's: energy is used only to
     /// find long silent gaps, never to gate quiet-but-present sound.
     pub slice: SliceOptions,
     pub decode: DecodeOptions,

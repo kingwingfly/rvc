@@ -1,0 +1,36 @@
+[package]
+name = "preprocess-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "preprocess — CLI for corpus preparation: slice on silence, de-hiss"
+
+# A library as well as a binary: the `voice` tool hosts these same subcommands
+# under `voice preprocess …`, and does it by depending on this crate rather than
+# by copying a single argument definition.
+[lib]
+name = "preprocess_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "preprocess"
+path = "src/main.rs"
+
+# No `[features]`, and no backend dependency behind them: nothing here runs a
+# model yet. `cuda`/`tch`/`wgpu`/`onnx` arrive with the first stage that does,
+# together with the `preprocess-cli/*` entries `voice-cli` needs to forward them
+# — declaring a feature that forwards to nothing is a cargo error, not a
+# placeholder.
+
+[dependencies]
+preprocess-core.workspace = true
+audio-kit.workspace = true
+cli-kit.workspace = true
+tokio = { workspace = true }
+clap.workspace = true
+anyhow.workspace = true
+
+[build-dependencies]
+rpath-kit.workspace = true

@@ -159,6 +159,78 @@ impl DownloadOpts {
     }
 }
 
+/// How hard to de-hiss, shared by every command that runs the stage.
+///
+/// Here for the reason [`DownloadOpts`] and [`Backend`] are: two commands now
+/// drive [`audio_kit::Denoiser`] — voice conversion as an optional stage on its
+/// output, corpus preparation as a stage of its own — and three float flags
+/// copied into two crates are two spellings and two sets of defaults waiting to
+/// diverge. The `research > patch` check especially: it is not cosmetic, and a
+/// copy that lost it would build a filter graph libavfilter refuses.
+///
+/// **Only the tuning lives here, not the on/off switch.** Voice conversion
+/// needs one (`--denoise`), because de-hiss is an extra stage on a pipeline
+/// that otherwise does not run it; corpus preparation does not, because there
+/// the stage *is* the subcommand and a flag turning it off would leave a
+/// command that copies files. So the gate stays with the caller that has one.
+/// The group id is spelled out because clap derives one from the **struct
+/// name**, and a caller that wraps this in a struct of its own — `rvc-cli` does,
+/// to add the `--denoise` gate around it — then puts two groups called
+/// `DenoiseOpts` in one command. That is a `debug_assert` inside clap's builder,
+/// so it is not a parse error a test on arguments would catch: it panics while
+/// the command tree is being built, before parsing, on **every** subcommand of
+/// the binary that did it.
+#[derive(Debug, Clone, Copy, Args)]
+#[group(id = "denoise_tuning")]
+pub struct DenoiseOpts {
+    /// De-hiss strength: raise to remove more hiss, lower if soft/breathy
+    /// texture starts to smear.
+    #[arg(long = "denoise-strength", default_value_t = 0.008)]
+    pub denoise_strength: f32,
+    /// `anlmdn` patch duration (seconds): the unit compared for
+    /// self-similarity; smaller keeps finer detail.
+    #[arg(long = "denoise-patch", default_value_t = 0.002)]
+    pub denoise_patch: f32,
+    /// `anlmdn` research window (seconds): how far in time it looks for similar
+    /// patches. Must exceed the patch, and sets the de-hiss latency.
+    #[arg(long = "denoise-research", default_value_t = 0.006)]
+    pub denoise_research: f32,
+}
+
+impl DenoiseOpts {
+    /// Reject a de-hiss configuration `anlmdn` would refuse or misbehave on.
+    ///
+    /// A caller whose de-hiss is optional checks this only when it is on: the
+    /// flags have defaults, so checking them unconditionally would reject a run
+    /// that never denoises anything.
+    pub fn verify(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.denoise_strength > 0.0,
+            "--denoise-strength must be positive: zero leaves the audio unchanged"
+        );
+        anyhow::ensure!(self.denoise_patch > 0.0, "--denoise-patch must be positive");
+        // Not cosmetic: `anlmdn` searches a window for patches to compare, so a
+        // window no larger than the patch leaves it nothing to average over.
+        anyhow::ensure!(
+            self.denoise_research > self.denoise_patch,
+            "--denoise-research ({}) must exceed --denoise-patch ({}): the research \
+             window is where similar patches are looked for",
+            self.denoise_research,
+            self.denoise_patch
+        );
+        Ok(())
+    }
+
+    /// The [`audio_kit::DenoiseParams`] these flags describe.
+    pub fn params(&self) -> audio_kit::DenoiseParams {
+        audio_kit::DenoiseParams {
+            strength: self.denoise_strength,
+            patch_secs: self.denoise_patch,
+            research_secs: self.denoise_research,
+        }
+    }
+}
+
 #[derive(Debug, Args)]
 pub struct CompletionsArgs {
     /// Shell to generate the completion script for.

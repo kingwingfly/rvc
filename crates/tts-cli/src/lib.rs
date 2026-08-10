@@ -30,7 +30,6 @@ pub async fn run(cli: TtsCli) -> Result<()> {
         None => args::synthesize(cli.synth).await,
         Some(TtsCommand::Convert(a)) => convert::run(*a).await,
         Some(TtsCommand::Train(a)) => train::run(*a).await,
-        Some(TtsCommand::Preprocess(a)) => preprocess_kit::run(a).await,
         Some(TtsCommand::Download(a)) => download::run(a).await,
     }
 }

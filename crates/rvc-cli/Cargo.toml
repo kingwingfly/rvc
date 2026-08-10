@@ -32,7 +32,6 @@ wgpu = ["rvc-core/wgpu", "rvc-train/wgpu", "burn-kit/wgpu"]
 audio-kit.workspace = true
 burn-kit.workspace = true
 cli-kit.workspace = true
-preprocess-kit.workspace = true
 hub-kit.workspace = true
 # `burn` feature brings in the native Burn generator backend (BurnGenerator).
 rvc-core = { workspace = true, features = ["burn"] }
