@@ -226,12 +226,13 @@ over a backing track, which nothing downstream can handle until the music is \
 off it.
 
 Run this BEFORE `clip`. Slicing cuts on silence, and a continuous music bed \
-means the recording has none: on a 60 s excerpt of a stream, recognition found \
-5 segments in the mixture (one of them 18.8 s of merged speech) and 14 — one \
-per utterance, same words — in the vocals stem. That is the gain, and it is \
+means the recording has none: on a 60 s excerpt of a stream, slicing the \
+mixture gave 5 clips holding 58 of its 60 seconds, and slicing the vocals stem \
+gave 12 holding 39 — sentences rather than minutes. Recognition tells the same \
+story, 5 segments against 14 with the same words. That is the gain, and it is \
 larger than the decibels suggest.
 
-The separation itself is modest and measured: 5-6.5 dB of a continuous bed \
+The separation itself is modest and measured: 4-6.5 dB of a continuous bed \
 comes out of the vocals stem, against the 15-20 dB this model reaches on a \
 song, because it was trained on sung vocals and a speaking voice is not one. \
 Expect the music attenuated, not gone.

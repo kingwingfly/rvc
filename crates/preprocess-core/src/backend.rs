@@ -64,7 +64,8 @@ pub fn load(weights: &Path, backend: Backend, device: DeviceSpec) -> Result<Box<
     macro_rules! burn_separator {
         ($inner:ty, $device:expr, $name:literal) => {{
             let device = $device;
-            let model = burn_kit::guard_init($name, || MdxSeparator::<$inner>::load(weights, device))??;
+            let model =
+                burn_kit::guard_init($name, || MdxSeparator::<$inner>::load(weights, device))??;
             Box::new(model) as Box<dyn Separator>
         }};
     }
@@ -77,17 +78,13 @@ pub fn load(weights: &Path, backend: Backend, device: DeviceSpec) -> Result<Box<
             "tch"
         ),
         #[cfg(feature = "cuda")]
-        Backend::Cuda => burn_separator!(
-            burn::backend::Cuda,
-            burn_kit::cuda_device(device)?,
-            "cuda"
-        ),
+        Backend::Cuda => {
+            burn_separator!(burn::backend::Cuda, burn_kit::cuda_device(device)?, "cuda")
+        }
         #[cfg(feature = "wgpu")]
-        Backend::Wgpu => burn_separator!(
-            burn::backend::Wgpu,
-            burn_kit::wgpu_device(device)?,
-            "wgpu"
-        ),
+        Backend::Wgpu => {
+            burn_separator!(burn::backend::Wgpu, burn_kit::wgpu_device(device)?, "wgpu")
+        }
         Backend::Auto | Backend::Onnx => unreachable!("resolved and refused above"),
         // Only reachable on a `--no-default-features` build, where the arm that
         // would have handled it was `#[cfg]`ed away.

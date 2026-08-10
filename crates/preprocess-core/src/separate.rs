@@ -7,17 +7,28 @@
 //!
 //! The decibels undersell it. Measured on a real stream — a streamer talking
 //! over somebody else's music — the music removed from the vocals stem is
-//! **5–6.5 dB** where the bed is continuous, against the 15–20 dB this model
+//! **4–6.5 dB** where the bed is continuous, against the 15–20 dB this model
 //! reaches on a song, because it was trained on *sung* vocals inside real
 //! productions and a speaking voice is not one. So the bed is attenuated rather
 //! than gone, and this stage does not promise otherwise.
 //!
+//! **That figure reads the mono downmix, and the stems are stereo.** Folding
+//! both the mixture and the stem to mid puts the bed 4.1 dB down in the speech
+//! gaps of a 60 s excerpt; reading the same two files as written gives 1.0 dB,
+//! because what the stem keeps of the bed is largely out of phase between the
+//! channels and cancels in the fold, where the mixture's own level barely moves.
+//! Neither reading is wrong and they are not interchangeable — every number
+//! recorded for this model is the mono one, which is also the one that matters
+//! here, since everything downstream decodes mono.
+//!
 //! What that buys is out of proportion to the number: transcribing the same
-//! 60 s, the mixture yields **5** segments (one of them 18.8 s of merged
+//! 60 s, the mixture yields **5** segments (one of them 16.9 s of merged
 //! speech) and the vocals stem **14**, one per utterance, with the same words.
 //! [`audio_kit::slice`] cuts on silence and a continuous bed leaves none — so a
 //! corpus recorded behind music cannot be sliced into sentences *at all* until
-//! the bed comes off. That is the reason to run this before [`crate::clip`].
+//! the bed comes off. Sliced with [`crate::clip`]'s defaults, that same 60 s
+//! gives **5** clips holding 58 of its 60 seconds before separation and **12**
+//! holding 39 after: the mixture has no sentence boundaries to find.
 //!
 //! Two consequences of emptying those gaps, both worth knowing downstream: a
 //! recogniser has more room to invent in a newly-silent gap (one of the 14 was
@@ -190,10 +201,7 @@ pub async fn file(
     // Over each channel independently and never over the mono fold: out-of-
     // phase content makes `0.5 (L + R)` understate a channel's true peak, and
     // the model is fed the channels.
-    let mut decode = std::pin::pin!(decode_path_stereo(
-        &input.path,
-        DecodeOptions::new(sr)
-    ));
+    let mut decode = std::pin::pin!(decode_path_stereo(&input.path, DecodeOptions::new(sr)));
     let (mut frames, mut peak) = (0usize, 0.0f32);
     while let Some(chunk) = decode.next().await {
         let chunk = chunk.with_context(|| format!("decoding {}", input.path.display()))?;
@@ -210,10 +218,11 @@ pub async fn file(
     // separates silence into silence, which is the right answer.
     let gain = if peak > 1e-6 { TARGET_PEAK / peak } else { 1.0 };
 
-    let mut writers = Vec::with_capacity(wanted.len());
-    for stem in &wanted {
-        writers.push(Writer::create(names[*stem], &input.base, sr, output_dir)?);
-    }
+    let mut writers: Vec<Writer> = wanted
+        .iter()
+        .map(|stem| Writer::create(names[*stem], &input.base, sr, output_dir))
+        .collect();
+    let paths: Vec<PathBuf> = writers.iter().map(|w| w.path.clone()).collect();
 
     let outcome = run(input, sr, gain, separator, &wanted, &mut writers).await;
 
@@ -229,7 +238,15 @@ pub async fn file(
             Err(e) => first_error = first_error.or(Some(e)),
         }
     }
-    if let Some(e) = first_error {
+    let failure = first_error.or_else(|| outcome.as_ref().err().map(|e| anyhow::anyhow!("{e:#}")));
+    if let Some(e) = failure {
+        // A stem that stopped part-way through is still a valid WAV of the
+        // wrong length, and the batch driver only prints that it skipped the
+        // file. Leaving it would put a truncated recording into a corpus that
+        // nothing downstream could tell from a short one.
+        for path in &paths {
+            let _ = std::fs::remove_file(path);
+        }
         return Err(e);
     }
     let passes = outcome?;
@@ -253,10 +270,7 @@ async fn run(
     writers: &mut [Writer],
 ) -> Result<usize> {
     let mut overlap = Overlap::new(separator.chunk_frames(), separator.stems().len());
-    let mut decode = std::pin::pin!(decode_path_stereo(
-        &input.path,
-        DecodeOptions::new(sr)
-    ));
+    let mut decode = std::pin::pin!(decode_path_stereo(&input.path, DecodeOptions::new(sr)));
     while let Some(chunk) = decode.next().await {
         let mut chunk = chunk.with_context(|| format!("decoding {}", input.path.display()))?;
         for s in chunk.left.iter_mut().chain(&mut chunk.right) {
@@ -305,21 +319,24 @@ struct Writer {
 }
 
 impl Writer {
-    fn create(name: &'static str, base: &str, sr: u32, output_dir: &Path) -> Result<Self> {
+    /// Infallible on purpose: the file is created by the task, so the one thing
+    /// that can go wrong here — an unwritable output directory — is reported by
+    /// [`Writer::finish`] along with everything else that happens to the file.
+    fn create(name: &'static str, base: &str, sr: u32, output_dir: &Path) -> Self {
         // `<base>.vocals.wav`, so a batch's two stems sort together under the
         // recording they came from and the next stage can select one with a
         // glob.
         let path = output_dir.join(format!("{base}.{name}.wav"));
         let (tx, rx) = futures::channel::mpsc::channel(4);
         let task = tokio::spawn(write_wav_stereo_file(path.clone(), sr, rx));
-        Ok(Self {
+        Self {
             name,
             path,
             tx,
             task,
             frames: 0,
             energy: 0.0,
-        })
+        }
     }
 
     async fn send(&mut self, out: StereoSamples) -> Result<()> {
@@ -403,9 +420,7 @@ impl Overlap {
             // Periodic rather than symmetric (`i / chunk`, not `i / (chunk-1)`),
             // which is the form that is COLA at a half-chunk hop.
             window: (0..chunk)
-                .map(|i| {
-                    0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / chunk as f32).cos()
-                })
+                .map(|i| 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / chunk as f32).cos())
                 .collect(),
             pending: StereoSamples::default(),
             tails: (0..stems)
@@ -421,7 +436,11 @@ impl Overlap {
 
     /// Take decoded input, returning whatever finished audio it completed —
     /// one entry per stem, in the model's order, each possibly empty.
-    fn push(&mut self, input: StereoSamples, separator: &dyn Separator) -> Result<Vec<StereoSamples>> {
+    fn push(
+        &mut self,
+        input: StereoSamples,
+        separator: &dyn Separator,
+    ) -> Result<Vec<StereoSamples>> {
         self.pending.left.extend_from_slice(&input.left);
         self.pending.right.extend_from_slice(&input.right);
         let mut out = self.empty();
@@ -553,7 +572,11 @@ mod tests {
             &["vocals", "instrumental"]
         }
         fn separate(&self, chunk: &StereoSamples) -> Result<Vec<StereoSamples>> {
-            assert_eq!(chunk.frames(), self.chunk, "the chunk length is the contract");
+            assert_eq!(
+                chunk.frames(),
+                self.chunk,
+                "the chunk length is the contract"
+            );
             Ok(vec![
                 chunk.clone(),
                 StereoSamples {
@@ -589,7 +612,10 @@ mod tests {
                 left: input.left[at..end].to_vec(),
                 right: input.right[at..end].to_vec(),
             };
-            for (acc, part) in got.iter_mut().zip(overlap.push(piece, &model).expect("push")) {
+            for (acc, part) in got
+                .iter_mut()
+                .zip(overlap.push(piece, &model).expect("push"))
+            {
                 acc.left.extend(part.left);
                 acc.right.extend(part.right);
             }

@@ -56,14 +56,23 @@ pub async fn run(args: SeparateArgs) -> Result<()> {
         let stems = report
             .stems
             .iter()
-            .map(|s| format!("{} rms {:.4}", s.name, s.rms))
+            .map(|s| {
+                let name = s.path.file_name().unwrap_or(s.path.as_os_str());
+                format!("{} rms {:.4}", name.to_string_lossy(), s.rms)
+            })
             .collect::<Vec<_>>()
             .join(", ");
+        // The gain is worth a column rather than a log line: the model is not
+        // scale-invariant, so a recording that arrives far from full scale is
+        // separated at a level it was not trained on, and this is where that
+        // shows. It is undone before anything is written, so the RMS beside it
+        // is at the input's own level.
         println!(
-            "{}: {:.1}s in {} passes -> {}",
+            "{}: {:.1}s in {} passes, input x{:.2} -> {}",
             f.path.display(),
             report.in_secs,
             report.passes,
+            report.gain,
             stems,
         );
     }
