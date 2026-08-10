@@ -5666,8 +5666,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "audio-kit",
+ "burn-kit",
  "clap",
  "cli-kit",
+ "hub-kit",
  "preprocess-core",
  "rpath-kit",
  "tokio",

@@ -46,6 +46,7 @@ pub async fn run(cli: PreprocessCli) -> Result<()> {
     match cli.command {
         PreprocessCommand::Clip(a) => commands::clip::run(a).await,
         PreprocessCommand::Denoise(a) => commands::denoise::run(a).await,
+        PreprocessCommand::Separate(a) => commands::separate::run(a).await,
     }
 }
 
