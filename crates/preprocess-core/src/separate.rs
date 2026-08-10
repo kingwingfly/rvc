@@ -5,21 +5,22 @@
 //!
 //! # Why this runs before slicing, and what it is actually worth
 //!
-//! The decibels undersell it. Measured on a real stream — a streamer talking
-//! over somebody else's music — the music removed from the vocals stem is
-//! **4–6.5 dB** where the bed is continuous, against the 15–20 dB this model
-//! reaches on a song, because it was trained on *sung* vocals inside real
-//! productions and a speaking voice is not one. So the bed is attenuated rather
-//! than gone, and this stage does not promise otherwise.
+//! The decibels undersell it. The network's own measurements put the music
+//! removed from the vocals stem at **5–6.5 dB** across four excerpts of a real
+//! stream where the bed is continuous, against the 15–20 dB it reaches on a
+//! song, because it was trained on *sung* vocals inside real productions and a
+//! speaking voice is not one. Driven through this stage, one of those excerpts
+//! reads **4.1 dB**. So the bed is attenuated rather than gone, and this stage
+//! does not promise otherwise.
 //!
-//! **That figure reads the mono downmix, and the stems are stereo.** Folding
-//! both the mixture and the stem to mid puts the bed 4.1 dB down in the speech
-//! gaps of a 60 s excerpt; reading the same two files as written gives 1.0 dB,
-//! because what the stem keeps of the bed is largely out of phase between the
-//! channels and cancels in the fold, where the mixture's own level barely moves.
-//! Neither reading is wrong and they are not interchangeable — every number
-//! recorded for this model is the mono one, which is also the one that matters
-//! here, since everything downstream decodes mono.
+//! **Every one of those figures reads the mono downmix, and the stems are
+//! stereo.** Folding both the mixture and the stem to mid puts the bed 4.1 dB
+//! down in that excerpt's speech gaps; reading the same two files as written
+//! gives 1.0 dB, because what the stem keeps of the bed is largely out of phase
+//! between the channels and cancels in the fold, where the mixture's own level
+//! barely moves. Neither reading is wrong and they are not interchangeable —
+//! the mono one is what was recorded, and it is also the one that matters here,
+//! since everything downstream decodes mono.
 //!
 //! What that buys is out of proportion to the number: transcribing the same
 //! 60 s, the mixture yields **5** segments (one of them 16.9 s of merged

@@ -233,7 +233,8 @@ story, 5 segments against 14 with the same words. That is the gain, and it is \
 larger than the decibels suggest.
 
 The separation itself is modest and measured: 4-6.5 dB of a continuous bed \
-comes out of the vocals stem, against the 15-20 dB this model reaches on a \
+comes out of the vocals stem — read on the mono downmix, which is what \
+everything downstream decodes — against the 15-20 dB this model reaches on a \
 song, because it was trained on sung vocals and a speaking voice is not one. \
 Expect the music attenuated, not gone.
 
