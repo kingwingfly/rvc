@@ -61,7 +61,7 @@ pub use config::{
     ANALYSIS_SR, CONTENT_DIM, CONTENT_HOP, ConvertParams, F0_HOP, GeneratorIo, ModelPaths,
     RMVPE_BINS, RvcConfig,
 };
-pub use convert::{Converter, StreamParams, convert_stream};
+pub use convert::{Converter, CrossfadeShape, StreamParams, convert_stream};
 // Re-exported rather than owned: the de-hiss stage moved down to `audio-kit`
 // once corpus preparation wanted it too, and a stage that knows about no model
 // belongs in the neutral crate. Kept in this crate's surface because

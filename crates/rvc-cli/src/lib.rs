@@ -22,7 +22,7 @@ pub async fn run(cli: RvcCli) -> Result<()> {
         // Converting a stream is the whole engine, so it is the bare
         // invocation; everything else is a subcommand beside it.
         None => commands::filter::run(cli.filter).await,
-        Some(RvcCommand::Convert(a)) => commands::convert::run(a).await,
+        Some(RvcCommand::Convert(a)) => commands::convert::run(*a).await,
         Some(RvcCommand::Train(a)) => commands::train::run(*a).await,
         Some(RvcCommand::Download(a)) => commands::download::run(a).await,
     }

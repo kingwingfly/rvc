@@ -3,7 +3,7 @@
 //! Audio is processed in fixed input blocks with a left "look-back" context so
 //! each block has enough history for stable content/F0 estimation. The context
 //! portion is dropped from the output, and consecutive outputs are joined with a
-//! short linear crossfade to suppress seams. Everything is mono `f32`: input at
+//! short crossfade to suppress seams. Everything is mono `f32`: input at
 //! 16 kHz (the analysis rate), output at the generator's sample rate.
 
 use audio_kit::Samples;
@@ -15,15 +15,76 @@ use crate::config::{ANALYSIS_SR, ConvertParams};
 use crate::error::Result;
 use audio_kit::{DenoiseParams, Denoiser};
 
+/// How the overlap between two consecutive output blocks is weighted.
+///
+/// Both curves hand the same total weight to the two sides — they differ only in
+/// whether the pair sums to one in **amplitude** or in **power**, which is the
+/// same distinction as any mixing-desk crossfader and matters for exactly the
+/// same reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CrossfadeShape {
+    /// Gains `1 - w` and `w`. The two sum to one in amplitude, so anything the
+    /// two blocks agree on sample-for-sample crosses the seam untouched.
+    ///
+    /// **The default, and it must stay the default**: every voice converted by
+    /// this toolkit so far was joined this way, and switching the curve moves
+    /// the output of every existing user without them asking.
+    #[default]
+    Linear,
+    /// Gains `cos(w·π/2)` and `sin(w·π/2)`, which sum to one in *power*.
+    ///
+    /// Worth reaching for when the seam sounds like a momentary dip rather than
+    /// a click. Consecutive blocks are separate generator invocations that agree
+    /// on content and timbre but not on phase, and two such signals add in
+    /// power, not amplitude — so linear gains leave a hole of up to 3 dB in the
+    /// middle of every crossfade, where `w = 1 - w = 0.5` and `0.5² + 0.5²` is a
+    /// half rather than a whole. These gains hold `cos² + sin² = 1` across the
+    /// whole overlap instead, at the cost of overshooting wherever the two sides
+    /// *do* correlate.
+    EqualPower,
+}
+
+impl CrossfadeShape {
+    /// The gain applied to the incoming block `w` of the way through the
+    /// overlap; the outgoing block gets the complementary gain.
+    fn gains(self, w: f32) -> (f32, f32) {
+        match self {
+            Self::Linear => (1.0 - w, w),
+            Self::EqualPower => {
+                let theta = w * std::f32::consts::FRAC_PI_2;
+                (theta.cos(), theta.sin())
+            }
+        }
+    }
+}
+
 /// Block/overlap parameters, expressed in 16 kHz input samples.
+///
+/// The whole latency-versus-quality dial lives here: a longer block gives the
+/// content encoder and RMVPE more to work with and costs the delay of filling
+/// it, and the context is the history each block is analysed with and then
+/// throws away. [`realtime`](Self::realtime) and [`batch`](Self::batch) are the
+/// two presets `rvc` ships; `rvc-cli`'s `--block-secs`/`--context-secs`/
+/// `--crossfade-secs` override individual fields against whichever preset the
+/// command was going to use.
 #[derive(Debug, Clone, Copy)]
 pub struct StreamParams {
     /// Input samples emitted per processed block.
     pub block: usize,
     /// Left look-back context prepended to each block before inference.
+    ///
+    /// Must not exceed [`Self::block`]: [`Converter::process_block`] carries the
+    /// tail of the block it just processed, so anything beyond one block's worth
+    /// is clamped away rather than used.
     pub context: usize,
     /// Crossfade length used to join consecutive output blocks.
+    ///
+    /// Must not exceed [`Self::context`]. The overlap is taken out of the
+    /// context prefix each block drops, so a crossfade longer than the context
+    /// leaves nothing to take it from — see [`Converter::process_block`].
     pub crossfade: usize,
+    /// Which curve joins the overlap.
+    pub shape: CrossfadeShape,
 }
 
 impl StreamParams {
@@ -33,6 +94,7 @@ impl StreamParams {
             block: ANALYSIS_SR as usize / 2,
             context: ANALYSIS_SR as usize / 4,
             crossfade: ANALYSIS_SR as usize / 20,
+            shape: CrossfadeShape::Linear,
         }
     }
 
@@ -42,6 +104,7 @@ impl StreamParams {
             block: ANALYSIS_SR as usize * 15,
             context: ANALYSIS_SR as usize / 2,
             crossfade: ANALYSIS_SR as usize / 20,
+            shape: CrossfadeShape::Linear,
         }
     }
 }
@@ -193,10 +256,13 @@ impl Converter {
 
         // Crossfade the head of `kept` against the previously withheld tail.
         if !self.prev_tail.is_empty() {
+            let shape = self.params.shape;
             let xf = self.xf_out.min(kept.len()).min(self.prev_tail.len());
             for (i, (k, &p)) in kept[..xf].iter_mut().zip(self.prev_tail.iter()).enumerate() {
-                let w = i as f32 / xf as f32;
-                *k = p * (1.0 - w) + *k * w;
+                // `Linear` still computes `p * (1 - w) + k * w`, op for op, so
+                // the default curve is bit-identical to the one this replaced.
+                let (out, inc) = shape.gains(i as f32 / xf as f32);
+                *k = p * out + *k * inc;
             }
             // If prev_tail was longer than what we blended, prepend the remainder
             // so no samples are lost.
@@ -360,6 +426,79 @@ mod tests {
             expected,
             drift,
             conv.xf_out * 2
+        );
+    }
+
+    /// Both presets join linearly, and they must keep doing so: the curve is a
+    /// property of every voice already converted with this toolkit, so a new
+    /// default would move audio nobody asked to have moved.
+    #[test]
+    fn both_presets_join_linearly() {
+        assert_eq!(StreamParams::realtime().shape, CrossfadeShape::Linear);
+        assert_eq!(StreamParams::batch().shape, CrossfadeShape::Linear);
+        assert_eq!(CrossfadeShape::default(), CrossfadeShape::Linear);
+    }
+
+    /// The two curves differ in what they hold constant, which is the whole
+    /// reason for offering a choice: linear gains sum to one in **amplitude**
+    /// and sag to a half in power at the midpoint, equal-power gains do the
+    /// reverse. Anything else means the arithmetic drifted.
+    #[test]
+    fn the_two_curves_hold_different_things_constant() {
+        for step in 0..=20 {
+            let w = step as f32 / 20.0;
+
+            let (out, inc) = CrossfadeShape::Linear.gains(w);
+            assert!(
+                (out + inc - 1.0).abs() < 1e-6,
+                "linear amplitude at w={w}: {out} + {inc}"
+            );
+
+            let (out, inc) = CrossfadeShape::EqualPower.gains(w);
+            assert!(
+                (out * out + inc * inc - 1.0).abs() < 1e-6,
+                "equal-power power at w={w}: {out}^2 + {inc}^2"
+            );
+        }
+        // The midpoint is where the two disagree most, and it is the hole an
+        // audible seam is made of: half the power under linear gains.
+        let (out, inc) = CrossfadeShape::Linear.gains(0.5);
+        assert!((out * out + inc * inc - 0.5).abs() < 1e-6);
+    }
+
+    /// A converter driven with the equal-power curve must still emit the same
+    /// number of samples: the shape reweights the overlap, it does not resize
+    /// it. Guards against "fixing" a seam by dropping or duplicating audio.
+    #[test]
+    fn the_shape_does_not_change_how_much_audio_comes_out() {
+        let ratio = 3usize;
+        let input: Vec<f32> = (0..ANALYSIS_SR as usize * 4)
+            .map(|i| (i as f32 * 0.001).sin() * 0.5)
+            .collect();
+        let run = |shape| {
+            let params = StreamParams {
+                shape,
+                ..StreamParams::realtime()
+            };
+            let mut converter = Converter::new(
+                FakeGen {
+                    sr: ANALYSIS_SR * ratio as u32,
+                    ratio,
+                },
+                params,
+                ConvertParams { transpose: 0 },
+            );
+            converter.convert_all(&input).unwrap()
+        };
+        let linear = run(CrossfadeShape::Linear);
+        let equal = run(CrossfadeShape::EqualPower);
+        assert_eq!(linear.len(), equal.len());
+        // …and it does change the samples, or the flag would be decoration.
+        // `FakeGen` is sample-hold, so the two sides of every seam agree
+        // exactly — precisely the case where equal-power gains overshoot.
+        assert!(
+            linear.iter().zip(&equal).any(|(a, b)| a != b),
+            "equal-power produced the linear output"
         );
     }
 }

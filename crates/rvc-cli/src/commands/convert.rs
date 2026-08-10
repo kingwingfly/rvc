@@ -19,7 +19,7 @@ pub async fn run(args: ConvertArgs) -> Result<()> {
         args.backend,
         args.device,
         args.transpose,
-        StreamParams::batch(),
+        args.geometry.resolve(StreamParams::batch()),
         args.denoise.params(),
     )
     .await?;

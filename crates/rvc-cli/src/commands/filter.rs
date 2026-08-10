@@ -43,7 +43,7 @@ pub async fn run(args: FilterArgs) -> Result<()> {
         args.backend,
         args.device,
         args.transpose,
-        StreamParams::realtime(),
+        args.geometry.resolve(StreamParams::realtime()),
         args.denoise.params(),
     )
     .await?;

@@ -20,7 +20,8 @@ use crate::session::build_session;
 /// content hop (320) so per-chunk content×2 and F0 frame counts line up.
 pub const DEFAULT_CHUNK: usize = 160_000;
 
-/// RMVPE voicing threshold used across the toolkit.
+/// Default RMVPE voicing threshold — upstream's, and what every runtime here
+/// draws the line at unless a caller says otherwise.
 const F0_THRESHOLD: f32 = 0.03;
 
 /// Build the ONNX ContentVec encoder from a `.onnx` file.
@@ -35,14 +36,18 @@ pub fn onnx_content_encoder(path: &Path) -> Result<Box<dyn ContentEncoder>> {
 
 /// Build the ONNX RMVPE pitch estimator from a `.onnx` file.
 ///
-/// Uses [`FeatureExtractor::F0_THRESHOLD`], so every runtime in the toolkit
-/// draws the voiced/unvoiced line in the same place — which matters more than
-/// it looks, since a frame below it comes out as 0 and 0 is what switches the
-/// generator to the noise branch that renders breath.
-pub fn onnx_pitch_estimator(path: &Path) -> Result<Box<dyn PitchEstimator>> {
+/// `threshold` is the voicing floor — pass [`FeatureExtractor::F0_THRESHOLD`]
+/// unless a caller is deliberately moving it, so every runtime in the toolkit
+/// draws the voiced/unvoiced line in the same place. It matters more than it
+/// looks: a frame below it comes out as 0, and 0 is what switches the generator
+/// to the noise branch that renders breath. It is a parameter rather than the
+/// constant because 0.03 is upstream's guess about ordinary speech, and the
+/// material this toolkit exists for is quiet enough that the guess is worth
+/// arguing with.
+pub fn onnx_pitch_estimator(path: &Path, threshold: f32) -> Result<Box<dyn PitchEstimator>> {
     Ok(Box::new(OnnxPitchEstimator::new(
         build_session(path)?,
-        F0_THRESHOLD,
+        threshold,
     )))
 }
 
@@ -75,7 +80,7 @@ impl FeatureExtractor {
     pub fn load(content_onnx: &Path, rmvpe_onnx: &Path) -> Result<Self> {
         Ok(Self::from_parts(
             onnx_content_encoder(content_onnx)?,
-            onnx_pitch_estimator(rmvpe_onnx)?,
+            onnx_pitch_estimator(rmvpe_onnx, F0_THRESHOLD)?,
         ))
     }
 
@@ -89,11 +94,12 @@ impl FeatureExtractor {
         Self { content, f0 }
     }
 
-    /// The RMVPE voicing threshold this toolkit uses everywhere (0.03).
+    /// The RMVPE voicing threshold this toolkit **defaults** to (0.03).
     ///
-    /// Exposed so a caller building a non-ONNX [`PitchEstimator`] uses the same
-    /// number rather than picking its own — the threshold decides which frames
-    /// come out as 0, and 0 is what switches the generator to its noise branch.
+    /// Exposed so a caller building a non-ONNX [`PitchEstimator`] starts from
+    /// the same number rather than picking its own, and so a CLI flag's default
+    /// cannot drift away from it. The threshold decides which frames come out as
+    /// 0, and 0 is what switches the generator to its noise branch.
     pub const F0_THRESHOLD: f32 = F0_THRESHOLD;
 
     /// Extract content vectors and F0 from a mono **16 kHz** `f32` buffer.
