@@ -679,6 +679,81 @@ mod tests {
         }
     }
 
+    /// A model that fails part-way through a recording, to drive [`file`]'s
+    /// error path.
+    struct FailsMidway {
+        chunk: usize,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Separator for FailsMidway {
+        fn sample_rate(&self) -> u32 {
+            44_100
+        }
+        fn chunk_frames(&self) -> usize {
+            self.chunk
+        }
+        fn stems(&self) -> &'static [&'static str] {
+            &["vocals", "instrumental"]
+        }
+        fn separate(&self, chunk: &StereoSamples) -> Result<Vec<StereoSamples>> {
+            let n = self
+                .calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            anyhow::ensure!(n < 1, "the model gave up on pass {n}");
+            Ok(vec![chunk.clone(), chunk.clone()])
+        }
+    }
+
+    /// A recording that stopped part-way through is still a valid WAV of the
+    /// wrong length, and the batch driver above this only reports that it
+    /// skipped the file — so a half-written stem left on disk would enter a
+    /// corpus indistinguishable from a short recording. It has to be removed,
+    /// and this is the only test that runs [`file`] end to end: peak scan,
+    /// writers, failure, cleanup.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stem_that_failed_part_way_is_not_left_behind() {
+        let dir = std::env::temp_dir().join(format!("preprocess-separate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+
+        // Long enough that the second forward pass — the one that fails — comes
+        // after the first has already handed finished audio to the writer.
+        let input = dir.join("take.wav");
+        let audio = signal(3000);
+        audio_kit::write_wav_stereo_file(
+            &input,
+            44_100,
+            Box::pin(futures::stream::once(async move { Ok(audio) })),
+        )
+        .await
+        .expect("write the input");
+
+        let model = FailsMidway {
+            chunk: 1000,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let err = file(
+            &InputFile {
+                path: input,
+                base: "take".into(),
+            },
+            &SeparateOptions { stems: Stems::Both },
+            &model,
+            &dir,
+        )
+        .await
+        .expect_err("the model failed, so the stage must");
+        assert!(
+            format!("{err:#}").contains("gave up"),
+            "the model's own reason should survive: {err:#}"
+        );
+        for stem in ["vocals", "instrumental"] {
+            let path = dir.join(format!("take.{stem}.wav"));
+            assert!(!path.exists(), "{} was left behind", path.display());
+        }
+    }
+
     /// `Both` is the only selection that writes the accompaniment, and the
     /// names are the model's own — a mismatch here writes nothing at all, which
     /// is why [`file`] refuses an empty selection rather than producing no
