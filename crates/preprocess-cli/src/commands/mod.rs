@@ -4,7 +4,10 @@ pub mod analyze;
 pub mod clip;
 pub mod denoise;
 pub mod diarize;
+pub mod normalize;
+pub mod resample;
 pub mod separate;
+pub mod trim;
 
 use std::path::{Path, PathBuf};
 

@@ -49,6 +49,9 @@ pub async fn run(cli: PreprocessCli) -> Result<()> {
         PreprocessCommand::Separate(a) => commands::separate::run(a).await,
         PreprocessCommand::Diarize(a) => commands::diarize::run(a).await,
         PreprocessCommand::Analyze(a) => commands::analyze::run(a).await,
+        PreprocessCommand::Normalize(a) => commands::normalize::run(a).await,
+        PreprocessCommand::Trim(a) => commands::trim::run(a).await,
+        PreprocessCommand::Resample(a) => commands::resample::run(a).await,
     }
 }
 
