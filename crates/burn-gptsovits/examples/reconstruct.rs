@@ -12,6 +12,36 @@
 //! is wired wrongly returns noise, and speech is unmistakable against it.
 //!
 //! Usage: `cargo run -p burn-gptsovits --example reconstruct -- <hubert.bin> <s2G.pth> <audio.f32le@16k> <out.f32le@32k>`
+//!
+//! # The number, and the length it needs
+//!
+//! The output's **energy envelope** is correlated against the source's, with a
+//! shuffled control beside it. Envelope rather than samples: the prior is
+//! sampled and the phonemes are arbitrary, so a sample-wise difference is large
+//! between two runs of the *same* model and proves nothing — but a mis-wired
+//! MRTE or a mis-scaled style attention returns something whose loudness stops
+//! tracking the source at all.
+//!
+//! **Read the frame count first.** On `s2G2333k.pth` and this repository's own
+//! corpus, LibTorch:
+//!
+//! | clip | frames | r vs source | chance |
+//! |---|---|---|---|
+//! | 1.75 s | 86 | 0.4675 | -0.1196 |
+//! | 10 s | 498 | **0.8562** | -0.0600 |
+//!
+//! Both are the same model on the same weights, and the short one is not a
+//! worse port — 86 frames of one breathy phrase is too little for a correlation
+//! to settle, exactly as `rvc-core`'s `f0_runtimes` is meaningless below a few
+//! dozen jointly voiced frames. **Give it ten seconds or more**, and treat
+//! anything under ~200 frames as no measurement at all.
+//!
+//! This correlation is what CLAUDE.md has long cited for `s2` — at r=0.91
+//! against a 0.30 baseline — but **the example did not compute it**, printing
+//! RMS and finiteness instead. The number was real and the harness credited
+//! with it was not, which is the same shape of error as a fabricated
+//! calibration table: it can only be caught by running the thing. It is
+//! computed here now, so the claim and the check are the same object.
 
 #[path = "common/mod.rs"]
 mod common;
@@ -39,6 +69,50 @@ fn describe(name: &str, v: &[f32]) {
         v.len(),
         20.0 * rms.max(1e-12).log10()
     );
+}
+
+/// RMS per `hop` samples. The two signals are at different rates — 16 kHz in,
+/// 32 kHz out — so each gets a hop covering the same wall-clock and the two
+/// envelopes land on one grid.
+fn envelope(samples: &[f32], hop: usize) -> Vec<f64> {
+    samples
+        .chunks_exact(hop)
+        .map(|frame| {
+            let power: f64 = frame.iter().map(|s| (*s as f64).powi(2)).sum();
+            (power / hop as f64).sqrt()
+        })
+        .collect()
+}
+
+fn correlation(a: &[f64], b: &[f64]) -> f64 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return 0.0;
+    }
+    let (a, b) = (&a[..n], &b[..n]);
+    let mean = |v: &[f64]| v.iter().sum::<f64>() / n as f64;
+    let (ma, mb) = (mean(a), mean(b));
+    let (mut cov, mut va, mut vb) = (0.0, 0.0, 0.0);
+    for (x, y) in a.iter().zip(b) {
+        cov += (x - ma) * (y - mb);
+        va += (x - ma).powi(2);
+        vb += (y - mb).powi(2);
+    }
+    cov / (va * vb).sqrt().max(f64::MIN_POSITIVE)
+}
+
+/// Fisher-Yates against a fixed seed, so the chance baseline is the same number
+/// on every run and a reader can tell a real change from a reshuffle.
+fn shuffled(values: &[f64]) -> Vec<f64> {
+    let mut out = values.to_vec();
+    let mut state = 0x2545_F491_4F6C_DD1Du64;
+    for i in (1..out.len()).rev() {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        out.swap(i, (state >> 33) as usize % (i + 1));
+    }
+    out
 }
 
 impl common::Job for Reconstruct {
@@ -101,6 +175,33 @@ impl common::Job for Reconstruct {
 
         let out: Vec<f32> = audio.into_data().to_vec().unwrap();
         describe("reconstructed (32k)", &out);
+
+        // The number that says the stage is *wired* right rather than merely
+        // loaded, and the reason this example exists beyond a coverage count.
+        // Envelope rather than samples: the prior is sampled and the phonemes
+        // are arbitrary, so a sample-wise difference between input and output
+        // is large and means nothing — but a mis-wired MRTE or a mis-scaled
+        // style attention returns something whose loudness stops tracking the
+        // source at all.
+        //
+        // 20 ms frames at each rate, so the two envelopes share a grid. The
+        // shuffled control is printed beside it because a correlation is only
+        // meaningful against what chance would give: speech envelopes are
+        // autocorrelated, so even unrelated ones agree somewhat.
+        let src_env = envelope(&pcm16k, 16_000 / 50);
+        let out_env = envelope(&out, 32_000 / 50);
+        println!(
+            "\nenergy envelope ({} frames)",
+            src_env.len().min(out_env.len())
+        );
+        println!(
+            "  r vs source      : {:.4}",
+            correlation(&src_env, &out_env)
+        );
+        println!(
+            "  r vs shuffled    : {:.4}   (chance baseline)",
+            correlation(&src_env, &shuffled(&out_env))
+        );
 
         let bytes: Vec<u8> = out.iter().flat_map(|s| s.to_le_bytes()).collect();
         std::fs::write(&self.output, bytes).expect("write output");

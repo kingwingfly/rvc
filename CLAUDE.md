@@ -432,7 +432,7 @@ cargo run -p burn-mdx     --example keys -- --group <any MDX checkpoint>
 # port beyond weight coverage**. These exercise arithmetic on real audio, so
 # each takes weights and a clip; the exact usage and the numbers to expect are
 # in the example's own module doc, which is where they stay current:
-cargo run -p burn-gptsovits --example reconstruct  # `s2` round-trip, energy r=0.91
+cargo run -p burn-gptsovits --example reconstruct  # `s2` round-trip, energy r=0.86 on 10 s
 cargo run -p burn-seedvc --example speaker    # pairwise cosine: same speaker vs not
 cargo run -p burn-seedvc --example vocode     # BigVGAN: does the waveform track the mel
 cargo run -p burn-seedvc --example content    # whisper-small + the length regulator
@@ -657,7 +657,7 @@ Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper
 | `burn-rmvpe` | the RMVPE pitch network, upstream's `E2E(4, 1, (2, 2))`: a five-level U-net, a `Conv2d(16 → 3, 3×3)` head, one bidirectional GRU (384 → 256 each way) and `Linear(512, 360)`. `[batch, 128, T]` log-mel in, `[batch, T, 360]` cents salience out — the mel front end (`rvc-core`'s `mel.rs`) and the salience→Hz decode (`dsp::rmvpe_decode`) stay in `rvc-core` so both runtimes share them, rather than giving the two backends a chance to disagree about something neither computes. `rmvpe.pt` loads at **623/0/118**, the unused being one `num_batches_tracked` per `BatchNorm`. Aligning the frame count to a multiple of 32 is `forward`'s job, not the caller's |
 | `burn-mdx` | MDX23C (TFC-TDF-UNet v3), the source-separation network UVR ships: a complex STFT front end, five TFC-TDF U-net levels over a subband-folded spectrum, and one waveform per stem. What lets a corpus recorded over music be cleaned before anything else touches it, and what `preprocess separate` runs. **Stereo-native**, which is why `audio-kit` has a stereo path at all. `MDX23C-8KFFT-InstVoc_HQ.ckpt` loads at **319/0/0** — no unused at all, because the norms are `InstanceNorm2d` and so carry no running statistics and no `num_batches_tracked`. The **older MDX-Net v2 models are ONNX-only and deliberately not ported**; see the crate docs for why a Burn port of them cannot be verified |
 | `burn-whisper` | the Whisper network (standalone Burn port); mirrors HF's `state_dict` layout so `openai/whisper-large-v3-turbo` loads unchanged |
-| `burn-gptsovits` | the GPT-SoVITS network. `hubert` at 210/0, `quantizer` at 3/0, and `s2` complete at 773/0 (the 3 unused are the codebook's EMA training statistics). **`s2` is verified numerically, not just structurally**: `examples/reconstruct` round-trips real audio through cnhubert, the quantiser and the synthesizer, and the output tracks the source's energy envelope at r=0.91 against a chance baseline of 0.30. `t2s` (`s1`) is at 295/0. Every network of GPT-SoVITS is now ported; `tts-core`/`tts-cli` wire them into a working `tts`, and `tts-train` fine-tunes **both** stages — `s1` for delivery, `s2` for timbre. `SovitsPartial::forward_train` composes `enc_q` → `flow.forward` → random segment → `dec` and returns the five tensors the VITS losses need; the matching `s2D2333k.pth` discriminator loads at 111/0/0. `examples/keys` lists any checkpoint's tensors, which is the first thing to run against a new one |
+| `burn-gptsovits` | the GPT-SoVITS network. `hubert` at 210/0, `quantizer` at 3/0, and `s2` complete at 773/0 (the 3 unused are the codebook's EMA training statistics). **`s2` is verified numerically, not just structurally**: `examples/reconstruct` round-trips real audio through cnhubert, the quantiser and the synthesizer, and the output tracks the source's energy envelope at r=0.86 against a chance baseline of -0.06 on a 10 s clip — **read the frame count**, because 1.75 s of one phrase gives 0.47 on the same weights and is not a worse port. `t2s` (`s1`) is at 295/0. Every network of GPT-SoVITS is now ported; `tts-core`/`tts-cli` wire them into a working `tts`, and `tts-train` fine-tunes **both** stages — `s1` for delivery, `s2` for timbre. `SovitsPartial::forward_train` composes `enc_q` → `flow.forward` → random segment → `dec` and returns the five tensors the VITS losses need; the matching `s2D2333k.pth` discriminator loads at 111/0/0. `examples/keys` lists any checkpoint's tensors, which is the first thing to run against a new one |
 | `rvc-train` | native Rust/Burn adversarial training loop (see `docs/training.md`) |
 | `hub-kit` | auto-download every engine's assets from Hugging Face |
 | `rvc-cli` | lib **and** the `rvc` binary (clap): the bare invocation streams, plus `convert`, `train`, `download`, `completions`. **No `preprocess`** — that moved out to its own binary, and it was removed rather than deprecated, so a command line carrying it fails to parse |
@@ -973,10 +973,22 @@ Each model therefore needs a second check that exercises arithmetic:
 - `burn-whisper` — transcripts diffed against ONNX Runtime on the same weights,
   which came out byte-identical.
 - `burn-gptsovits` `s2` — `examples/reconstruct` runs audio through the whole
-  stage and correlates the output's energy envelope against the input's. r=0.91
-  where shuffling gives 0.30, and spectral flatness 0.17 against 1.0 for noise.
-  Cheap, needs no reference implementation, and a mis-wired MRTE or a
-  mis-scaled attention fails it loudly.
+  stage and correlates the output's energy envelope against the input's.
+  **r=0.86 on a 10 s clip where shuffling gives -0.06**, on `s2G2333k.pth` and
+  this repository's own corpus. Cheap, needs no reference implementation, and a
+  mis-wired MRTE or a mis-scaled attention fails it loudly.
+
+  **Read the frame count before the correlation.** The same weights on a 1.75 s
+  clip give 0.47 over 86 frames — not a worse port, just too little for a
+  correlation to settle, exactly as `f0_runtimes` is meaningless below a few
+  dozen jointly voiced frames. Anything under ~200 frames is no measurement.
+
+  **This entry used to read "r=0.91 where shuffling gives 0.30", and the example
+  computed no correlation at all** — it printed RMS and finiteness. The number
+  was real and the harness credited with it was not, which is the same shape of
+  error as `analyze`'s fabricated calibration table and is catchable only by
+  running the thing. The correlation is computed in the example now, so the
+  claim and the check are one object.
 - `tts` end to end — synthesise, then transcribe the result with `stt`. Text in
   and text out are compared by an independent model, which is as close to
   listening as an automated check gets.
