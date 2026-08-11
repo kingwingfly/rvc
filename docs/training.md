@@ -18,7 +18,7 @@ model this repo tunes *must* be a Burn port whatever else it also runs on.
 
 | loop | what it adapts | objective | unit of work |
 |---|---|---|---|
-| `rvc-train` | a whole voice — timbre and pitch handling | VITS GAN | a fixed 48-frame (0.48 s) window, decoder on a 36-frame segment |
+| `rvc-train` | a whole voice — timbre and pitch handling | VITS GAN | a fixed 48-frame (0.48 s) window, decoder on a 36-frame segment (`--window-frames`, `--segment-frames`) |
 | `tts-train` `s2` | timbre, for GPT-SoVITS | the same VITS GAN | one whole utterance, decoder on a 32-frame (0.64 s) segment |
 | `tts-train` `s1` | delivery — pacing, emphasis, where a speaker breathes | next-token cross-entropy | one whole token sequence |
 
@@ -37,15 +37,31 @@ can only do because RVC's conditioning is frame-aligned content features with no
 sequence structure — any 0.48 s of a clip is a valid training example. `enc_q`
 and the flow see the window; the decoder renders a 36-frame slice of it.
 
+Both counts are `--window-frames` and `--segment-frames`, the same two knobs
+`tts train` has — and they were constants here until the two loops were brought
+to parity. **`--window-frames` carries a second job that `s2`'s has no
+equivalent of**: because the window is a *fixed* size drawn out of a clip, a clip
+shorter than one window is not a valid example at all, so the same number is the
+corpus's minimum clip length and clips below it are dropped before the loop
+starts. On this repository's own 92-clip corpus, 48 → 400 leaves 32. `s2` has no
+such floor, because its unit of work is whatever the utterance happens to be.
+
 `s2` cannot. Its conditioning is *text*, attended to through the MRTE
 cross-attention, so a window of frames no longer matches the phonemes it was
 transcribed from. Each micro-batch is therefore one whole utterance: `enc_p`,
 `enc_q` and the flow see all of it and only the decoder runs on a random
 segment, exactly as upstream's `rand_slice_segments` does. The consequence is
 that **memory grows with the longest clip rather than with the batch**, which is
-why `--max-tokens` doubles as the frame cap that keeps a 6 GB card alive, and
-why a batch here is processed one clip at a time and accumulated rather than
-padded.
+why there is a frame cap at all to keep a 6 GB card alive, and why a batch here
+is processed one clip at a time and accumulated rather than padded.
+
+That cap is `--max-frames`, and it is *separate* from `--max-tokens` for a
+reason worth stating once: `--max-tokens` bounds `s1`'s sequence, in semantic
+tokens at 25 Hz, while the cap that governs `s2`'s peak memory is in latent
+frames at 50 Hz. It defaults to twice `--max-tokens` because a token is two
+frames, which is the right default and was the wrong *only* option — while it
+was derived, raising `--max-tokens` so `s1` could see longer lines doubled `s2`'s
+memory as an unrelated side effect.
 
 `s1` is the same story without the segment: sequences differ in length, the loop
 does not pad, so a batch is an accumulation count.
@@ -138,6 +154,15 @@ like the final one. Three rules make the comparison mean anything:
   steps. The cap is load-bearing: `total_steps` is the *scheduled* count, and
   runs are normally ended by hand long before it, so an uncapped window would
   first close only in runs nobody completes.
+
+  **The clamp's other end is the one worth overriding**, and `Best::new` takes
+  the window as an `Option` for it: a short schedule divides down to zero and
+  the floor of `1` puts back a single-step mean, which is precisely the noise
+  the window exists to average out. So the derived value is right for a run
+  scheduled the length it will actually take, and wrong for a long schedule
+  somebody intends to interrupt — a distinction only the caller can make, which
+  is why it is a parameter rather than a wider clamp. `rvc train --best-window`
+  exposes it; `s2` keeps the derived one, having no equivalent habit.
 - **Persistence.** The score lives in a `<out>.best.json` sidecar and is read
   back at startup. Without it every process starts from an empty best and its
   first window overwrites the previous run's model however much worse it is —
