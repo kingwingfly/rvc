@@ -42,7 +42,7 @@
 //! in the recording lands in the vocals stem, including a singer on the backing
 //! track — so a streamer talking over somebody else's *singing* still gets
 //! both. Filtering by who is speaking is a different model and a different
-//! stage.
+//! stage: [`crate::diarize`], which reads these stems.
 //!
 //! # Streaming, and the one buffer that is left
 //!

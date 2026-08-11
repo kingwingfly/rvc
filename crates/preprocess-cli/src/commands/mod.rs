@@ -2,6 +2,7 @@
 
 pub mod clip;
 pub mod denoise;
+pub mod diarize;
 pub mod separate;
 
 use std::path::{Path, PathBuf};
