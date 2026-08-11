@@ -210,7 +210,14 @@ pub async fn file(
     let kept_windows = scores.iter().filter(|s| **s >= opts.threshold).count();
     let ranges = segments(&scores, opts, in_secs);
 
-    let audio = crate::decode_mono(&input.path, opts.sr).await?;
+    // The second decode is skipped when nothing matched, which is not a
+    // micro-optimisation: a recording of the wrong speaker is the case a user
+    // runs a whole corpus through, and paying a full decode per file to write
+    // nothing is how "it kept nothing" becomes "it also took an hour".
+    let audio = match ranges.is_empty() {
+        true => Vec::new(),
+        false => crate::decode_mono(&input.path, opts.sr).await?,
+    };
     let mut kept_secs = 0.0f64;
     for (i, (start, end)) in ranges.iter().enumerate() {
         let sample = |t: f64| ((t * opts.sr as f64) as usize).min(audio.len());
