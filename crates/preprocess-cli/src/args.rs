@@ -117,7 +117,10 @@ pub struct SliceArgs {
     /// Energy floor in dBFS: audio quieter than this counts as between-sentence
     /// dead-air. Lower it (e.g. -50) to keep the very softest passages —
     /// energy is used only to find silent gaps, never to gate quiet content.
-    #[arg(long, default_value_t = -40.0)]
+    // `allow_negative_numbers` because this flag's value is *always* negative
+    // and clap would otherwise read `-50` as a cluster of short flags. See
+    // `cli_kit`'s module docs.
+    #[arg(long, allow_negative_numbers = true, default_value_t = -40.0)]
     pub silence_db: f32,
     /// Minimum silent-gap length (seconds) that counts as a sentence boundary.
     /// Shorter pauses stay inside the clip, so complete sentences are never
@@ -733,7 +736,9 @@ pub struct NormalizeArgs {
     pub peak: Option<f32>,
     /// EBU R128 integrated loudness target in LUFS (negative), e.g. -23 for the
     /// broadcast reference or -16 for a louder corpus.
-    #[arg(long)]
+    // See `cli_kit`'s module docs. Full scale is 0 LUFS, so every usable value here
+    // is negative and this flag was unreachable in the form its own help gives.
+    #[arg(long, allow_negative_numbers = true)]
     pub lufs: Option<f32>,
 }
 
@@ -801,7 +806,8 @@ pub struct TrimArgs {
     pub output_dir: PathBuf,
     /// Energy floor in dBFS: audio quieter than this counts as silence at the
     /// edges. Lower it (e.g. -50) to keep the very softest onsets and tails.
-    #[arg(long, default_value_t = -40.0)]
+    // See `cli_kit`'s module docs.
+    #[arg(long, allow_negative_numbers = true, default_value_t = -40.0)]
     pub silence_db: f32,
     /// Keep up to this many seconds of the bordering quiet at each edge, so
     /// onsets and soft breathy tails are not clipped.

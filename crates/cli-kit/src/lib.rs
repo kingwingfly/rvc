@@ -3,6 +3,31 @@
 //! `rvc`, `stt` and `voice` each ship separately, so anything shared between
 //! them has to live somewhere that pulls in no engine — otherwise installing the
 //! recognition tool drags in voice conversion for the sake of a log formatter.
+//!
+//! # A flag whose value is negative needs `allow_negative_numbers`
+//!
+//! Clap reads `-50` as a cluster of short flags, not as a number, so
+//! `--silence-db -50` — the exact form that flag's own help recommends — failed
+//! with `unexpected argument '-5'` until every such flag was annotated
+//! `#[arg(..., allow_negative_numbers = true)]`. The tell is that
+//! `--silence-db=-50` works while `--silence-db -50` does not, which reads as a
+//! shell quoting problem and is not one.
+//!
+//! **This went unnoticed because nothing catches it.** The flag parses, the
+//! default is applied, `cargo test` passes, and `-h` prints advice that cannot
+//! be followed — `rvc convert -t -5` was unreachable for as long as pitch
+//! shifting has existed, and shifting *down* is half of what that flag is for.
+//! A test cannot help either unless it invokes the parser with the argument
+//! *split*, which is why the check is a rule rather than a fixture: **if a
+//! flag's documented value can begin with `-`, it carries the annotation.**
+//! There is no crate-wide switch that would do it once — clap has a
+//! `Command`-level version, but a `*-cli` crate exports an `Args` type that
+//! somebody else's `Command` hosts, so per-argument is the only placement that
+//! survives being nested under `voice`.
+//!
+//! It is annotated per argument rather than per struct on purpose: it widens
+//! what a value may look like, so it belongs only where a negative value is
+//! meaningful. A `--sr -5` should still be rejected by the parser.
 
 mod backend;
 

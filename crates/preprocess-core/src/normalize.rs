@@ -41,6 +41,16 @@ pub const DEFAULT_PEAK: f32 = 0.95;
 /// papered over with a peak fallback the user did not ask for.
 pub const MIN_LUFS_SECONDS: f64 = 0.4;
 
+/// R128's absolute gate, in LUFS. A recording with nothing above it has no
+/// integrated loudness.
+///
+/// This has to be tested for explicitly, because **ffmpeg reports the gate
+/// itself rather than `-inf` when nothing clears it** — digital silence measures
+/// exactly `-70.0`, which is finite, parses, and would be normalized *from* as
+/// if it were a very quiet recording. A 2 s file of zeros would then be handed
+/// +47 dB of gain against a `-23` target and come out as amplified nothing.
+const ABSOLUTE_GATE_LUFS: f32 = -70.0;
+
 /// What level to land on.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Target {
@@ -191,10 +201,11 @@ pub fn integrated_lufs(samples: &[f32], sr: u32) -> Result<Option<f32>> {
         return Ok(None);
     }
     // `peak=none` because nothing here reads a true-peak, and computing one
-    // oversamples every frame. `framelog=quiet` because the filter otherwise
-    // prints its own summary block through ffmpeg's log when the graph is
-    // dropped, which would put two of them on stderr per file — beside this
-    // stage's own one-line report, and saying the same thing.
+    // oversamples every frame. `framelog=quiet` silences the per-frame lines —
+    // and *only* those. The summary block this filter prints when its graph is
+    // dropped goes out at info level regardless, so what actually keeps it off
+    // stderr is `audio-kit` setting ffmpeg's log level, which is the only
+    // control there is over it.
     let mut meter = audio_kit::AudioFilter::new(sr, "ebur128=metadata=1:peak=none:framelog=quiet")
         .context("building the ebur128 measurement graph")?;
     meter.process(samples).context("measuring loudness")?;
@@ -208,8 +219,10 @@ pub fn integrated_lufs(samples: &[f32], sr: u32) -> Result<Option<f32>> {
     let value: f32 = raw
         .parse()
         .with_context(|| format!("ebur128 reported an unreadable loudness: {raw:?}"))?;
-    // Silence reads as -inf, which is not a level to normalize from.
-    Ok(value.is_finite().then_some(value))
+    // Both spellings of "nothing cleared the gate": `-inf`, and the gate itself.
+    // See [`ABSOLUTE_GATE_LUFS`] — the second is the one that looks like a
+    // reading.
+    Ok((value.is_finite() && value > ABSOLUTE_GATE_LUFS).then_some(value))
 }
 
 #[cfg(test)]

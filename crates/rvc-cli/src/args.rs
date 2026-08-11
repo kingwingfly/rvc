@@ -379,7 +379,10 @@ pub struct ConvertArgs {
     #[arg(short = 'o', long, default_value = ".")]
     pub output_dir: PathBuf,
     /// Pitch shift in semitones.
-    #[arg(short = 't', long, default_value_t = 0)]
+    // `allow_negative_numbers` because shifting *down* is half of what this
+    // flag is for, and `-t -5` would otherwise be read as short flags. The same
+    // annotation is on every negative-valued flag in the workspace.
+    #[arg(short = 't', long, allow_negative_numbers = true, default_value_t = 0)]
     pub transpose: i32,
     /// Inference backend: `auto`, `onnx`, `cuda` (aliases `burn`, `burn-cuda`),
     /// `tch` (`libtorch`, `burn-tch`) or `wgpu` (`webgpu`, `burn-wgpu`).
@@ -412,7 +415,10 @@ pub struct FilterArgs {
     #[command(flatten)]
     pub models: ModelOpts,
     /// Pitch shift in semitones.
-    #[arg(short = 't', long, default_value_t = 0)]
+    // `allow_negative_numbers` because shifting *down* is half of what this
+    // flag is for, and `-t -5` would otherwise be read as short flags. The same
+    // annotation is on every negative-valued flag in the workspace.
+    #[arg(short = 't', long, allow_negative_numbers = true, default_value_t = 0)]
     pub transpose: i32,
     /// Samples per input read from stdin (16 kHz mono f32le). This is the read
     /// size and nothing more — the audio is still converted a `--block-secs`
