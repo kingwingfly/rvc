@@ -95,7 +95,10 @@ fn db(v: Option<f32>) -> String {
 
 fn stat(s: Option<Stat>, unit: &str) -> String {
     match s {
-        Some(s) => format!("{:.1} {unit} (spread {:.1} .. {:.1})", s.median, s.min, s.max),
+        Some(s) => format!(
+            "{:.1} {unit} (spread {:.1} .. {:.1})",
+            s.median, s.min, s.max
+        ),
         None => "n/a".to_string(),
     }
 }
@@ -135,7 +138,11 @@ fn print_text(summary: &Summary, reports: &[FileReport], failed: usize, args: &A
                 measured.clips,
                 measured.silence_ratio * 100.0,
                 measured.silence_db,
-                if r.continuous() { "  [no dead air]" } else { "" },
+                if r.continuous() {
+                    "  [no dead air]"
+                } else {
+                    ""
+                },
             );
         }
         println!();
@@ -170,7 +177,10 @@ fn print_text(summary: &Summary, reports: &[FileReport], failed: usize, args: &A
         summary.at_measured.clips,
         summary.at_measured.silence_ratio * 100.0,
     );
-    println!("  clip lengths   {}", histogram(&summary.at_measured.durations));
+    println!(
+        "  clip lengths   {}",
+        histogram(&summary.at_measured.durations)
+    );
 
     // Advisories last, because they are what a reader acts on — and every one
     // of them names the files it is about, so a corpus of hundreds does not

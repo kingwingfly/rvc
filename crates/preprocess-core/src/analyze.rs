@@ -337,7 +337,9 @@ impl Summary {
             suggestions
                 .iter()
                 .copied()
-                .fold(None, |acc: Option<f32>, v| Some(acc.map_or(v, |a| a.min(v))))
+                .fold(None, |acc: Option<f32>, v| {
+                    Some(acc.map_or(v, |a| a.min(v)))
+                })
         };
 
         Self {
@@ -530,7 +532,10 @@ mod tests {
     fn short_gapless_clips_are_not_the_pathological_shape() {
         let r = measure(Path::new("clip_000.wav"), &voiced(3.0, 0.4), &opts());
         assert!(r.best_silence_ratio() < CONTINUOUS_SILENCE_RATIO);
-        assert!(!r.continuous(), "an already-sliced clip is not a bed: {r:?}");
+        assert!(
+            !r.continuous(),
+            "an already-sliced clip is not a bed: {r:?}"
+        );
 
         let s = Summary::of(&[r]);
         assert!(s.continuous.is_empty());
