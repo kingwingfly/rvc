@@ -175,12 +175,25 @@ fn print_text(summary: &Summary, reports: &[FileReport], failed: usize, args: &A
     println!("  noise floor    {}", stat(summary.floor_db, "dBFS"));
     println!("  speech level   {}", stat(summary.signal_db, "dBFS"));
     println!("  snr            {}", stat(summary.snr_db, "dB"));
-    println!(
-        "  peak           {:.1} dBFS (loudest sample), {} clipped samples in {} files",
-        summary.peak_db,
-        summary.clipped,
-        summary.clipped_files.len(),
-    );
+    // The two counts answer different questions and the line has to say so:
+    // `clipped` is every sample at full scale anywhere in the corpus, while
+    // `clipped_files` holds only the files with *enough* of them to be worth
+    // naming (`CLIPPED_SAMPLES_WORTH_SAYING`). Written as "N clipped samples in
+    // M files" they read as one tally, and the honest reading of this repo's own
+    // `dataset/` — 7 stray samples, no file near the threshold — came out as the
+    // self-contradicting "7 clipped samples in 0 files".
+    match summary.clipped_files.len() {
+        0 => println!(
+            "  peak           {:.1} dBFS (loudest sample), {} samples at full scale \
+             (no file has enough to matter)",
+            summary.peak_db, summary.clipped,
+        ),
+        n => println!(
+            "  peak           {:.1} dBFS (loudest sample), {} samples at full scale, \
+             {n} file(s) clipped enough to hear",
+            summary.peak_db, summary.clipped,
+        ),
+    }
     println!(
         "  at --silence-db {:.1}:  {} clips, {:.0}% dead air",
         args.slice.silence_db,
