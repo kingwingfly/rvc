@@ -153,6 +153,19 @@ wrong in the direction that merges sentences into paragraphs rather than the one
 that fragments them. The suggested floor is what closes that, and it is worth
 running before `clip` on anything not recorded in a quiet room.
 
+**The suggestion can land on either side of the default, and that is not it
+being arbitrary.** Per file it is the measured floor plus a margin — 8 dB, or
+40% of the way up to the speech level, whichever is nearer the floor — so the
+stream, whose floor is −40.3 with speech at −26.1, suggests **−34.7**. Over a
+corpus it is the **lowest** of the per-file suggestions rather than their
+middle, which is why 92 clips whose floors spread from −77.6 to −33.1 suggest
+**−69.6**: a floor that is too low leaves some dead air, which `--min-clip` and
+`--pad` absorb, while one that is too high eats the soft tails this toolkit
+exists to preserve. Both directions raise the clip count here because −40 was
+not where either recording's dead air actually sat. The spread is printed beside
+the floor so a corpus that disagrees with itself is visible rather than averaged
+away.
+
 There is no loudness (LUFS) column. ffmpeg reports that through its log rather
 than through the samples, so reading it would mean installing a global log
 callback and parsing stderr for one number that peak, floor and SNR already
