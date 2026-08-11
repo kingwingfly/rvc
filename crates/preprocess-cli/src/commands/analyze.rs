@@ -14,23 +14,38 @@
 //! tidiness — a warning line on stdout turns the document into something no
 //! parser accepts, and the failure appears in the consumer rather than here.
 //!
-//! # The two constants that decide "no floor can help"
+//! # What the real material says, which is not what this stage was built expecting
 //!
-//! [`preprocess_core::analyze::FileReport::continuous`] needs a length and a
-//! silence ratio, and the pair has to separate a continuous bed from an
-//! already-sliced corpus, which is gapless for a good reason. Measured on this
-//! repository's own material:
+//! Measured with this binary on every recording the repository has, `clips /
+//! dead air` given at the requested `--silence-db -40` and then at the floor
+//! derived from the recording:
 //!
-//! - `dataset/` — 92 clips a previous `clip` run wrote, 0.9-903 s each, SNR
-//!   32-46 dB. Silence ratio at the measured floor: 0.00-0.13. The 90 short
-//!   ones are gapless *and* under 15 s, and the two long ones (300 s and 903 s)
-//!   are unsliced recordings that do hold dead air, at ratios of 0.27 and 0.13.
-//!   Nothing here is flagged.
-//! - `mix_60s.wav` — 60 s of speech over music, SNR 15.6 dB, silence ratio 0.00
-//!   at every floor tried. Flagged.
-//! - `mix_60s.vocals.wav` — the same 60 s after `separate`, SNR 30.4 dB,
-//!   silence ratio 0.29. Not flagged, which is the contrast that says the
-//!   advisory points at something a user can act on.
+//! | | length | floor | SNR | at -40 dB | at the measured floor |
+//! |---|---|---|---|---|---|
+//! | `dataset/` (92 clips a previous `clip` run wrote) | 1207 s | -47.2 | 13.0 | 72 / 4% | 285 / 15% |
+//! | the source stream, whole | 1191 s | -40.3 | 14.2 | 64 / 4% | 196 / 15% |
+//! | `mix_60s.wav`, speech over music | 60 s | -40.3 | 15.1 | 5 / 3% | 14 / 19% |
+//! | the same after `separate` | 60 s | -53.6 | 26.4 | 12 / 34% | 13 / 18% |
+//! | `at_180s.wav`, the densest bed on hand | 30 s | -35.4 | 7.9 | **1 / 0%** | 9 / 35% |
+//!
+//! **Not one of them is flagged
+//! [`continuous`](preprocess_core::analyze::FileReport::continuous)**, and that
+//! is the finding rather than a gap in the sample. The condition asks for no
+//! dead air at *either* floor, and on real speech-over-music the derived floor
+//! always finds some — even `at_180s.wav`, which at the default floor is a
+//! single unsliceable 30 s block, opens into nine clips once the floor is read
+//! off the recording. So `continuous` stays the tail case it describes, pinned
+//! by a synthetic fixture in [`preprocess_core::analyze`] and by nothing else.
+//! **Do not calibrate its two constants against these numbers** — none of them
+//! is near the boundary, so any threshold that "fixed" one would be fitting
+//! noise.
+//!
+//! What the table does demonstrate is the half of this stage that fires on
+//! everything: the *requested* floor is wrong for this material by a factor of
+//! three to nine in clip count, in the direction that matters — 5 clips out of
+//! 60 s of speech is sentences merged into paragraphs, which is what a trainer
+//! then samples 0.48 s windows out of. The suggestion is what closes that, and
+//! it is worth running before `clip` on anything not recorded in a quiet room.
 
 use std::path::Path;
 
