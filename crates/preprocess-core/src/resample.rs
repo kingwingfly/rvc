@@ -80,8 +80,7 @@ pub async fn file(
             let mut chunks = Vec::new();
             let mut frames = 0usize;
             while let Some(chunk) = decode.next().await {
-                let chunk =
-                    chunk.with_context(|| format!("decoding {}", input.path.display()))?;
+                let chunk = chunk.with_context(|| format!("decoding {}", input.path.display()))?;
                 frames += chunk.frames();
                 chunks.push(Ok::<_, audio_kit::AudioError>(chunk));
             }
@@ -219,6 +218,9 @@ mod tests {
             .map(|(l, r)| (l - r).abs())
             .sum::<f32>()
             / folded.frames() as f32;
-        assert!(apart < 1e-6, "a mono write kept two distinct channels: {apart}");
+        assert!(
+            apart < 1e-6,
+            "a mono write kept two distinct channels: {apart}"
+        );
     }
 }
