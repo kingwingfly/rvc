@@ -512,12 +512,34 @@ mod tests {
     /// silence, so no floor can rescue it and the suggestion must be withheld.
     #[test]
     fn a_continuous_bed_is_reported_as_one_no_floor_can_fix() {
-        // Speech over a bed loud enough that the gaps between sentences are not
-        // quiet — which is what a backing track does to a recording.
-        let mut sig = three_sentences();
-        let bed = voiced(sig.len() as f32 / SR as f32, 0.1);
-        for (s, b) in sig.iter_mut().zip(bed) {
-            *s += b;
+        // Speech over a backing track, and what makes one unsliceable is not
+        // that it is loud — it is that it has **dynamics of its own**. A
+        // stationary bed is trivially sliceable however loud it is: the gaps
+        // hold bed alone and the sentences hold bed plus speech, so the
+        // measured floor lands between the two and cuts, which is this stage
+        // working rather than failing. A track modulating faster than
+        // `min_silence` never leaves a quiet run long enough to be a cut, and
+        // its own quiet passages set the percentile floor, so the gaps sit
+        // above it. That is the shape `mix_60s.wav` has at SNR 15.6 dB and
+        // silence ratio 0.00.
+        //
+        // Five sentences rather than `three_sentences`'s three, because
+        // `continuous` also asks for `CONTINUOUS_SECS` — a 10 s file is too
+        // short to be called one however gapless it is, which is the clause
+        // that keeps an already-sliced clip out of this bucket.
+        let mut sig = room(1.0, 0.002);
+        for _ in 0..5 {
+            sig.extend(voiced(2.0, 0.4));
+            sig.extend(room(1.0, 0.002));
+        }
+        let bed = room(sig.len() as f32 / SR as f32, 0.8);
+        for (i, (s, b)) in sig.iter_mut().zip(bed).enumerate() {
+            // 5 Hz, so a quiet phase lasts 0.1 s against `min_silence`'s 0.3,
+            // and the range keeps the sum inside full scale — a fixture that
+            // clips would be reported for that instead.
+            let env =
+                0.5 + 0.15 * (std::f64::consts::TAU * 5.0 * i as f64 / SR as f64).sin() as f32;
+            *s += env * b;
         }
         let r = measure(Path::new("mix.wav"), &sig, &opts());
 
