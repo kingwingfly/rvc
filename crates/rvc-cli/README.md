@@ -138,6 +138,24 @@ on a 50-step mean because one step's minimum is luck.
 those are the weights that actually faced the saved discriminator, where the EMA
 snapshot never did.
 
+`--segment-frames` (36) and `--window-frames` (48) are `tts train`'s knobs of the
+same name, and they were constants here until now. **`--window-frames` is the one
+to be careful with**: it is the context width fed to `enc_q` and the flow, and it
+doubles as the *minimum clip length*, so a clip shorter than it is discarded
+rather than padded. Raising it on a corpus of short per-sentence clips shrinks
+that corpus, and the only sign is the `; N skipped as too short` tail on the line
+the run prints — read it. On this repository's own 92-clip corpus, going from the
+default 48 to 400 leaves **32 clips, 60 skipped**, and the run is otherwise
+identical: same command, same message, a third of the training data.
+
+`--weight-decay` (0.01) is the one optimizer setting worth touching on a
+fine-tune of an already-converged base: raising it pulls the weights back toward
+the base, lowering it lets the voice move further and overfit a small corpus
+faster. `--best-window` is worth setting on a run you intend to stop by hand —
+the derived default is a twentieth of the *scheduled* run capped at 50, so a
+short schedule collapses it to 1, and a "best" chosen on a single step is exactly
+the per-step noise the window exists to average out.
+
 Comma-separate `--device` for data-parallel training. The first entry is the
 master — it holds the weights, both optimizer states and the EMA, and it is the
 only device that writes checkpoints. **`-b` is per device**, so the effective batch

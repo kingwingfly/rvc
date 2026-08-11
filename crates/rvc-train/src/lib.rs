@@ -13,6 +13,12 @@
 mod dataset;
 mod trainer;
 
+// The two frame counts are re-exported because they are `rvc train`'s clap
+// defaults now, not only the loop's constants: the CLI has to name the value it
+// is defaulting to, and a second copy of `36` and `48` in `rvc-cli` is exactly
+// the drift the settings struct was introduced to prevent.
+pub use trainer::{SEGMENT_FRAMES, WINDOW_FRAMES};
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -94,6 +100,22 @@ pub struct TrainSettings {
     /// `<out-dir>/checkpoint/<name>.best[.disc].safetensors`. `false` = only the
     /// final weights are written.
     pub save_best: bool,
+    /// Latent frames the generator renders per step. Upstream's 36 is
+    /// 17280 samples at a 480-sample hop; the adversarial losses are local, so
+    /// this trades VRAM against little else.
+    pub segment_frames: usize,
+    /// Context window (frames) fed to `enc_q`/the flow each step.
+    ///
+    /// **It doubles as the minimum clip length**, so raising it silently
+    /// discards every clip shorter than the new value — which on a corpus of
+    /// per-sentence clips can be most of it.
+    pub window_frames: usize,
+    /// AdamW weight decay, for both optimizers. On a fine-tune of a converged
+    /// base this is the one optimizer setting worth touching.
+    pub weight_decay: f32,
+    /// Steps averaged before a "best" checkpoint is judged, or `None` to derive
+    /// it from the scheduled run. See [`train_kit::Best::new`].
+    pub best_window: Option<usize>,
     /// Show Burn's interactive TUI dashboard (the caller must have routed logs
     /// off stderr; disable for non-TTY output).
     pub use_tui: bool,
@@ -156,7 +178,10 @@ pub fn train(req: TrainRequest) -> Result<PathBuf> {
         &req.content,
         &req.rmvpe,
         req.settings.sample_rate,
-        trainer::WINDOW_FRAMES,
+        // The same value the loop uses, and this is where it decides which
+        // clips exist at all: a clip shorter than one context window is dropped
+        // here rather than truncated later.
+        req.settings.window_frames,
     ))?;
 
     dispatch(&req, clips)
@@ -271,6 +296,10 @@ mod tests {
                 d_lr_ratio: 1.0,
                 d_interval: 1,
                 snr_weight: 0.0,
+                segment_frames: trainer::SEGMENT_FRAMES,
+                window_frames: trainer::WINDOW_FRAMES,
+                weight_decay: 0.01,
+                best_window: None,
                 save_best: true,
                 use_tui: false,
             },

@@ -65,6 +65,15 @@ pub struct Segment {
 }
 
 /// How to cut the input up and what to ask the model for.
+/// Whisper's encoder window, in seconds — 30, and not a tuning choice.
+///
+/// Named rather than written out because it is a *ceiling* the CLI has to
+/// enforce as well as a default it has to apply, and `stt-cli` had the number
+/// twice: once as `--max-clip`'s default and once in the check that refuses a
+/// larger one. Two copies of a constant that comes out of the model's own front
+/// end is one edit away from a segment the encoder cannot hold.
+pub const WINDOW_SECONDS: f32 = (WINDOW_SAMPLES / SAMPLE_RATE as usize) as f32;
+
 #[derive(Debug, Clone)]
 pub struct TranscribeOptions {
     /// Where to cut. Defaults match the corpus slicer's: energy is used only to
@@ -79,7 +88,7 @@ impl Default for TranscribeOptions {
             slice: SliceOptions {
                 // A segment must fit one encoder window, so unlike the training
                 // slicer this one has a hard ceiling rather than 0 ("never split").
-                max_clip: (WINDOW_SAMPLES / SAMPLE_RATE as usize) as f32,
+                max_clip: WINDOW_SECONDS,
                 ..SliceOptions::default()
             },
             decode: DecodeOptions::default(),

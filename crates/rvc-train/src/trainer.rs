@@ -21,9 +21,11 @@ use train_kit::{
     Best, Checkpoint, Dashboard, Rng, Schedule, accumulate, ema_update, human, materialize, scalar,
 };
 
-const SEGMENT_FRAMES: usize = 36; // 17280 samples / 480 hop
+/// Latent frames rendered per step: 17280 samples / 480 hop. The default for
+/// `TrainSettings::segment_frames`, which is what the loop actually reads.
+pub const SEGMENT_FRAMES: usize = 36;
 /// Context window (frames) fed to enc_q/flow each step; clips must be at least
-/// this long.
+/// this long. The default for `TrainSettings::window_frames`.
 pub const WINDOW_FRAMES: usize = 48;
 const C_MEL: f64 = 45.0;
 const C_KL: f64 = 1.0;
@@ -101,17 +103,24 @@ pub fn run<AB: AutodiffBackend>(
         .map(|d| Spectral::<AB>::new(&SpectralConfig::v2_48k(), d))
         .collect();
 
+    let weight_decay = req.settings.weight_decay;
+    // Read once, so the loop and the tensor shapes below cannot disagree about
+    // them. `window_frames` is the clip-length floor as well as the context
+    // width — `load_clips` was given the same value, and a shorter clip was
+    // discarded there rather than truncated here.
+    let window_frames = req.settings.window_frames;
+    let segment_frames = req.settings.segment_frames;
     let mut opt_g = AdamWConfig::new()
         .with_beta_1(0.8)
         .with_beta_2(0.99)
         .with_epsilon(1e-9)
-        .with_weight_decay(0.01)
+        .with_weight_decay(weight_decay)
         .init::<AB, Synthesizer<AB>>();
     let mut opt_d = AdamWConfig::new()
         .with_beta_1(0.8)
         .with_beta_2(0.99)
         .with_epsilon(1e-9)
-        .with_weight_decay(0.01)
+        .with_weight_decay(weight_decay)
         .init::<AB, MultiPeriodDiscriminator<AB>>();
     let accum = req.settings.grad_accum.max(1);
     let d_lr_ratio = req.settings.d_lr_ratio;
@@ -119,7 +128,7 @@ pub fn run<AB: AutodiffBackend>(
 
     let batch = req.settings.batch_size.max(1);
     let total_frames: usize = clips.iter().map(|c| c.frames).sum();
-    let steps_per_epoch = (total_frames / (batch * WINDOW_FRAMES)).max(1);
+    let steps_per_epoch = (total_frames / (batch * window_frames)).max(1);
     let total_steps = req.settings.epochs as usize * steps_per_epoch;
 
     // LR decay and EMA window, both as fractions of the whole run so they stay
@@ -157,7 +166,7 @@ pub fn run<AB: AutodiffBackend>(
 
     let mut rng = Rng::new(0x51D_u64.wrapping_mul(req.settings.epochs as u64 + 1));
     let sid = req.settings.speaker_id;
-    let seg_len = SEGMENT_FRAMES * HOP;
+    let seg_len = segment_frames * HOP;
 
     // Generator weight EMA (kept on the inner backend): averaged over the
     // adversarial oscillation, so cleaner than any single step, and what every
@@ -167,7 +176,12 @@ pub fn run<AB: AutodiffBackend>(
 
     let out = Checkpoint::new(&req.out);
     // Best-so-far checkpointing, on unless `--no-save-best`.
-    let mut best = Best::new(&out, req.settings.save_best, total_steps);
+    let mut best = Best::new(
+        &out,
+        req.settings.save_best,
+        total_steps,
+        req.settings.best_window,
+    );
 
     let mut dash = Dashboard::new(
         req.settings.use_tui,
@@ -230,9 +244,9 @@ pub fn run<AB: AutodiffBackend>(
             // Every device gets its own micro-batch, so the effective batch is
             // `batch * accum * devices` — the usual data-parallel bargain.
             for (i, dev) in devices.iter().enumerate() {
-                let data = sample_batch(&clips, b, WINDOW_FRAMES, &mut rng, cdf.as_deref());
+                let data = sample_batch(&clips, b, window_frames, &mut rng, cdf.as_deref());
                 let ids: Vec<usize> = (0..b)
-                    .map(|_| rng.below(WINDOW_FRAMES - SEGMENT_FRAMES + 1))
+                    .map(|_| rng.below(window_frames - segment_frames + 1))
                     .collect();
                 // Device 0 is the master and owns the live weights; the rest work
                 // on replicas made above. `replicas` is empty when N == 1, so that
@@ -251,6 +265,8 @@ pub fn run<AB: AutodiffBackend>(
                     batch: b,
                     sid,
                     seg_len,
+                    window_frames,
+                    segment_frames,
                     update_d,
                 });
 
@@ -337,6 +353,11 @@ struct MicroIn<'a, AB: AutodiffBackend> {
     batch: usize,
     sid: i64,
     seg_len: usize,
+    /// Carried per micro-batch rather than read from a constant, because both
+    /// are now settings — and the tensor shapes below are built from them, so a
+    /// stale copy is a shape mismatch rather than a wrong number.
+    window_frames: usize,
+    segment_frames: usize,
     update_d: bool,
 }
 
@@ -367,21 +388,23 @@ fn micro_step<AB: AutodiffBackend>(input: MicroIn<'_, AB>) -> MicroOut<AB> {
         batch: b,
         sid,
         seg_len,
+        window_frames,
+        segment_frames,
         update_d,
     } = input;
 
     let phone = Tensor::<AB, 3>::from_data(
-        TensorData::new(data.phone, [b, WINDOW_FRAMES, CONTENT_DIM]),
+        TensorData::new(data.phone, [b, window_frames, CONTENT_DIM]),
         device,
     );
     let pitch =
-        Tensor::<AB, 2, Int>::from_data(TensorData::new(data.coarse, [b, WINDOW_FRAMES]), device);
-    let nsff0 = Tensor::<AB, 2>::from_data(TensorData::new(data.nsff0, [b, WINDOW_FRAMES]), device);
-    let gt = Tensor::<AB, 2>::from_data(TensorData::new(data.gt, [b, WINDOW_FRAMES * HOP]), device);
+        Tensor::<AB, 2, Int>::from_data(TensorData::new(data.coarse, [b, window_frames]), device);
+    let nsff0 = Tensor::<AB, 2>::from_data(TensorData::new(data.nsff0, [b, window_frames]), device);
+    let gt = Tensor::<AB, 2>::from_data(TensorData::new(data.gt, [b, window_frames * HOP]), device);
 
     // enc_q input spectrogram (a constant w.r.t. autodiff).
     let spec = spectral.linear(gt.clone()).detach();
-    let tf = net_g.forward_train(phone, pitch, nsff0, spec, sid, ids, SEGMENT_FRAMES);
+    let tf = net_g.forward_train(phone, pitch, nsff0, spec, sid, ids, segment_frames);
 
     // Ground-truth audio segment matching `ids`.
     let mut segs = Vec::with_capacity(b);

@@ -144,10 +144,21 @@ pub struct SttArgs {
     /// Drop any segment shorter than this (seconds).
     #[arg(long, default_value_t = 0.2)]
     pub min_clip: f32,
-    /// Hard cap on segment length (seconds). Cannot exceed 30 — one segment must
-    /// fit one encoder window.
-    #[arg(long, default_value_t = 30.0)]
+    /// Hard cap on segment length (seconds). Cannot exceed Whisper's 30 s
+    /// encoder window — one segment must fit one window.
+    #[arg(long, default_value_t = stt_core::WINDOW_SECONDS)]
     pub max_clip: f32,
+    /// Edge-pad each segment by up to this many seconds of bordering quiet, so
+    /// onsets and soft breathy tails are not cut off.
+    ///
+    /// **It also sets streaming latency.** A voiced run's end can only be
+    /// finalised once `max(--min-silence, 2 x --pad)` of silence has followed
+    /// it, so raising this past half of `--min-silence` makes the bare
+    /// invocation wait longer before emitting anything — while `convert`, which
+    /// has the whole file, is unaffected. That asymmetry is the reason this is
+    /// worth a flag rather than a constant.
+    #[arg(long, default_value_t = 0.15)]
+    pub pad: f32,
     /// Cap on tokens generated per segment. Raise it if dense speech is being
     /// cut off (a warning says so); lower it to bound a hallucination loop.
     #[arg(long, default_value_t = 224)]
@@ -160,9 +171,11 @@ impl SttArgs {
         // 30 s is not a tuning choice: it is the width of Whisper's encoder
         // window, and a longer segment simply would not fit one.
         anyhow::ensure!(
-            self.max_clip > 0.0 && self.max_clip <= 30.0,
-            "--max-clip must be in (0, 30]: one segment has to fit Whisper's 30 s encoder window"
+            self.max_clip > 0.0 && self.max_clip <= stt_core::WINDOW_SECONDS,
+            "--max-clip must be in (0, {w}]: one segment has to fit Whisper's {w} s encoder window",
+            w = stt_core::WINDOW_SECONDS
         );
+        anyhow::ensure!(self.pad >= 0.0, "--pad must not be negative");
         anyhow::ensure!(self.chunk > 0, "--chunk must be at least 1 sample");
         anyhow::ensure!(self.max_tokens > 0, "--max-tokens must be at least 1");
         anyhow::ensure!(self.min_clip >= 0.0, "--min-clip must not be negative");
@@ -211,7 +224,7 @@ impl SttArgs {
                 min_silence: self.min_silence,
                 min_clip: self.min_clip,
                 max_clip: self.max_clip,
-                ..Default::default()
+                pad: self.pad,
             },
             decode: DecodeOptions {
                 language: self.language.clone(),

@@ -574,6 +574,34 @@ pub struct TrainArgs {
     /// not loudness). `0` = uniform.
     #[arg(long, default_value_t = 0.0)]
     pub snr_weight: f32,
+    /// Latent frames the generator renders per step (100 per second at a
+    /// 480-sample hop). The adversarial losses are local, so this trades VRAM
+    /// against little else.
+    #[arg(long, default_value_t = rvc_train::SEGMENT_FRAMES)]
+    pub segment_frames: usize,
+    /// Context frames fed to `enc_q` and the flow each step.
+    ///
+    /// **This also decides which clips are used at all**: it is the minimum
+    /// length, so a clip shorter than it is discarded rather than padded, and
+    /// raising it can quietly shrink a corpus of short per-sentence clips to
+    /// nothing. The line the run prints says how many were skipped — read it.
+    #[arg(long, default_value_t = rvc_train::WINDOW_FRAMES)]
+    pub window_frames: usize,
+    /// AdamW weight decay for both optimizers. On a fine-tune of an already
+    /// converged base this is the one optimizer setting worth touching: raising
+    /// it pulls the weights back toward the base, lowering it lets the voice
+    /// move further and overfit a small corpus faster.
+    #[arg(long, default_value_t = 0.01)]
+    pub weight_decay: f32,
+    /// Steps averaged before a "best" checkpoint is judged. Defaults to a
+    /// twentieth of the *scheduled* run, capped at 50.
+    ///
+    /// Worth setting on a run you intend to stop by hand: the derived value is
+    /// a fraction of the schedule, so a short one collapses to 1 — and a "best"
+    /// chosen on a single step is exactly the per-step noise the window exists
+    /// to average out.
+    #[arg(long)]
+    pub best_window: Option<usize>,
     /// Don't keep the best-so-far (lowest mel) weights in
     /// `<out-dir>/checkpoint/<name>.best[.disc].safetensors`; save only the
     /// final ones.
@@ -688,6 +716,25 @@ impl TrainArgs {
             (0.0..1.0).contains(&self.ema_frac),
             "--ema-frac is a fraction of the run and must be in [0, 1); 0 saves the \
              raw weights"
+        );
+        anyhow::ensure!(
+            self.segment_frames > 0,
+            "--segment-frames must be at least 1"
+        );
+        anyhow::ensure!(
+            self.window_frames >= self.segment_frames,
+            "--window-frames ({}) is below --segment-frames ({}): the segment is cut out \
+             of the window, so there would be nothing to cut it from",
+            self.window_frames,
+            self.segment_frames
+        );
+        anyhow::ensure!(
+            self.weight_decay >= 0.0 && self.weight_decay.is_finite(),
+            "--weight-decay must be a non-negative, finite number (0 disables it)"
+        );
+        anyhow::ensure!(
+            self.best_window.is_none_or(|w| w > 0),
+            "--best-window must be at least 1"
         );
         anyhow::ensure!(
             self.snr_weight >= 0.0 && self.snr_weight.is_finite(),

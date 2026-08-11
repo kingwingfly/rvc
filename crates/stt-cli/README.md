@@ -70,8 +70,18 @@ only where audio is both below `--silence-db` *and* quiet for longer than
 (`--silence-db=-50`) when soft speech is being cut into fragments; raise
 `--min-silence` when single sentences are being split.
 
+`--pad` keeps up to that many seconds of bordering quiet at each edge, so onsets
+and soft tails are not cut off — and it is **also what sets streaming latency**.
+A voiced run's end can only be finalised once `max(--min-silence, 2 x --pad)` of
+silence has followed it, so raising `--pad` past half of `--min-silence` makes
+the bare invocation wait longer before emitting a line, while `convert` — which
+has the whole file — is unaffected. Default `0.15`, which is under half the
+`0.5` default `--min-silence`, so out of the box it costs nothing.
+
 `--max-clip` **must be in `(0, 30]`** — one segment has to fit one 30 s encoder
-window — and is rejected up front rather than silently truncated. Hitting
+window — and is rejected up front rather than silently truncated. Both the
+default and the ceiling now come from `stt_core::WINDOW_SECONDS`, so the number
+cannot drift from the front end that produced it. Hitting
 `--max-tokens` logs a warning for the same reason: a cut-off transcript looks
 perfectly well-formed and simply stops mid-sentence.
 

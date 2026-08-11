@@ -257,7 +257,10 @@ pub fn run<AB: AutodiffBackend>(
         materialize(&disc);
     }
 
-    let mut best = Best::new(out, settings.save_best, total_steps);
+    // `None`: `s2` has no `--best-window` of its own yet, so it keeps the
+    // derived window. `rvc train` exposes one because that is the loop people
+    // stop by hand.
+    let mut best = Best::new(out, settings.save_best, total_steps, None);
 
     let mut rng = Rng::new(0x505_1725_u64.wrapping_mul(settings.epochs as u64 + 1));
     let started = std::time::Instant::now();

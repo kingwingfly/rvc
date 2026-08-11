@@ -38,7 +38,9 @@ pub struct Best {
 
 impl Best {
     /// Track the best-so-far family beside `out` (`out.best()`).
-    pub fn new(out: &Checkpoint, enabled: bool, total_steps: usize) -> Self {
+    /// `window` overrides the derived one; `None` keeps `total_steps / 20`
+    /// clamped to `1..=50`.
+    pub fn new(out: &Checkpoint, enabled: bool, total_steps: usize, window: Option<usize>) -> Self {
         let ck = enabled.then(|| out.best());
         // A sidecar whose weights are gone is ignored: it would veto every save.
         let prev = ck
@@ -54,7 +56,13 @@ impl Best {
         }
         Self {
             ck,
-            window: (total_steps / 20).clamp(1, 50),
+            // The derived value is a *fraction* of a scheduled run, so a short
+            // one collapses it to the clamp's floor of 1 — and a "best" chosen
+            // on a single step is the noise this whole mechanism exists to
+            // average out. That is why the override exists rather than a wider
+            // clamp: only the caller knows whether 200 steps is the whole run
+            // or the part of it somebody sat through.
+            window: window.unwrap_or((total_steps / 20).clamp(1, 50)),
             sum: 0.0,
             n: 0,
             score: prev.map_or(f32::INFINITY, |m| m.mel),

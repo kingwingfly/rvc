@@ -142,6 +142,12 @@ pub struct TtsArgs {
     /// more varied.
     #[arg(long, default_value_t = 15)]
     pub top_k: usize,
+    /// Keep the smallest set of tokens whose probability sums past this;
+    /// `1.0` disables it. Applied after `--top-k`, so the two compose: `--top-k`
+    /// bounds the count and this bounds the mass, and whichever bites first
+    /// wins.
+    #[arg(long, default_value_t = 1.0)]
+    pub top_p: f32,
     /// Below 1 sharpens the distribution, above 1 flattens it.
     #[arg(long, default_value_t = 1.0)]
     pub temperature: f32,
@@ -155,6 +161,12 @@ pub struct TtsArgs {
     /// Cap on generated tokens per line. At 25 Hz, 1500 is a minute.
     #[arg(long, default_value_t = 1500)]
     pub max_tokens: usize,
+    /// How much of `s2`'s prior variance to sample. Upstream uses 0.5; lower is
+    /// flatter and more repeatable, higher is more varied and more prone to
+    /// artefacts. This is the decoder's randomness, not the token sampler's —
+    /// `--seed` fixes both, so two runs at one seed match whatever this is.
+    #[arg(long, default_value_t = 0.5)]
+    pub noise_scale: f64,
 }
 
 impl TtsArgs {
@@ -163,6 +175,16 @@ impl TtsArgs {
         anyhow::ensure!(self.sr > 0, "--sr must be positive");
         // Sampling draws from the `k` best tokens, so `k = 0` draws from nothing.
         anyhow::ensure!(self.top_k > 0, "--top-k must be at least 1");
+        anyhow::ensure!(
+            self.top_p > 0.0 && self.top_p <= 1.0,
+            "--top-p is a probability mass, so it must be in (0, 1]: {} would keep no tokens \
+             at all (1.0 disables the cut)",
+            self.top_p
+        );
+        anyhow::ensure!(
+            self.noise_scale >= 0.0 && self.noise_scale.is_finite(),
+            "--noise-scale must be a non-negative, finite number (0 is a deterministic decode)"
+        );
         anyhow::ensure!(self.max_tokens > 0, "--max-tokens must be at least 1");
         // The logits are divided by it, so zero is a division and a negative
         // value inverts the distribution into picking the *least* likely token.
@@ -183,14 +205,21 @@ impl TtsArgs {
             language: self.language.into(),
             sample: SampleOptions {
                 top_k: self.top_k,
-                top_p: 1.0,
+                top_p: self.top_p,
                 temperature: self.temperature,
                 repetition_penalty: self.repetition_penalty,
             },
             max_tokens: self.max_tokens,
             seed: self.seed,
-            ..Default::default()
+            noise_scale: self.noise_scale,
         }
+        // Every field is named, and the `..Default::default()` that used to
+        // close this is deliberately gone. It read as "the rest are defaults"
+        // and meant "the rest are unreachable": `noise_scale` was pinned at 0.5
+        // by it, and a field added to `SynthOptions` later would have been
+        // pinned the same way with nothing to notice it. Spelling all of them
+        // makes the next addition a compile error here, which is where the
+        // decision about exposing it belongs.
     }
 }
 

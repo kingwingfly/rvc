@@ -122,15 +122,22 @@ pub async fn prepare_clips(
     );
 
     let frames: usize = clips.iter().map(|c| c.frames).sum();
+    // Converted at the log, not at the source. `Clip::snr` is a linear amplitude
+    // ratio because `clip_weights` raises it to `snr^alpha`, and a dB value
+    // there would change what `--snr-weight` means. But a *ratio* was being
+    // printed with `dB` after it, which understates every reading by a factor of
+    // ~2.6 in the units a reader compares against — `preprocess analyze` reports
+    // this corpus at 13 dB, where this line called the same material 4.5.
+    let db = |ratio: f32| 20.0 * ratio.max(f32::MIN_POSITIVE).log10();
     let mut snrs: Vec<f32> = clips.iter().map(|c| c.snr).collect();
     snrs.sort_by(f32::total_cmp);
     tracing::info!(
         "corpus: {} clips, {:.1} min audio, snr {:.0}/{:.0}/{:.0} dB (min/median/max){}",
         clips.len(),
         (frames * HOP) as f64 / 16_000.0 / 60.0,
-        snrs[0],
-        snrs[snrs.len() / 2],
-        snrs[snrs.len() - 1],
+        db(snrs[0]),
+        db(snrs[snrs.len() / 2]),
+        db(snrs[snrs.len() - 1]),
         match data.len() - clips.len() {
             0 => String::new(),
             n => format!("; {n} skipped as too short"),

@@ -125,6 +125,18 @@ pub struct TrainArgs {
     /// adversarial losses are local, so this trades VRAM against little else.
     #[arg(long, default_value_t = 32)]
     pub segment_frames: usize,
+    /// Skip clips longer than this many latent frames (50 per second), which is
+    /// `s2`'s half of `--max-tokens`. Defaults to twice it, since a semantic
+    /// token is two latent frames.
+    ///
+    /// **It is the cap that keeps a small card alive, and that is why it is
+    /// separate.** `enc_q` and the flow run over the *whole* utterance, so `s2`'s
+    /// memory grows with the longest clip rather than with the batch — where
+    /// `--max-tokens` only bounds `s1`'s sequence. While this was derived,
+    /// raising `--max-tokens` to let `s1` see longer lines silently doubled
+    /// `s2`'s peak VRAM as well.
+    #[arg(long)]
+    pub max_frames: Option<usize>,
     /// Discriminator learning rate as a multiple of the generator's. Below 1
     /// holds off a discriminator that is winning.
     #[arg(long, default_value_t = 1.0)]
@@ -160,6 +172,16 @@ pub struct TrainArgs {
 }
 
 impl TrainArgs {
+    /// `--max-frames`, or the derivation it defaults to.
+    ///
+    /// A method rather than a computed clap default, because the derivation
+    /// reads another flag: clap resolves defaults per argument and cannot see
+    /// `--max-tokens` while building `--max-frames`. The cost is that `-h`
+    /// prints no default for it, which the help text states in words instead.
+    pub fn max_frames(&self) -> usize {
+        self.max_frames.unwrap_or(self.max_tokens * 2)
+    }
+
     /// Reject a fine-tuning configuration that cannot converge, or cannot start.
     ///
     /// Checked before the corpus is prepared and before a base is downloaded, for
@@ -170,6 +192,17 @@ impl TrainArgs {
         anyhow::ensure!(self.batch_size > 0, "--batch-size must be at least 1");
         anyhow::ensure!(self.d_interval > 0, "--d-interval must be at least 1");
         anyhow::ensure!(self.max_tokens > 0, "--max-tokens must be at least 1");
+        anyhow::ensure!(
+            self.max_frames.is_none_or(|f| f > 0),
+            "--max-frames must be at least 1"
+        );
+        anyhow::ensure!(
+            self.max_frames() >= self.segment_frames,
+            "--max-frames ({}) is below --segment-frames ({}), so every clip would be \
+             skipped for being too long to render one step from",
+            self.max_frames(),
+            self.segment_frames
+        );
         anyhow::ensure!(
             self.segment_frames > 0,
             "--segment-frames must be at least 1: it is the window the decoder is trained on"
@@ -290,9 +323,10 @@ pub async fn run(args: TrainArgs) -> Result<()> {
         d_lr_ratio: args.d_lr_ratio,
         d_interval: args.d_interval,
         segment_frames: args.segment_frames,
-        // A token is two latent frames — one cap, expressed in the units each
-        // stage thinks in.
-        max_frames: args.max_tokens * 2,
+        // A token is two latent frames, so the derivation is the honest default
+        // — but it stays overridable, because the two caps bound different
+        // things (see `--max-frames`).
+        max_frames: args.max_frames(),
         save_best: !args.no_save_best,
     };
 

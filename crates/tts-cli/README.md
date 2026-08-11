@@ -91,6 +91,15 @@ the same token becomes self-reinforcing and the utterance never ends, until
 `--max-tokens` cuts it off with a warning. If that happens on short text, suspect
 the prompt rather than the sampler.
 
+**`--top-k` and `--top-p` compose rather than replacing each other.** `--top-k`
+(default `15`) bounds how many tokens stay in play, `--top-p` (default `1.0`,
+which disables it) bounds how much probability mass does, and whichever bites
+first wins. `--noise-scale` (default `0.5`, upstream's value) is a different
+randomness entirely — `s2`'s prior variance, applied when the tokens are
+rendered to waveform rather than when they are chosen. Lower is flatter and more
+repeatable, higher is more varied and more prone to artefacts. `--seed` fixes
+both, so two runs at one seed match whatever these are set to.
+
 The prosody encoder is Chinese-only (a Chinese RoBERTa) and its absence is a
 **warning, not a failure**: synthesis continues with zero prosody features,
 costing expressiveness rather than intelligibility.
@@ -155,7 +164,13 @@ asked for, so expect an idle-looking pause at the start proportional to the
 corpus rather than to the epochs.
 
 `--max-tokens` **skips** a clip longer than it rather than truncating one: a
-cut-off clip teaches the model to stop early. `-b` accumulates rather than pads,
+cut-off clip teaches the model to stop early. `--max-frames` is `s2`'s half of
+the same cap, in latent frames (50 per second) rather than semantic tokens (25),
+and defaults to twice `--max-tokens` because a token is two frames. It is
+separate because the two bound different things: `--max-tokens` bounds `s1`'s
+sequence, while `enc_q` and the flow run over the *whole* utterance, so `s2`'s
+peak memory grows with the longest clip. Raise `--max-tokens` alone and `s2`'s
+VRAM follows it; set `--max-frames` to hold `s2` where it is. `-b` accumulates rather than pads,
 so raising it costs time rather than VRAM, and `--backend onnx` is rejected here
 because ONNX Runtime cannot train.
 
