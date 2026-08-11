@@ -99,13 +99,21 @@ pub async fn run(args: DiarizeArgs) -> Result<()> {
         args.output_dir.display(),
     );
     // An empty output is the failure a user is most likely to hit and least
-    // likely to diagnose, so it says which of the two knobs to reach for
-    // rather than leaving a directory that is simply not there.
+    // likely to diagnose, so it names the cause in the order they turned out to
+    // occur rather than leaving an empty directory to interpret. A reference
+    // recorded elsewhere comes first because it is the largest effect measured:
+    // one speaker across two sessions scores 0.36-0.78 where the same session
+    // gives 0.87-0.90, which is a wider spread than the one the threshold sits
+    // in.
     if total_segments == 0 && failed < files.len() {
         eprintln!(
-            "nothing matched the reference: either it is the wrong voice, or \
-             --threshold ({}) is above every window's score — the per-file mean \
-             cosine above is what to compare it against",
+            "nothing matched the reference. Most likely {} is from a different \
+             recording — the embedding keys partly on the microphone and the \
+             room, so take the reference from the audio being filtered. \
+             Otherwise it is the wrong voice, or --threshold ({}) is above every \
+             window's score: the per-file mean cosine above is what to compare \
+             it against.",
+            args.reference.display(),
             args.threshold,
         );
     }
