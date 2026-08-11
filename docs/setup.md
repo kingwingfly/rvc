@@ -257,7 +257,7 @@ machine that will be offline later is set up. There is deliberately no top-level
 
 **`preprocess` has no `download`, and that is the same rule rather than a gap.**
 A `download` fetches what a default bare invocation would fetch on demand, and
-`preprocess` has no bare invocation to have a default — three of its five stages
+`preprocess` has no bare invocation to have a default — six of its eight stages
 run no model at all. `separate` (448 MB) and `diarize` (28 MB) fetch on their
 first run like everything else; `--model` on either points at a copy you already
 have.

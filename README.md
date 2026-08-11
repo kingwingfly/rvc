@@ -24,7 +24,7 @@ exporter under [`export/`](export/README.md).
 | **`stt`** | PCM in → text out | `convert`, `download`, `completions` |
 | **`tts`** | text in → PCM out | `convert`, `train`, `download`, `completions` |
 | **`seedvc`** | PCM in → retimbred PCM out, the voice taken from a reference clip | `convert`, `download`, `completions` |
-| **`preprocess`** | — it names a phase, and the subcommand *is* which stage runs | `clip`, `denoise`, `separate`, `diarize`, `analyze`, `completions` |
+| **`preprocess`** | — it names a phase, and the subcommand *is* which stage runs | `analyze`, `separate`, `diarize`, `denoise`, `normalize`, `trim`, `resample`, `clip`, `completions` |
 | **`voice`** | — | `voice rvc …`, `voice stt …`, `voice tts …`, `voice seedvc …`, `voice preprocess …`, plus one `voice completions` for the lot |
 
 ## Install

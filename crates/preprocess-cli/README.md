@@ -3,8 +3,8 @@
 `rvc train` and `tts train` both draw short random windows out of whatever files
 they are given. Hand them raw recordings and most of those windows are
 between-sentence dead air, a music bed, or somebody else talking — and the model
-learns that instead. `preprocess` is the phase in front of them: five stages, of
-which the four that write anything read audio files and write audio files — so
+learns that instead. `preprocess` is the phase in front of them: eight stages, of
+which the seven that write anything read audio files and write audio files — so
 they compose in whatever order your material needs.
 
 Runtimes, drivers and ffmpeg: [`docs/setup.md`](../../docs/setup.md). Build it
@@ -32,6 +32,9 @@ something else. `preprocess clip` is the slicer they were.
 | `preprocess separate <files…>` | split a recording into a voice stem and a music stem (MDX23C) |
 | `preprocess diarize <files…> -r <clip>` | keep only what one voice is saying (CAM++) |
 | `preprocess denoise <files…>` | strip a steady background hiss |
+| `preprocess normalize <files…>` | match every recording to one level, by peak or by loudness |
+| `preprocess trim <files…>` | strip the silence at each end, without splitting anything |
+| `preprocess resample <files…>` | one sample rate and one channel count, stated rather than implied |
 | `preprocess clip <files…>` | slice into clean per-utterance clips — the last stage, and the one a trainer eats |
 | `preprocess completions <shell>` | completion script for bash, zsh, fish, powershell or elvish |
 
@@ -292,6 +295,73 @@ to preserve — has few close matches and survives. A spectral-subtraction
 de-noiser keyed on level and frequency does not have that property, which is why
 this one is not that.
 
+## `normalize`
+
+One constant gain per file, and nothing else. `--peak` and `--lufs` answer
+different questions.
+
+| flag | default | |
+|---|---|---|
+| `-o`, `--output-dir` | `normalized` | |
+| `--sr` | `48000` | rate the output is written at |
+| `--peak` | `0.95` | the loudest sample lands here, as a fraction of full scale. Exact, instant, and blind to everything but that one sample — so a stray thump sets the gain for a whole recording |
+| `--lufs` | — | EBU R128 integrated loudness, e.g. `-23`. K-weighted and gated, so the silence between sentences does not drag the reading down. Unbothered by the thump |
+
+Ask for one or the other, never both; clap refuses the pair by name before a file
+is opened.
+
+**Nothing here compresses, limits or rides the level**, and that is the reason
+ffmpeg's own `loudnorm` is not what runs: in single pass that filter is a
+*dynamic* normalizer, which is exactly the processing breathy close-mic material
+must not get. The consequence is that a `--lufs` run can push the peak past full
+scale on a recording with a wide range. The per-file line reports the peak it
+reached, and **it is reported rather than limited** — a note on stderr counts how
+many files it happened to.
+
+Loudness is measured with `ebur128` and measured **again after the gain**, so the
+second number in the report is a reading rather than arithmetic. A file with no
+gated reading at all — under 0.4 s, or entirely silent — is skipped with that
+reason, never quietly normalized by peak instead.
+
+Note both flags take their value with `=` or a space (`--lufs=-23` or
+`--lufs -23`); every negative-valued flag in this toolkit accepts both.
+
+## `trim`
+
+The silence at each end, and nothing in the middle. One file in, one file out.
+
+| flag | default | |
+|---|---|---|
+| `-o`, `--output-dir` | `trimmed` | |
+| `--sr` | `48000` | rate the output is written at |
+| `--silence-db` | `-40` | energy floor in dBFS |
+| `--pad` | `0.15` | seconds of bordering quiet kept at each edge |
+| `--measure-floor` | off | read the floor off the recording's own quiet frames instead of using `--silence-db` |
+
+`clip` finds these boundaries already and then throws the whole-file case away,
+because its job is to cut a recording into sentences. **A take that is already
+*one* utterance wants the same measurement and one file back**, which is the
+entire difference between the two stages. A file with nothing above the floor is
+written through whole rather than emptied, and counted on stderr — that usually
+means the floor is wrong for that take.
+
+## `resample`
+
+The conversion every other stage does on the way past, stated rather than
+implied.
+
+| flag | default | |
+|---|---|---|
+| `-o`, `--output-dir` | `resampled` | |
+| `--sr` | `48000` | the rate everything is written at |
+| `--channels` | `mono` | `mono` folds a stereo input to `(L + R) / 2`; `stereo` writes a mono input to both |
+
+A corpus assembled from several sources arrives at a trainer as several rates,
+because each stage writes what it produced. This is the stage that says which
+one. The channel count is reported per file because it is the half a user is
+least likely to have thought about: **`separate` writes stereo on purpose**, and
+folding that to mono is a decision rather than a detail.
+
 ## `clip`
 
 The slicer, and the stage a trainer's corpus comes out of. Each input becomes
@@ -336,7 +406,7 @@ bases, and nothing here trains.
 **There is no `preprocess download`, and that is the rule rather than a gap.** A
 `download` subcommand fetches what a default *bare invocation* would fetch on
 demand, and this binary has no bare invocation to have a default — three of its
-five stages fetch nothing whatever. `separate` and `diarize` fetch on their first
+eight stages fetch nothing whatever. `separate` and `diarize` fetch on their first
 run like everything else, and `--model` on either points at a copy you already
 have.
 

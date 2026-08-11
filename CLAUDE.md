@@ -20,8 +20,9 @@ on any of the three.
 train** (see **Seed-VC, and why the whole workspace is GPL-3.0**).
 
 `preprocess` is the sixth binary and the one that is **not** an engine: it turns
-recordings into a corpus the engines that train can eat — `clip`, `denoise`,
-`separate`, `diarize`, `analyze` — and every rule below that says "engine" has
+recordings into a corpus the engines that train can eat — `analyze`, `separate`,
+`diarize`, `denoise`, `normalize`, `trim`, `resample`, `clip` — and every rule
+below that says "engine" has
 to be read against it (see **`preprocess` names a phase, not a transformation**).
 
 ### Three rules that are easy to break silently
@@ -75,7 +76,8 @@ instead of a pipe — which is why it is spelled identically everywhere rather t
 one missing subcommand says something rather than being unfinished: no `train`,
 because it is zero-shot.
 
-`preprocess clip|denoise|separate|diarize|analyze|completions` is the sixth
+`preprocess analyze|separate|diarize|denoise|normalize|trim|resample|clip|completions`
+is the sixth
 binary and the one that breaks the pattern in one place — it has **no bare
 invocation** — which the next section is about. Its stages are not a fixed set:
 a new one is one module in `preprocess-core`, one under `commands/` and one clap
@@ -146,6 +148,29 @@ names a subcommand by kebab-casing its variant, so `Command::SeedVc` would
 render as `voice seed-vc` while the binary is `seedvc`. The variant therefore
 carries `#[command(name = "seedvc")]`. That is a rename **back** to the engine's
 own name, which is the rule rather than an exception to it.
+
+### A flag whose value is negative needs `allow_negative_numbers`
+Clap reads `-50` as a cluster of short flags rather than a number, so
+`--silence-db -50` — the exact form that flag's own help recommends — failed
+with `unexpected argument '-5'`, and **`rvc convert -t -5` was unreachable for
+as long as pitch shifting has existed**, with shifting *down* being half of what
+that flag is for. Every negative-valued flag in the workspace now carries
+`#[arg(..., allow_negative_numbers = true)]`; the rule and its reasoning live in
+`cli-kit`'s module docs, beside the other shared-flag conventions.
+
+**Nothing catches this, which is why it is a rule and not a test.** The flag
+parses, the default applies, `cargo test` passes, and `-h` prints advice that
+cannot be followed. `--silence-db=-50` works while `--silence-db -50` does not,
+which reads as a shell quoting problem and is not one. A test would only see it
+by invoking the parser with the argument *split*, which is not how anyone writes
+a test for a flag they just added. So: **if a flag's documented value can begin
+with `-`, it carries the annotation.**
+
+It goes on the argument rather than the command, and not by preference — clap's
+`Command`-level version exists, but a `*-cli` crate exports an `Args` type that
+somebody else's `Command` hosts, so per-argument is the only placement that
+survives being nested under `voice`. Per argument is also the honest scope: it
+widens what a value may look like, and `--sr -5` should still be refused.
 
 ### `completions` belongs to the binary, not to the engine
 It is the one subcommand in the list above that is **not** part of any engine's
@@ -486,6 +511,15 @@ variant that fits. The `--strict` gates in `burn-rvc`'s and `burn-whisper`'s
 their leftovers **by name** rather than by count — 57 wrong tensors pass a count
 of 57 just as happily.
 
+**A fourth crate still had the bug after that fix landed, and the reason it did
+is the thing worth remembering**: `preprocess-core` was written in a parallel
+worktree while the fix was going through, so it was never one of the eight call
+sites the fix enumerated, and it arrived with a hand-written
+`missing.is_empty()` in each of its two loaders. A fix by enumeration cannot
+reach code that does not exist yet. So the question to ask of a new loader is
+not "was it in that list" but **does it call `check_coverage`** — `grep
+check_coverage` over a crate that loads weights is the whole audit.
+
 **A safetensors file is not one format but two**, and `burn-kit` has a loader for
 each. `load_safetensors_into` applies `PyTorchToBurnAdapter`, which transposes
 Linear weights from PyTorch's `[out, in]` to Burn's `[in, out]` — right for a
@@ -635,8 +669,8 @@ Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper
 | `burn-seedvc` | the Seed-VC network: the diffusion transformer and its flow-matching sampler, the length regulator, BigVGAN, and a re-export of `burn-campplus` where CAMPPlus used to be declared. **The crate the workspace's GPL-3.0 comes from** — see its own section below |
 | `seedvc-core` | zero-shot voice conversion: `reference` (one clip → timbre vector + mel prefix + length-regulated content), `convert` (the chunk arithmetic and the equal-power crossfade), the streaming `Converter`, and the Burn backends behind one `Model` trait — the shape `stt-core` and `tts-core` use, so the backend is a constructor call rather than a type parameter. **No `-train` sibling**, and the `onnx` feature adds an `OnnxModel` reading the six graphs `export/export_seedvc.py` writes, behind `--backend onnx --onnx <dir>` |
 | `seedvc-cli` | lib **and** the `seedvc` binary: the bare invocation streams, plus `convert`, `download`, `completions` |
-| `preprocess-core` | corpus preparation as a library, and the one `*-core` that is not an engine's: `clip` (slice on silence), `denoise` (`anlmdn` over a corpus rather than over a conversion), `separate` (MDX23C, chunk-streamed, the only stereo path in the workspace), `diarize` (CAM++ windows scored by cosine against a reference), `analyze` (model-free: what a corpus *is*, and what to set the other stages to). Every stage reads audio files and writes audio files, which is what makes them compose |
-| `preprocess-cli` | lib **and** the `preprocess` binary: `clip`, `denoise`, `separate`, `diarize`, `analyze`, `completions`. **No bare invocation**, and that is the one place the house shape is broken on purpose — see **`preprocess` names a phase, not a transformation** |
+| `preprocess-core` | corpus preparation as a library, and the one `*-core` that is not an engine's: `clip` (slice on silence), `denoise` (`anlmdn` over a corpus rather than over a conversion), `separate` (MDX23C, chunk-streamed, the only stereo path in the workspace), `diarize` (CAM++ windows scored by cosine against a reference), `analyze` (model-free: what a corpus *is*, and what to set the other stages to), `normalize` (one constant gain, by peak or by R128 loudness — nothing dynamic, because a compressor is what breathy material must not get), `trim` (the silence at each end and nothing in the middle) and `resample` (the rate and channel count the other stages leave implied). Every stage but `analyze` reads audio files and writes audio files, which is what makes them compose |
+| `preprocess-cli` | lib **and** the `preprocess` binary: `analyze`, `separate`, `diarize`, `denoise`, `normalize`, `trim`, `resample`, `clip`, `completions`. **No bare invocation**, and that is the one place the house shape is broken on purpose — see **`preprocess` names a phase, not a transformation** |
 | `cli-kit` | logging, shell completions, and the shared `--backend`/`--device`/`--cache-dir` flags — one enum and one alias set for all six binaries, so the spellings cannot drift apart again. `DenoiseOpts` lives here for the same reason: `rvc --denoise` and `preprocess denoise` tune the same filter and must not grow two spellings of `--denoise-strength` |
 | `train-kit` | training scaffolding with no model knowledge: `Checkpoint`, `ema_update`, `accumulate`, `materialize`, `Dashboard`. Generic over the module trained, so a GAN and a cross-entropy loop share it |
 | `rpath-kit` | a **build-dependency**, not a runtime one: where each binary's `build.rs` gets the loader search order for the two linked libraries, ffmpeg and LibTorch |
