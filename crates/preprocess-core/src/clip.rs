@@ -27,7 +27,15 @@ pub struct ClipOptions {
     pub sr: u32,
     /// Where to cut.
     pub slice: SliceOptions,
-    /// Peak-normalize each written clip to ~0.95 full-scale.
+    /// Peak-normalize each written clip to [`crate::normalize::DEFAULT_PEAK`].
+    ///
+    /// A shorthand for the [`crate::normalize`] stage and not a second
+    /// implementation of it: the one thing it can do that the stage cannot is
+    /// normalize each clip *as it is cut*, without a second directory to hold
+    /// the untouched clips in between. The gain it applies is
+    /// [`crate::normalize::peak_normalize`]'s, so the two cannot end up
+    /// scaling to different levels, and anything other than that one target —
+    /// a different peak, or a loudness — is the stage's job.
     pub normalize: bool,
 }
 
@@ -56,7 +64,7 @@ pub async fn file(input: &InputFile, opts: &ClipOptions, output_dir: &Path) -> R
     for (i, (start, end)) in segments.iter().enumerate() {
         let mut clip = samples[*start..*end].to_vec();
         if opts.normalize {
-            peak_normalize(&mut clip, 0.95);
+            crate::normalize::peak_normalize(&mut clip, crate::normalize::DEFAULT_PEAK);
         }
         kept_secs += clip.len() as f64 / opts.sr as f64;
         let out_path = output_dir.join(format!("{}_{i:03}.wav", input.base));
@@ -73,45 +81,11 @@ pub async fn file(input: &InputFile, opts: &ClipOptions, output_dir: &Path) -> R
     })
 }
 
-/// Peak-normalize `samples` in place to `target` full-scale. No-op if silent.
-fn peak_normalize(samples: &mut [f32], target: f32) {
-    let peak = samples.iter().fold(0.0f32, |m, x| m.max(x.abs()));
-    if peak > 1e-9 {
-        let gain = target / peak;
-        for s in samples.iter_mut() {
-            *s *= gain;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const SR: u32 = 48_000;
-
-    #[test]
-    fn normalizing_lifts_the_peak_to_the_target() {
-        let mut s = vec![0.5, -0.25, 0.0, 0.5];
-        peak_normalize(&mut s, 0.95);
-        assert!((s[0] - 0.95).abs() < 1e-6, "{s:?}");
-        assert!((s[1] + 0.475).abs() < 1e-6, "{s:?}");
-        // Gain, not a rewrite: the shape is untouched.
-        assert_eq!(s[2], 0.0);
-    }
-
-    #[test]
-    fn a_silent_clip_is_left_alone() {
-        // Without the guard this divides by ~0 and writes infinities into a
-        // WAV — silence in, silence out is the only sane answer.
-        let mut s = vec![0.0, 0.0, 0.0];
-        peak_normalize(&mut s, 0.95);
-        assert_eq!(s, vec![0.0, 0.0, 0.0]);
-
-        let mut tiny = vec![1e-12, -1e-12];
-        peak_normalize(&mut tiny, 0.95);
-        assert_eq!(tiny, vec![1e-12, -1e-12]);
-    }
 
     /// A 220 Hz sine at half scale — RMS about -9 dBFS, well above the -40 dB
     /// floor. A real tone rather than the ±0.5 alternation `audio_kit`'s own

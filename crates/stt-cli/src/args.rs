@@ -133,7 +133,10 @@ pub struct SttArgs {
     pub chunk: usize,
     /// Energy floor in dBFS: quieter than this counts as a gap between
     /// utterances. Lower it to keep very soft passages in one segment.
-    #[arg(long, default_value_t = -40.0)]
+    // `allow_negative_numbers` because this flag's value is always negative and
+    // clap would otherwise read `--silence-db -50`'s `-50` as short flags. The
+    // same annotation is on every negative-valued flag in the workspace.
+    #[arg(long, allow_negative_numbers = true, default_value_t = -40.0)]
     pub silence_db: f32,
     /// Minimum silent-gap length (seconds) that counts as a segment boundary.
     #[arg(long, default_value_t = 0.5)]

@@ -34,6 +34,22 @@ pub(crate) fn ensure_ffmpeg() {
     FFMPEG_INIT.call_once(|| {
         // Only fails if ffmpeg itself is broken; nothing sane to do but proceed.
         let _ = ffmpeg::init();
+        // Warnings and above, so a real problem is still reported and ffmpeg's
+        // own commentary is not.
+        //
+        // **The `av_log` level is the only control there is over a filter that
+        // reports through the log**, which is not a tidiness preference: a
+        // measuring filter such as `ebur128` prints a multi-line summary block
+        // when its graph is dropped, and it does so *at info level, past its own
+        // `framelog=quiet`* — that option governs the per-frame lines and not the
+        // summary. Two of those blocks landed on stderr for every file
+        // `normalize --lufs` touched, saying the same thing the stage's own
+        // one-line report says. Nothing in the filter string can stop them.
+        //
+        // This is process-global, which is exactly why it belongs here rather
+        // than beside any one caller: the level is not a property of one graph,
+        // and setting it per call site would mean every future one remembering.
+        ffmpeg::util::log::set_level(ffmpeg::util::log::Level::Warning);
     });
 }
 
