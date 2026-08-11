@@ -1427,7 +1427,18 @@ isn't a multiple of the stride — CubeCL and WebGPU absorb it, LibTorch aborts.
 `DiscriminatorS` is exactly that shape, so `DiscriminatorS::forward`
 (`discriminator.rs`) reflect-pads its input to a length (`SCALE_ALIGN`) the whole
 chain divides evenly. Don't remove it
-without re-running `cargo run -p rvc-train --example convgrad --features tch,cuda,wgpu`. No `Learner` (the GAN loop doesn't fit it: `TrainStep::step`
+without re-running `cargo run -p rvc-train --example convgrad --features tch,cuda,wgpu`.
+
+**That pad is what makes `--segment-frames` safe to expose, and it was checked
+rather than assumed.** The flag sets `seg_len = segment_frames * HOP`, which is
+the waveform length handed to `DiscriminatorS` — so the natural worry is that a
+small value leaves too little input for the pad `SCALE_ALIGN` wants, on the one
+backend that aborts rather than absorbing. It does not: `--segment-frames 4` and
+the degenerate `--segment-frames 48 --window-frames 48` (where
+`rng.below(window - segment + 1)` is `rng.below(1)`) both complete steps on
+LibTorch and save a best at step 30, at mel 67.8 and 65.8. So `verify()` checks
+only `> 0` and `<= --window-frames`, and **a floor added later would be
+superstition** — the reflect-pad is the mechanism, and it is general. No `Learner` (the GAN loop doesn't fit it: `TrainStep::step`
 takes `&self` and yields one `GradientsParams` for one optimizer, while a GAN needs
 two models, two optimizers at different LRs, and D updated *between* the two
 backward passes) — the
