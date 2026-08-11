@@ -5672,6 +5672,7 @@ dependencies = [
  "hub-kit",
  "preprocess-core",
  "rpath-kit",
+ "serde_json",
  "tokio",
 ]
 

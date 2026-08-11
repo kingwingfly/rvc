@@ -1,5 +1,6 @@
 //! Stage implementations: one module per subcommand.
 
+pub mod analyze;
 pub mod clip;
 pub mod denoise;
 pub mod diarize;
