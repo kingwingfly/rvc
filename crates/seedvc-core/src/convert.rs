@@ -77,6 +77,24 @@ pub const CONTEXT_SECONDS: usize = 30;
 /// gives back a few frames to keep the last one above this, which is 0.37 s.
 const MIN_CHUNK_FRAMES: usize = 32;
 
+/// Mel frames the reference and the source share — upstream's
+/// `max_context_window`.
+///
+/// One function rather than one expression per caller, and that is the point:
+/// [`crate::stream`] used to carry a second spelling of the answer as a literal
+/// `2580`, on the reasoning that a preset is built with no model in hand. Two
+/// spellings of one number is exactly the drift this is here to remove — a
+/// preset names the preset's own config instead.
+///
+/// Integer division first, as upstream's `sr // hop_length * 30` does: 22050/256
+/// is 86.13, so this is **2580** and not the 2584 the rounded frame rate gives.
+/// That four-frame difference is the whole reason [`room`]'s subtraction can
+/// underflow, since [`Model::analyse`] admits a reference up to the content
+/// encoder's own 30 s.
+pub(crate) fn context_frames(cfg: &SeedVcConfig) -> usize {
+    (cfg.sample_rate as usize / cfg.hop_length) * CONTEXT_SECONDS
+}
+
 /// Frames the source is left after the reference has taken its share of the
 /// shared window, or the refusal when there are not enough of them.
 ///
@@ -86,7 +104,7 @@ const MIN_CHUNK_FRAMES: usize = 32;
 /// in terms of the only thing the user can do about it.
 pub(crate) fn room(cfg: &SeedVcConfig, reference: &Reference) -> Result<usize> {
     let hop = cfg.hop_length;
-    let context = (cfg.sample_rate as usize / hop) * CONTEXT_SECONDS;
+    let context = context_frames(cfg);
 
     // Saturating, because this is the subtraction that underflows: `analyse`
     // admits a reference up to the content encoder's own 30 s, which is

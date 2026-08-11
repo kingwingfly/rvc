@@ -60,6 +60,12 @@ fn main() {
     // 100 ms of 16 kHz mono, which is what the filter reads from stdin.
     let chunk: usize = parse(flag(&mut args, "chunk"), 1600);
     let block: usize = parse(flag(&mut args, "block"), StreamParams::realtime().block);
+    // The two dials on the same window: the reference's share of it, and how
+    // much of what is left one chunk carries.
+    let reference_secs: f32 = parse(
+        flag(&mut args, "reference-secs"),
+        seedvc_core::reference::REFERENCE_SECONDS,
+    );
     let opts = ConvertOptions {
         sampler: Sampler {
             steps: parse(flag(&mut args, "steps"), Sampler::default().steps),
@@ -96,6 +102,7 @@ fn main() {
     else {
         eprintln!(
             "usage: stream [--backend tch] [--device cpu] [--chunk 1600] [--block 172] \
+             [--reference-secs 25] \
              [--steps 30] [--guidance 0.7] [--length-adjust 1.0] [--seed 0] [--compare] \
              --dit <ckpt.pth> --campplus <campplus_cn_common.bin> \
              --bigvgan <bigvgan_generator.pt> --content <whisper-small/model.safetensors> \
@@ -129,11 +136,11 @@ fn main() {
         let frame_rate = model.config().frame_rate();
 
         let started = Instant::now();
-        let reference = seedvc_core::reference::analyse(model.as_ref(), &reference)
+        let reference = seedvc_core::reference::analyse(model.as_ref(), &reference, reference_secs)
             .await
             .expect("analysing the reference");
         println!(
-            "reference: {} mel frames ({:.2} s), {:.1?}",
+            "reference: {} mel frames ({:.2} s, capped at {reference_secs} s), {:.1?}",
             reference.frames,
             reference.frames as f32 / frame_rate,
             started.elapsed(),

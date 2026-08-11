@@ -56,6 +56,16 @@ pub struct ModelOpts {
     /// specification — there is nothing to train.
     #[arg(short, long)]
     pub reference: Option<PathBuf>,
+    /// Seconds of `--reference` that are read. The reference's mel and each
+    /// source chunk share one 30 s window, so this is a two-sided dial and not a
+    /// quality knob: the timbre vector is a pooled average and saturates within
+    /// seconds, while every second of reference is a second the source loses
+    /// from every chunk. At the 25 s default a chunk carries under 5 s of
+    /// source; at 5 s it carries nearly 25, so a long clip costs five times the
+    /// chunks and five times the seams for a voice that is no better specified.
+    /// Only ever shortens: a clip under the cap is read whole.
+    #[arg(long, value_name = "SECONDS", default_value_t = seedvc_core::reference::REFERENCE_SECONDS)]
+    pub reference_secs: f32,
     /// Seed-VC checkpoint: the transformer and the length regulator
     /// [default: auto-downloaded from Hugging Face].
     #[arg(long)]
@@ -96,6 +106,32 @@ impl ModelOpts {
              convert into (there is no model to train — the clip is the whole \
              speaker specification)",
         )
+    }
+
+    /// Reject a reference cap the analysis cannot use.
+    ///
+    /// Called from **both** hosting commands' `verify`, which run before a byte
+    /// is fetched: adding it to one is the silent half of this check, since the
+    /// filter and `convert` analyse the reference through the same function.
+    pub fn verify(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.reference_secs.is_finite() && self.reference_secs > 0.0,
+            "--reference-secs is {}: it is the longest stretch of the reference that is read, \
+             so it has to be a positive, finite number of seconds",
+            self.reference_secs,
+        );
+        // The content encoder refuses a clip past its own window rather than
+        // truncating one, so a cap above it reads no more audio — it only moves
+        // the refusal to after four checkpoints have been fetched and loaded.
+        // Named here, where it costs a message instead.
+        anyhow::ensure!(
+            self.reference_secs <= seedvc_core::reference::MAX_REFERENCE_SECONDS,
+            "--reference-secs is {} and the content encoder's window is {} s: a longer cap \
+             cannot read more of the clip, so trim the reference itself if it runs past that",
+            self.reference_secs,
+            seedvc_core::reference::MAX_REFERENCE_SECONDS,
+        );
+        Ok(())
     }
 }
 
@@ -160,6 +196,22 @@ pub struct FilterArgs {
     /// Samples per input read chunk from stdin (16 kHz mono f32le).
     #[arg(long, default_value_t = 1600)]
     pub chunk: usize,
+    /// Mel frames of new audio each converted chunk carries — the latency dial,
+    /// since a chunk is a window rather than a filter and nothing can be emitted
+    /// until a whole one exists. At the model's 86.13 Hz the default is 2.0 s,
+    /// with 16 frames of crossfade on top. Clamped to whatever the reference
+    /// leaves of the shared 30 s window, so `--reference-secs` bounds it.
+    ///
+    /// In **frames** rather than seconds, unlike `rvc`'s `--block-secs`: every
+    /// window this engine has is measured in frames, and the source samples
+    /// behind one frame move with `--length-adjust` — so a block in seconds
+    /// would change size with a flag that has nothing to do with latency.
+    ///
+    /// On the bare invocation only. `convert` has whole files and drives the
+    /// batch path, which picks one chunk from the room the reference leaves and
+    /// has no streaming geometry to put this in.
+    #[arg(long, value_name = "FRAMES", default_value_t = seedvc_core::StreamParams::realtime().block)]
+    pub block_frames: usize,
     /// Inference backend: `onnx`, `cuda` (aliases `burn`, `burn-cuda`), `tch`
     /// (`libtorch`, `burn-tch`) or `wgpu` (`webgpu`, `burn-wgpu`); `auto` picks
     /// ONNX Runtime when `--onnx` names an export, else the fastest compiled in.
@@ -177,7 +229,29 @@ impl FilterArgs {
         // A zero-sample read would spin on stdin forever without ever handing
         // the converter a block to work on.
         anyhow::ensure!(self.chunk > 0, "--chunk must be at least 1 sample");
+        // A chunk that carries no *new* audio advances nothing, which is the
+        // same hang one flag along. `Converter::new` refuses it too, but in
+        // terms of the crossfade — naming the flag that caused it is worth
+        // doing here, before the four checkpoints are fetched.
+        anyhow::ensure!(
+            self.block_frames > 0,
+            "--block-frames must be at least 1: a chunk carrying no new audio never advances, \
+             so the filter would read its input forever without emitting any of it"
+        );
+        self.models.verify()?;
         self.sampler.verify()
+    }
+
+    /// The streaming geometry this invocation asks for.
+    ///
+    /// Everything but the block stays at the preset, and the block *defaults* to
+    /// the preset's own field — so omitting the flag is the same number through
+    /// the same code path, not a value converted back and forth.
+    pub fn params(&self) -> seedvc_core::StreamParams {
+        seedvc_core::StreamParams {
+            block: self.block_frames,
+            ..seedvc_core::StreamParams::realtime()
+        }
     }
 }
 
@@ -208,6 +282,7 @@ pub struct ConvertArgs {
 impl ConvertArgs {
     /// Reject values clap's types accept but the pipeline cannot use.
     pub fn verify(&self) -> Result<()> {
+        self.models.verify()?;
         self.sampler.verify()
     }
 }
