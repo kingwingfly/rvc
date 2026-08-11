@@ -110,6 +110,16 @@ pub fn run<AB: AutodiffBackend>(
     // discarded there rather than truncated here.
     let window_frames = req.settings.window_frames;
     let segment_frames = req.settings.segment_frames;
+    // Checked here as well as in `rvc train`'s `verify`, and not as belt and
+    // braces: `train` is a public entry point, so a caller that is not the CLI
+    // reaches this with whatever it built — and `window_frames - segment_frames`
+    // below is unsigned, so getting it wrong is a panic in a subtraction rather
+    // than an error naming the two settings.
+    anyhow::ensure!(
+        window_frames >= segment_frames,
+        "window_frames ({window_frames}) must be at least segment_frames \
+         ({segment_frames}): the segment is a slice of the window"
+    );
     let mut opt_g = AdamWConfig::new()
         .with_beta_1(0.8)
         .with_beta_2(0.99)
@@ -142,7 +152,8 @@ pub fn run<AB: AutodiffBackend>(
     // Clip-sampling bias (None = uniform); computed once from each clip's SNR.
     let cdf = clip_weights(&clips, req.settings.snr_weight);
     tracing::info!(
-        "run:   {total_steps} steps ({} epochs x {steps_per_epoch}), batch {batch}{}",
+        "run:   {total_steps} steps ({} epochs x {steps_per_epoch}), batch {batch}{}, \
+         window {window_frames}f / segment {segment_frames}f",
         req.settings.epochs,
         match accum {
             1 => String::new(),
@@ -150,7 +161,7 @@ pub fn run<AB: AutodiffBackend>(
         }
     );
     tracing::info!(
-        "sched: lr {:.1e} -> {:.1e}, ema over {:.0} steps{}{}",
+        "sched: lr {:.1e} -> {:.1e}, wd {weight_decay}, ema over {:.0} steps{}{}",
         req.settings.lr,
         sched.final_lr(),
         sched.ema_window,

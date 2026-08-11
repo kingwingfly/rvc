@@ -572,6 +572,12 @@ pub struct TrainArgs {
     pub d_interval: usize,
     /// Bias clip sampling toward cleaner clips by `snr^alpha` (noise-floor SNR,
     /// not loudness). `0` = uniform.
+    ///
+    /// The `snr` it exponentiates is a **linear amplitude ratio**, not the
+    /// decibels the corpus line reports — so a clip at 20 dB is weighted as
+    /// 10^(20/20) = 10, not as 20. Worth knowing only if you are reasoning about
+    /// the ratio between two clips' weights; the run's own summary stays in dB
+    /// because that is the unit every other measurement in this toolkit uses.
     #[arg(long, default_value_t = 0.0)]
     pub snr_weight: f32,
     /// Latent frames the generator renders per step (100 per second at a

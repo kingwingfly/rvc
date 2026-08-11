@@ -29,6 +29,19 @@ pub const HOP: usize = 160;
 pub const WINDOW_SAMPLES: usize = 30 * SAMPLE_RATE as usize;
 /// Mel frames in one window — `WINDOW_SAMPLES / HOP`.
 pub const WINDOW_FRAMES: usize = WINDOW_SAMPLES / HOP;
+/// The same window in seconds: the unit a segment's length is measured in, and
+/// therefore the ceiling on how long one may be.
+///
+/// Derived rather than written as `30.0` wherever it is wanted — a caller that
+/// spelled it by hand would keep its own copy of a number this front end owns,
+/// and the two could only ever disagree silently. `stt-cli` had exactly that,
+/// twice: as `--max-clip`'s default and in the check refusing a larger one.
+///
+/// Divided as floats on purpose. `(WINDOW_SAMPLES / SAMPLE_RATE as usize) as f32`
+/// gives the same 30.0 for these two values and truncates for any pair that does
+/// not divide evenly — the integer-division-first trap that made Seed-VC's
+/// context window 2580 rather than 2584.
+pub const WINDOW_SECONDS: f32 = WINDOW_SAMPLES as f32 / SAMPLE_RATE as f32;
 
 const F_MIN: f32 = 0.0;
 const F_MAX: f32 = SAMPLE_RATE as f32 / 2.0;

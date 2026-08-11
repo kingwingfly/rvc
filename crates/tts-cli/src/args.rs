@@ -138,34 +138,39 @@ pub struct TtsArgs {
     /// Ignored by `--backend onnx`, which uses CUDA where it is available.
     #[arg(long, default_value = "auto", value_name = "DEVICE", value_parser = cli_kit::parse_device)]
     pub device: burn_kit::DeviceSpec,
+    // Every default below is read from `SampleOptions`/`SynthOptions`'s own
+    // `Default`, never spelled again here. Two of these knobs existed as fields
+    // the CLI pinned to a literal, and a third had a literal that merely
+    // *happened* to match — the class of drift that only shows up as a model
+    // behaving unlike its documentation.
     /// Sample from the `k` highest-scoring tokens. Lower is steadier, higher is
     /// more varied.
-    #[arg(long, default_value_t = 15)]
+    #[arg(long, default_value_t = SampleOptions::default().top_k)]
     pub top_k: usize,
     /// Keep the smallest set of tokens whose probability sums past this;
     /// `1.0` disables it. Applied after `--top-k`, so the two compose: `--top-k`
     /// bounds the count and this bounds the mass, and whichever bites first
     /// wins.
-    #[arg(long, default_value_t = 1.0)]
+    #[arg(long, default_value_t = SampleOptions::default().top_p)]
     pub top_p: f32,
     /// Below 1 sharpens the distribution, above 1 flattens it.
-    #[arg(long, default_value_t = 1.0)]
+    #[arg(long, default_value_t = SampleOptions::default().temperature)]
     pub temperature: f32,
     /// Penalty on tokens already generated. Holds off the repetition loop that
     /// otherwise stops an utterance ever ending.
-    #[arg(long, default_value_t = 1.35)]
+    #[arg(long, default_value_t = SampleOptions::default().repetition_penalty)]
     pub repetition_penalty: f32,
     /// Seed, so a synthesis can be repeated exactly.
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, default_value_t = SynthOptions::default().seed)]
     pub seed: u64,
     /// Cap on generated tokens per line. At 25 Hz, 1500 is a minute.
-    #[arg(long, default_value_t = 1500)]
+    #[arg(long, default_value_t = SynthOptions::default().max_tokens)]
     pub max_tokens: usize,
     /// How much of `s2`'s prior variance to sample. Upstream uses 0.5; lower is
     /// flatter and more repeatable, higher is more varied and more prone to
     /// artefacts. This is the decoder's randomness, not the token sampler's —
     /// `--seed` fixes both, so two runs at one seed match whatever this is.
-    #[arg(long, default_value_t = 0.5)]
+    #[arg(long, default_value_t = SynthOptions::default().noise_scale)]
     pub noise_scale: f64,
 }
 

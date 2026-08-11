@@ -44,7 +44,7 @@ mod tokenizer;
 
 pub use decode::DecodeOptions;
 pub use error::{Result, SttError};
-pub use mel::{HOP, SAMPLE_RATE, WINDOW_FRAMES, WINDOW_SAMPLES};
+pub use mel::{HOP, SAMPLE_RATE, WINDOW_FRAMES, WINDOW_SAMPLES, WINDOW_SECONDS};
 pub use tokenizer::{Tokens, Vocabulary};
 
 use std::path::Path;
@@ -65,15 +65,6 @@ pub struct Segment {
 }
 
 /// How to cut the input up and what to ask the model for.
-/// Whisper's encoder window, in seconds — 30, and not a tuning choice.
-///
-/// Named rather than written out because it is a *ceiling* the CLI has to
-/// enforce as well as a default it has to apply, and `stt-cli` had the number
-/// twice: once as `--max-clip`'s default and once in the check that refuses a
-/// larger one. Two copies of a constant that comes out of the model's own front
-/// end is one edit away from a segment the encoder cannot hold.
-pub const WINDOW_SECONDS: f32 = (WINDOW_SAMPLES / SAMPLE_RATE as usize) as f32;
-
 #[derive(Debug, Clone)]
 pub struct TranscribeOptions {
     /// Where to cut. Defaults match the corpus slicer's: energy is used only to

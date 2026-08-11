@@ -105,7 +105,15 @@ pub async fn prepare_clips(
         let gt = gt[..frames * HOP].to_vec();
 
         let snr = frame_snr(&gt, model_sr);
-        tracing::debug!("  {}: {} frames (snr {:.1})", path.display(), frames, snr);
+        // dB here too, for the same reason the summary is: a reader comparing
+        // one clip against the corpus must not have to convert between two
+        // units to do it.
+        tracing::debug!(
+            "  {}: {} frames (snr {:.1} dB)",
+            path.display(),
+            frames,
+            20.0 * snr.max(f32::MIN_POSITIVE).log10()
+        );
         clips.push(Clip {
             content: cflat,
             coarse,
