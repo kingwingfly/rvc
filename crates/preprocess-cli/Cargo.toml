@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "preprocess — CLI for corpus preparation: slice on silence, de-hiss, separate voice from music"
+description = "preprocess — CLI for corpus preparation: slice on silence, de-hiss, separate voice from music, keep one speaker"
 
 # A library as well as a binary: the `voice` tool hosts these same subcommands
 # under `voice preprocess …`, and does it by depending on this crate rather than
@@ -19,16 +19,17 @@ name = "preprocess"
 path = "src/main.rs"
 
 # One binary, every compute backend; `--backend` picks at run time. They arrived
-# with `separate`, the first stage that runs a model. There is no `onnx`, and
-# that is the model's property rather than an omission: MDX23C is published as a
-# PyTorch checkpoint only, so `--backend onnx` is refused with that reason
-# instead of pointing at a feature flag.
+# with `separate`, the first stage that runs a model, and `diarize` is the
+# second. There is no `onnx`, and that is the two models' property rather than an
+# omission: MDX23C is published as a PyTorch checkpoint only and nothing in this
+# workspace exports CAM++, so `--backend onnx` is refused with that reason
+# instead of pointing at a feature flag that could not exist.
 #
 # The `tch` feature is load-bearing beyond what it links: `rpath_kit::emit()`
 # reads *this* crate's `CARGO_FEATURE_TCH` to decide whether to bake the LibTorch
 # search path into the binary. Without it the rpath is missing and the binary
-# fails in `ld.so` before `main`, on every subcommand — including `clip`, which
-# runs no model at all.
+# fails in `ld.so` before `main`, on every subcommand — including the two that
+# run no model at all.
 [features]
 default = ["cuda", "tch", "wgpu"]
 cuda = ["preprocess-core/cuda", "burn-kit/cuda"]

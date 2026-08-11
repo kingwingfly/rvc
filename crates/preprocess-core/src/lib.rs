@@ -25,25 +25,45 @@
 //! stages composable: the output of one is a legitimate input to the next.
 //!
 //! Each stage is one module with one per-file function ([`clip::file`],
-//! [`denoise::file`], [`separate::file`]). Driving the batch — tolerating a file
-//! that will not decode, tallying what happened — belongs to the caller, because
-//! what is worth reporting differs per stage: `clip` counts clips against input
-//! duration, `denoise` writes exactly one file per input.
+//! [`denoise::file`], [`separate::file`], [`diarize::file`]). Driving the batch
+//! — tolerating a file that will not decode, tallying what happened — belongs to
+//! the caller, because what is worth reporting differs per stage: `clip` counts
+//! clips against input duration, `denoise` writes exactly one file per input,
+//! `diarize` counts the windows it kept against the ones it scored.
 //!
-//! # The first stage that runs a model
+//! # Two stages run a model, and neither pays for the other's
 //!
-//! [`separate`] is it, and it is why this crate now has backend features at
-//! all. The stage itself carries none of them — the
-//! [`Separator`](separate::Separator) boundary, the overlap-add and the file
-//! driver compile and are tested with no backend enabled — and inside
-//! [`backend`] only the arms that name a Burn backend are behind
-//! `cuda`/`tch`/`wgpu`. That split is what keeps the seam arithmetic under
-//! `cargo test` on a machine with no checkpoint and no GPU, and it is what lets
-//! a build with no backend at all still *refuse* a request with a reason
-//! instead of failing to have the function.
+//! [`separate`] and [`diarize`] are the two, and they are why this crate has
+//! backend features at all. Neither *stage* carries them: the
+//! [`Separator`](separate::Separator) and
+//! [`SpeakerEmbedder`](embed::SpeakerEmbedder) boundaries, the overlap-add, the
+//! window arithmetic and both file drivers compile and are tested with no
+//! backend enabled, and only the loader arms that name a Burn backend sit behind
+//! `cuda`/`tch`/`wgpu`. That split is what keeps the seam and the segment
+//! arithmetic under `cargo test` on a machine with no checkpoint and no GPU, and
+//! it is what lets a build with no backend at all still *refuse* a request with
+//! a reason instead of failing to have the function.
+//!
+//! Each loader has to name a backend, so this crate depends on `cli-kit` for the
+//! workspace's one `--backend` enum. **That is the sanctioned trade rather than
+//! a layering slip**, and it is `seedvc-core`'s precedent exactly: declaring a
+//! second backend enum here to avoid the dependency is the thing explicitly
+//! forbidden, and `cli-kit` is a `*-kit` crate that anything may depend on.
+//! Fetching weights stays with the caller, so nothing here touches `hub-kit`.
+//!
+//! **The two erasures sit in different modules, and the reason is chronological
+//! rather than principled.** The separator's is [`backend`], written when it was
+//! the only model; the speaker embedding's is [`embed`], beside the trait it
+//! erases, because a second `resolve` and a second `load` in one module would
+//! each have to be spelled differently from the first — and each refusal names
+//! its own model, so there is nothing to share but the shape. Bringing the
+//! separator's next to `separate` would make the two match; that is a tidy for
+//! whoever owns that stage rather than something to do to it from here.
 
 pub mod clip;
 pub mod denoise;
+pub mod diarize;
+pub mod embed;
 mod input;
 pub mod separate;
 

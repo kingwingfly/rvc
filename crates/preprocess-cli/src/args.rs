@@ -54,6 +54,10 @@ pub enum PreprocessCommand {
     // unread.
     #[command(long_about = SEPARATE_LONG_ABOUT)]
     Separate(SeparateArgs),
+    /// Keep only the parts spoken by one voice, given a reference clip.
+    // Same placement and the same reason as `separate`'s above.
+    #[command(long_about = DIARIZE_LONG_ABOUT)]
+    Diarize(DiarizeArgs),
 }
 
 /// What every stage takes: files to read and a directory to write into.
@@ -316,6 +320,167 @@ impl SeparateArgs {
                 Stem::Instrumental => preprocess_core::separate::Stems::Instrumental,
                 Stem::Both => preprocess_core::separate::Stems::Both,
             },
+        }
+    }
+}
+
+/// What `diarize --help` says beyond its one-line summary.
+///
+/// Same placement and the same reason as [`SEPARATE_LONG_ABOUT`], and the same
+/// rule about its contents: every number in it is measured, and the order is
+/// what a user needs first — where the stage goes in the pipeline, then what
+/// the output actually looks like, then the thing that most often makes it
+/// perform badly.
+const DIARIZE_LONG_ABOUT: &str = "\
+Keep only the parts of a recording spoken by one voice.
+
+Each window of the input is compared to a reference clip by speaker \
+similarity, and runs of windows that clear --threshold are written out as \
+<stem>_<NNN>.wav. Source separation cannot do this on its own: a vocals stem \
+holds every voice in the mixture, the person talking and a singer on the \
+backing track alike, because separation asks whether something is a voice and \
+not whose it is.
+
+So for a stream recorded over somebody else's music, the order is the recipe:
+
+    preprocess separate raw/    -o vocals/ --stem vocals
+    preprocess diarize  vocals/ -o mine/   --reference me.wav
+    preprocess clip     mine/   -o dataset/
+
+The output is window-quantised, not sample-accurate. Edges land on --hop \
+boundaries, a window spanning a speaker change belongs to whoever dominates \
+it, and a kept run is widened to cover its last window in full — so a segment \
+can carry a fraction of a second of the other voice at each end, and the \
+seconds written are always more than the seconds matched. The window counts in \
+the per-file line are the honest measure of how much of a recording matched.
+
+TAKE THE REFERENCE FROM THE RECORDING YOU ARE FILTERING. Measured on this \
+repository's own corpus, two clips of one speaker from one session score \
+0.87-0.90; the same speaker across sessions scores 0.36-0.78. That spread is \
+wider than the gap between speakers this threshold works in, because the \
+embedding keys partly on the microphone and the room — so a reference from \
+somewhere else is the likeliest single reason a run keeps nothing.
+
+At the default 3 s window, a threshold of 0.55 kept 80% of the target's \
+windows and rejected 86% of the music-and-singer ones on a separated 60 s of \
+stream. At 1.5 s the two stop separating at all, which is the speaker model's \
+own 2 s context window showing up as a number.
+
+There is no mode that runs without --reference: this is target-speaker \
+extraction, and discovering how many speakers a recording holds is a different \
+job that is not built.";
+
+/// Keep one speaker and drop the rest.
+///
+/// `-r/--reference` is **required**, and that is the honest shape rather than a
+/// placeholder: blind clustering — the mode that would need no reference — is
+/// not built, and an `Option` that errored on `None` would advertise it.
+#[derive(Debug, Args)]
+pub struct DiarizeArgs {
+    #[command(flatten)]
+    pub io: IoArgs,
+    /// Directory to write the retained `<stem>_<NNN>.wav` segments into. Not
+    /// the input directory by default, for `denoise`'s reason: a stage that
+    /// overwrote its own input would make a badly chosen `--threshold`
+    /// unrecoverable.
+    #[arg(short = 'o', long, default_value = "diarized")]
+    pub output_dir: PathBuf,
+    /// A recording of the voice to keep — a few clean seconds of that person
+    /// alone, from the same recording you are filtering. Only the first 30 s
+    /// are read, since the embedding saturates.
+    #[arg(short = 'r', long)]
+    pub reference: PathBuf,
+    /// Cosine similarity to the reference a window must reach to be kept.
+    /// Raise it to drop anything doubtful, lower it to keep more of the target
+    /// voice at the cost of admitting other speakers.
+    #[arg(long, default_value_t = 0.55)]
+    pub threshold: f32,
+    /// Analysis window in seconds. Shorter follows a speaker change more
+    /// closely and gives a noisier embedding; the speaker model pools its
+    /// context over 2 s, and below that the distributions stop separating.
+    #[arg(long, default_value_t = 3.0)]
+    pub window: f32,
+    /// Step between windows in seconds. Segment edges land on this grid, so it
+    /// is the resolution of the output; halving it doubles the work.
+    #[arg(long, default_value_t = 1.0)]
+    pub hop: f32,
+    /// Drop any retained stretch shorter than this (seconds).
+    #[arg(long, default_value_t = 1.0)]
+    pub min_segment: f32,
+    /// CAM++ speaker-embedding weights [default: auto-downloaded from Hugging
+    /// Face].
+    #[arg(short, long)]
+    pub model: Option<PathBuf>,
+    /// Directory the downloaded model is cached in. Shared by every engine
+    /// unless `$VOICE_CACHE_DIR` says otherwise.
+    #[arg(long, default_value_os_t = hub_kit::default_cache_dir())]
+    pub cache_dir: PathBuf,
+    /// Inference backend: `cuda` (aliases `burn`, `burn-cuda`), `tch`
+    /// (`libtorch`, `burn-tch`) or `wgpu` (`webgpu`, `burn-wgpu`); `auto` picks
+    /// the fastest compiled in. There is no `onnx`: this model is published as
+    /// a PyTorch checkpoint only.
+    #[arg(long, value_enum, default_value_t = Backend::Auto)]
+    pub backend: Backend,
+    /// Compute device: `auto` (fastest visible), `cpu`, `gpu`, `gpu:N`, `mps` or
+    /// `vulkan` (`cuda`/`cuda:N` also accepted). The `cuda` backend has GPUs only.
+    #[arg(long, default_value = "auto", value_name = "DEVICE", value_parser = cli_kit::parse_device)]
+    pub device: burn_kit::DeviceSpec,
+    #[command(flatten)]
+    pub download: cli_kit::DownloadOpts,
+}
+
+impl DiarizeArgs {
+    /// Reject what cannot run, **before** the weights are fetched.
+    ///
+    /// The backend and download checks are here for `separate`'s reason, and
+    /// the window arithmetic joins them because it is equally cheap to notice
+    /// now: a `--hop` larger than `--window` skips audio nothing ever scores,
+    /// and it does so silently.
+    pub fn verify(&self) -> Result<()> {
+        self.io.verify()?;
+        self.download.verify()?;
+        preprocess_core::embed::resolve(self.backend)?;
+        anyhow::ensure!(
+            self.window > 0.0,
+            "--window must be positive: it is the length of audio each speaker \
+             comparison is made over"
+        );
+        anyhow::ensure!(
+            self.hop > 0.0 && self.hop <= self.window,
+            "--hop ({}) must be positive and no larger than --window ({}), or \
+             the step would skip audio nothing ever scores",
+            self.hop,
+            self.window
+        );
+        // Cosine similarity is bounded, so a value outside is a unit mistake —
+        // a percentage, most likely — and would keep everything or nothing
+        // rather than failing.
+        anyhow::ensure!(
+            (-1.0..=1.0).contains(&self.threshold),
+            "--threshold is a cosine similarity and must be between -1 and 1; \
+             {} would {} every window",
+            self.threshold,
+            if self.threshold > 1.0 {
+                "reject"
+            } else {
+                "keep"
+            }
+        );
+        anyhow::ensure!(
+            self.min_segment >= 0.0,
+            "--min-segment must not be negative"
+        );
+        Ok(())
+    }
+
+    /// The stage settings these flags describe.
+    pub fn options(&self) -> preprocess_core::diarize::DiarizeOptions {
+        preprocess_core::diarize::DiarizeOptions {
+            sr: self.io.sr,
+            window: self.window,
+            hop: self.hop,
+            threshold: self.threshold,
+            min_segment: self.min_segment,
         }
     }
 }
