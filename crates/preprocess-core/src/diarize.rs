@@ -263,6 +263,7 @@ pub async fn file(
 fn segments(scores: &[f32], opts: &DiarizeOptions, total_secs: f64) -> Vec<(f64, f64)> {
     let (window, hop) = (opts.window as f64, opts.hop as f64);
     let mut out: Vec<(f64, f64)> = Vec::new();
+    let mut prev: Option<usize> = None;
     for (i, _) in scores
         .iter()
         .enumerate()
@@ -273,13 +274,17 @@ fn segments(scores: &[f32], opts: &DiarizeOptions, total_secs: f64) -> Vec<(f64,
             (i as f64 * hop + window).min(total_secs),
         );
         match out.last_mut() {
-            // Adjacent or overlapping runs are one segment. `>=` rather than
-            // `>`: two windows that merely touch are still one stretch of
-            // speech, and splitting them would write a cut where the model saw
-            // no change at all.
-            Some(last) if start <= last.1 => last.1 = end.max(last.1),
+            // Consecutive kept windows are one segment. The test is on the
+            // **index**, not on whether the times overlap: with a window wider
+            // than the hop every window overlaps its neighbour's span, so a
+            // time-based test merges straight across a window that was
+            // rejected — and a rejected window is exactly where the other
+            // speaker was. Merging there hands their audio back in the kept
+            // output, which is the whole thing this stage exists to prevent.
+            Some(last) if prev == Some(i - 1) => last.1 = end.max(last.1),
             _ => out.push((start, end)),
         }
+        prev = Some(i);
     }
     out.retain(|(start, end)| end - start >= opts.min_segment as f64);
     out
