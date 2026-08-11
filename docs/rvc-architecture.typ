@@ -772,7 +772,9 @@ recordings are full of between-sentence dead air, then most randomly sampled
 silence-heavy batch is to *emit silence*. The generator obliges, globally.
 
 The remedy is a *sentence-safe slicer* run as a preprocessing pass
-(`rvc preprocess`): it uses short-time energy with *hysteresis* to cut only
+(`preprocess clip`, in the binary of that name — it was `rvc preprocess` until
+corpus preparation became an engine-shaped pair of its own): it uses short-time
+energy with *hysteresis* to cut only
 *genuine, sustained* dead air between sentences, while:
 
 #block(inset: (x: 10pt))[

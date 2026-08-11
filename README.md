@@ -14,27 +14,28 @@ same on **stdout**, with logs on stderr — so any subset is a valid pipeline.
 weights directly; training is native Rust too. One exception stays on purpose: the `.safetensors → ONNX` 
 exporter under [`export/`](export/README.md).
 
-## One binary per engine, plus one that has them all
+## One binary per engine, plus one that prepares corpora and one that has them all
 
-**Running a binary with no subcommand *is* the filter.**
+**Running an engine's binary with no subcommand *is* the filter.**
 
 | | the bare invocation | subcommands |
 |---|---|---|
-| **`rvc`** | PCM in → retimbred PCM out | `convert`, `train`, `preprocess`, `download`, `completions` |
+| **`rvc`** | PCM in → retimbred PCM out | `convert`, `train`, `download`, `completions` |
 | **`stt`** | PCM in → text out | `convert`, `download`, `completions` |
-| **`tts`** | text in → PCM out | `convert`, `train`, `preprocess`, `download`, `completions` |
+| **`tts`** | text in → PCM out | `convert`, `train`, `download`, `completions` |
 | **`seedvc`** | PCM in → retimbred PCM out, the voice taken from a reference clip | `convert`, `download`, `completions` |
-| **`voice`** | — | `voice rvc …`, `voice stt …`, `voice tts …`, `voice seedvc …`, plus one `voice completions` for the lot |
+| **`preprocess`** | — it names a phase, and the subcommand *is* which stage runs | `clip`, `denoise`, `separate`, `diarize`, `analyze`, `completions` |
+| **`voice`** | — | `voice rvc …`, `voice stt …`, `voice tts …`, `voice seedvc …`, `voice preprocess …`, plus one `voice completions` for the lot |
 
 ## Install
 
 ```sh
 export LIBTORCH=$PWD/libtorch      # 2.9.0; omit to build without the tch backend
-cargo build --release              # all five binaries
+cargo build --release              # all six binaries
 cargo build --release -p stt-cli   # or just one
 ```
 
-ONNX Runtime, LibTorch and ffmpeg are found the same way by all five binaries:
+ONNX Runtime, LibTorch and ffmpeg are found the same way by all six binaries:
 
 **→ [`docs/setup.md`](docs/setup.md)**
 
@@ -48,7 +49,13 @@ ONNX Runtime, LibTorch and ffmpeg are found the same way by all five binaries:
 | **`seedvc`** — zero-shot voice conversion (Seed-VC) | inference; a reference clip replaces training entirely | [crates/seedvc-cli/README.md](crates/seedvc-cli/README.md) |
 | **`translate`** | not started; pipe to any external tool meanwhile | — |
 
-Each engine's README has the rest — every flag, which weights are fetched and
+Not an engine, but the thing you run before the two that train:
+
+| | status | docs |
+|---|---|---|
+| **`preprocess`** — corpus preparation | **works**: `clip`, `denoise`, `separate` (MDX23C), `diarize` (CAM++), `analyze` | [crates/preprocess-cli/README.md](crates/preprocess-cli/README.md) |
+
+Each binary's README has the rest — every flag, which weights are fetched and
 from where, and its fine-tuning loop.
 
 `rvc` and `seedvc` do the same job on opposite terms: `rvc` learns one voice from
@@ -62,7 +69,7 @@ written by `export/export_seedvc.py`. Fine-tuning is always Burn.
 
 ## Documentation
 
-Usage lives with the tool and this file stays an index. Beyond the four engine
+Usage lives with the tool and this file stays an index. Beyond the five binary
 READMEs and [`docs/setup.md`](docs/setup.md):
 
 | | |
@@ -89,10 +96,9 @@ Three tiers, and the names say which is which.
 | crate | role |
 |-------|------|
 | `burn-kit` | device selection and checkpoint loading |
-| `audio-kit` | ffmpeg decode/resample, WAV/raw-PCM I/O, the sentence slicer — all `futures::Stream<f32>` |
+| `audio-kit` | ffmpeg decode/resample, WAV/raw-PCM I/O, the sentence slicer, the noise-floor measurement — all `futures::Stream<f32>`, and mono but for the one stereo path source separation needs |
 | `hub-kit` | model downloads from Hugging Face, and where they are cached |
 | `cli-kit` | logging, shell completions, `--backend` and `--device` parsing |
-| `preprocess-kit` | the `preprocess` subcommand: slice recordings into clean per-sentence clips |
 | `train-kit` | checkpoints, weight EMA, gradient accumulation, the live dashboard — generic over the module being trained |
 | `text-kit` | grapheme-to-phoneme for TTS: language splitting, Mandarin and English g2p, GPT-SoVITS's phoneme table. No model, no tensors |
 | `rpath-kit` | build-time only: where each binary looks for ffmpeg and LibTorch, so running one needs no environment |
@@ -105,11 +111,13 @@ Three tiers, and the names say which is which.
 | `burn-rvc` | what is RVC's alone: the NSF source module, the 768-dim content encoder, the synthesizer wiring, and ContentVec's readout of `burn-hubert` |
 | `burn-hubert` | the HuBERT SSL encoder, shared by two engines — GPT-SoVITS calls it cnhubert, RVC's ContentVec is the same network with other weights |
 | `burn-rmvpe` | the RMVPE pitch network: log-mel in, cents salience out, so `rvc`'s F0 estimator runs on Burn as well as ONNX Runtime |
+| `burn-mdx` | MDX23C, the source separator UVR ships: a mixture in, a voice stem and a music stem out |
+| `burn-campplus` | CAM++ speaker embedding, shared by two readers — Seed-VC conditions on it, `preprocess diarize` compares two of them |
 | `burn-whisper` | the Whisper network; loads HF safetensors unchanged |
 | `burn-gptsovits` | the GPT-SoVITS network: cnhubert, the quantiser, `s2` (SoVITS) and `s1` (T2S) |
-| `burn-seedvc` | the Seed-VC network: the diffusion transformer and its flow-matching sampler, the length regulator, the CAMPPlus timbre encoder, BigVGAN. **GPL-3.0 is this crate's doing** |
+| `burn-seedvc` | the Seed-VC network: the diffusion transformer and its flow-matching sampler, the length regulator, BigVGAN. **GPL-3.0 is this crate's doing** |
 
-**Engines**, one `-core` and one `-cli` apiece, all the same shape:
+**One `-core` and one `-cli` per binary**, all the same shape:
 
 | crate | role |
 |-------|------|
@@ -117,6 +125,7 @@ Three tiers, and the names say which is which.
 | `stt-core` + `stt-cli` | speech recognition → binary `stt` |
 | `tts-core` + `tts-train` + `tts-cli` | speech synthesis → binary `tts` |
 | `seedvc-core` + `seedvc-cli` | zero-shot voice conversion → binary `seedvc`; no `-train`, and that is the point |
+| `preprocess-core` + `preprocess-cli` | corpus preparation → binary `preprocess`; the tier's shape worn by something that is not an engine |
 | `voice-cli` | the integration → binary `voice` |
 
 Two rules keep it that way. **No engine depends on another engine** — anything

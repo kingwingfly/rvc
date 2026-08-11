@@ -19,7 +19,6 @@ describes a binary rather than an engine: use `voice completions` there.
 | `tts -r <clip> -t <transcript>` | **the bare invocation is the filter** — one line of text per utterance on stdin, f32le mono PCM on stdout |
 | `tts convert <text files…>` | speak whole files, one `<stem>.wav` per input |
 | `tts train <corpus>` | fine-tune `s1`, `s2` or both on a voice |
-| `tts preprocess <files…>` | slice recordings into clean per-sentence clips, ready for `stt` |
 | `tts download` | prefetch what a synthesis fetches on its first run |
 | `tts completions <shell>` | completion script for bash, zsh, fish, powershell or elvish |
 
@@ -128,13 +127,18 @@ either deploys without the other.
 
 A corpus is `<stem>.wav` beside `<stem>.txt` in one directory (`.mp3`, `.flac`,
 `.m4a`, `.ogg` and `.opus` are read too; audio with no transcript is skipped with
-a warning). Build one from raw recordings in two steps — `preprocess` cuts them
-into per-sentence clips, `stt` writes a transcript beside each. **Read the
+a warning). Build one from raw recordings in two steps — `preprocess clip` cuts
+them into per-sentence clips, `stt` writes a transcript beside each. **Read the
 transcripts before training**: a wrong one is the corpus-wide version of a wrong
 reference text.
 
+**`tts preprocess` is gone**, removed rather than deprecated, so an old command
+line fails to parse rather than quietly doing something else: corpus preparation
+is its own binary now, [`preprocess`](../preprocess-cli/README.md), with the
+same slicer and four more stages beside it.
+
 ```sh
-tts preprocess raw/*.mp3 -o corpus/ --sr 32000
+preprocess clip raw/*.mp3 -o corpus/ --sr 32000
 
 # `stt convert` loads the model once and reuses it across every file —
 # a loop pays Whisper's load time per file, which is why the subcommand exists.

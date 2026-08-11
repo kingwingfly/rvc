@@ -19,6 +19,11 @@ on any of the three.
 1–30 s reference clip is the whole speaker specification, so there is nothing to
 train** (see **Seed-VC, and why the whole workspace is GPL-3.0**).
 
+`preprocess` is the sixth binary and the one that is **not** an engine: it turns
+recordings into a corpus the engines that train can eat — `clip`, `denoise`,
+`separate`, `diarize`, `analyze` — and every rule below that says "engine" has
+to be read against it (see **`preprocess` names a phase, not a transformation**).
+
 ### Three rules that are easy to break silently
 
 **No Python.** Not for users, not for developers, not for setup. New models are
@@ -35,11 +40,14 @@ Runtime, which this toolkit treats as a supported deployment target (see **Which
 runtime a model gets, and why**). What keeps the rule intact is that it stays a
 maintainer's build-time tool: no user, no test and no training run invokes it.
 
-**One binary per engine, plus `voice`.** `rvc`, `stt`, `tts` and `seedvc` each
+**One binary per engine, plus `preprocess` and `voice`.** `rvc`, `stt`, `tts`
+and `seedvc` each
 stand alone and pull in only what they use — installing `stt` costs none of the
 RVC stack, and its `onnx` feature is opt-out, so a Burn-only `stt` links no ORT
-at all. `voice` is the *integration*: it depends on `rvc-cli`, `stt-cli`,
-`tts-cli` and `seedvc-cli`
+at all. `preprocess` stands alone on the same terms without being an engine: it
+feeds them rather than being one of them, which is exactly why it is its own
+binary instead of a subcommand on two of them. `voice` is the *integration*: it
+depends on `rvc-cli`, `stt-cli`, `tts-cli`, `seedvc-cli` and `preprocess-cli`
 **as libraries**, so an argument is defined exactly once and never
 copied between binaries. Every `*-cli` crate is therefore a lib **and** a bin,
 and each exports one clap type that its own `main` flattens and `voice` nests —
@@ -52,10 +60,10 @@ with the `train` subcommand", not "`rvc train`").
 synthesis are siblings. Anything two of them need moves to a neutral crate first.
 
 ### The shape every CLI has
-**Running a binary with no subcommand is the stdin→stdout filter.** Subcommands
-are for everything that is not streaming:
-`rvc convert|train|preprocess|download|completions`,
-`tts convert|train|preprocess|download|completions`,
+**Running an engine's binary with no subcommand is the stdin→stdout filter.**
+Subcommands are for everything that is not streaming:
+`rvc convert|train|download|completions`,
+`tts convert|train|download|completions`,
 `stt convert|download|completions`,
 `seedvc convert|download|completions` — where `completions` is the binary's and
 not the engine's, so it is the one that does **not** appear under `voice` (see
@@ -64,15 +72,56 @@ below). `stt` and `tts` were already this shape;
 the batch counterpart of the bare invocation on all four** — same engine, files
 instead of a pipe — which is why it is spelled identically everywhere rather than
 `transcribe`, `synthesize` and `convert`. `seedvc` was born this shape, and its
-missing subcommands say something rather than being unfinished: no `train`
-because it is zero-shot, and no `preprocess` because a corpus is what a trainer
-eats.
+one missing subcommand says something rather than being unfinished: no `train`,
+because it is zero-shot.
 
-That is a deliberate promotion rather than a deletion. Streaming is the *primary*
-mode of a Unix filter — it is the thing the whole `futures::Stream` pipeline
-exists for — and hiding it behind a subcommand while `stt` and `tts` exposed it
-directly meant the three engines could not be learned once. If a future engine
-has a streaming mode, it goes on the bare invocation too.
+`preprocess clip|denoise|separate|diarize|analyze|completions` is the sixth
+binary and the one that breaks the pattern in one place — it has **no bare
+invocation** — which the next section is about. Its stages are not a fixed set:
+a new one is one module in `preprocess-core`, one under `commands/` and one clap
+variant, and that extension point is the reason the crate exists at all.
+
+That promotion is a deliberate one rather than a deletion. Streaming is the
+*primary* mode of a Unix filter — it is the thing the whole `futures::Stream`
+pipeline exists for — and hiding it behind a subcommand while `stt` and `tts`
+exposed it directly meant the three engines could not be learned once.
+
+### `preprocess` names a phase, not a transformation
+The rule above used to end "if a future engine has a streaming mode, it goes on
+the bare invocation too", and read literally that sentence obliges `preprocess`
+to grow one. **It must not, and this paragraph exists because deleting the
+sentence would only let somebody re-derive it.** The argument is written out in
+`crates/preprocess-cli/src/lib.rs`, which is where it will be found by whoever is
+about to add the bare invocation back:
+
+`rvc`, `stt`, `tts` and `seedvc` each name **an engine** — one transformation —
+so "the engine on a pipe" is a complete description of what a bare invocation
+does, and there is exactly one thing it could mean. `preprocess` names **a
+phase**, and *which stage of it to run* is precisely what the subcommand
+chooses. A bare `preprocess` would have to pick one silently, and whichever it
+picked would be wrong for everybody who wanted a different one. That is not a
+gap waiting to be filled: adding stages makes it **worse**, and more stages are
+the whole point of the crate.
+
+So the test before adding a bare invocation is not "does this binary stream" but
+**"is there one thing a bare invocation would mean"**. A future engine still gets
+one, because for an engine the answer is yes. And if a *stage* here ever wants to
+be a filter it gets that as a property of the stage — `preprocess denoise`
+reading stdin when handed no files, say — while the top level stays a chooser.
+
+The same distinction settles the absence a reader will notice next: `preprocess`
+has no `download`, where **every engine has one**. `separate` and `diarize` fetch
+on demand like everything else, but a `preprocess download` would have to fetch
+either both models or a stage's worth, and neither is what "what a default bare
+invocation would fetch" means when there is no default and no bare invocation.
+The honest form is the same one that killed `voice download`: name the stage
+whose gigabytes are being spent, which is what running it does.
+
+**`seedvc`'s missing `preprocess` used to be listed here as meaningful, and that
+reading is now void** — no engine has a `preprocess`, so its absence from one
+says nothing. What it said is still true and now belongs to `preprocess` itself:
+a corpus is what a *trainer* eats, so corpus preparation is a phase in front of
+the two engines that train and beside the two that do not.
 
 **`stt` used to be the exception, and is not any more.** It read the whole of
 stdin before transcribing anything, on the reasoning that segmentation needs to
@@ -100,7 +149,8 @@ own name, which is the rule rather than an exception to it.
 
 ### `completions` belongs to the binary, not to the engine
 It is the one subcommand in the list above that is **not** part of any engine's
-clap type, and the reason is that a completion script describes *an executable*.
+clap type — nor of `PreprocessCommand`, which follows the same rule for the same
+reason — because a completion script describes *an executable*.
 `<E>Command` therefore stops at the engine's own verbs, and each `main.rs`
 flattens that enum into a private one that adds `Completions` beside it —
 `#[command(flatten)]` on a subcommand variant, which is what makes this cost one
@@ -190,15 +240,26 @@ Three tiers, and the name says which tier a crate is in:
 - **`*-kit`** — shared plumbing with no model and no engine knowledge, safe for
   anything to depend on: `burn-kit` (devices, checkpoints), `audio-kit` (ffmpeg
   I/O, the slicer), `hub-kit` (downloads and the cache), `cli-kit` (logging,
-  completions, `--backend`/`--device`), `preprocess-kit` (the corpus slicer as a
-  subcommand), `rpath-kit` (a build-dependency: where a binary looks for the
-  libraries it links).
+  completions, `--backend`/`--device`), `rpath-kit` (a build-dependency: where a
+  binary looks for the libraries it links).
+
+  **`preprocess-kit` was one of these and is gone**, so do not reach for it: it
+  held "the corpus slicer as a subcommand", which is plumbing only for as long as
+  slicing is the only thing corpus preparation does. It stopped being that the
+  moment separation and diarisation arrived — those run models, and a `*-kit`
+  crate is by definition the tier with no model knowledge. The slicer itself
+  stayed put in `audio-kit`, where `stt` also reads it; what moved is the
+  subcommand around it, into an engine-shaped pair of its own.
 - **`burn-*`** — one network each, named after the **model** (`burn-rvc` reads
   like `burn_dinov3`), holding no app dependencies and naming no compute backend.
-- **`<engine>-core` / `<engine>-cli`** — one engine each, all the same shape:
+- **`<name>-core` / `<name>-cli`** — one binary each, all the same shape:
   `rvc-core`+`rvc-train`+`rvc-cli`, `stt-core`+`stt-cli`,
   `tts-core`+`tts-train`+`tts-cli`, `seedvc-core`+`seedvc-cli` (no `-train`,
-  and its absence is the engine's defining property rather than a gap).
+  and its absence is the engine's defining property rather than a gap), and
+  `preprocess-core`+`preprocess-cli` — which is the tier's shape worn by
+  something that is **not** an engine, because what the tier actually marks is
+  "one binary's worth of behaviour, split into what a library does and what a
+  command line does".
 
 **`voice-` is reserved for the top.** It marks the integration, so a crate that
 an engine depends on must never be named `voice-*` — that is why the shared
@@ -211,16 +272,19 @@ once grew ninety lines of engine manual:
 - **`README.md`** is an *index*: what `voice` is, the pipeline, which binary to
   install, one build block, links out. No engine documentation, ever — if a
   passage names a flag, it belongs in an engine README.
-- **`docs/setup.md`** is everything that is true of all five binaries at once:
+- **`docs/setup.md`** is everything that is true of all six binaries at once:
   ffmpeg, ORT and LibTorch, the build, the `--backend`/`--device` table, and
   where downloaded models land. It exists because that material was previously
   written once in `crates/rvc-cli/README.md` and linked from the other two — which
   reads as `stt` depending on `rvc`, obliges a reader who only wants `stt` to
   open the voice-conversion manual, and drifted anyway. **Anything an engine
   README would have to say identically belongs here instead.**
-- **`crates/<engine>-cli/README.md`** is that engine's manual and only that:
+- **`crates/<name>-cli/README.md`** is that binary's manual and only that:
   every flag, which weights it fetches from where, how to drive its training. It
   links to `docs/setup.md` and `docs/training.md` rather than repeating them.
+  Spelled `<name>` and not `<engine>` because `crates/preprocess-cli/README.md`
+  is one of these, and it is **the same place rather than a tenth one** — the
+  count below does not move when a non-engine binary gains its manual.
 - **`docs/training.md`** is to the trainers what `setup.md` is to the binaries:
   everything true of every training loop at once — the shared VITS objective,
   what is in `train-kit` and what is deliberately *not*, warm-start, the
@@ -275,7 +339,8 @@ closing bullet in the same commit**, not only inserting a bullet.
 export ORT_DYLIB_PATH=/usr/lib/libonnxruntime.so
 export LIBTORCH=$PWD/libtorch   # must be exactly 2.9.0 (what tch 0.22 targets)
 
-cargo build                     # all five binaries: `rvc`, `stt`, `tts`, `seedvc`, `voice`
+cargo build                     # all six binaries: `rvc`, `stt`, `tts`, `seedvc`,
+                                # `preprocess`, `voice`
 cargo build --release -p rvc-cli   # just `rvc`, optimised
 
 # `cargo build` (dev) is the right default even for running models: the profile
@@ -311,17 +376,32 @@ cargo build --release --no-default-features --features cuda
 # `cargo test` cannot do — none of them can be committed. The unit tests pin
 # arithmetic against hand-written references; these pin the module tree against
 # the checkpoint. Each reports applied/missing/unused, and every non-zero
-# `unused` in this list has a recorded reason — read it, don't glance at it:
-cargo run -p burn-rvc --example load -- <path/to/f0G48k.pth>       # 560/0, 165/0
-cargo run -p burn-rvc --example load -- contentvec <path/to/hubert_base>  # 210/0
+# `unused` in this list has a recorded reason — read it, don't glance at it.
+#
+# READ THE THIRD NUMBER AGAINST ITS OWN EXAMPLE, because two conventions are in
+# use and they are opposites. `burn-whisper`'s load prints the *genuinely*
+# unused count with its known allowance already subtracted — 587/0/0 for turbo,
+# whose raw `unused` is 156, all LayerNorm gamma/beta aliases. `burn-rvc`'s and
+# `burn-campplus`'s print the **raw** count and account for it by name
+# afterwards, which is why ContentVec reads 210/0/57 and CAM++ 815/0/122 rather
+# than /0. Comparing a 0 in one column against a 122 in another and concluding
+# one port is cleaner is the wrong conclusion, not a small one:
+cargo run -p burn-rvc --example load -- <path/to/f0G48k.pth>       # 560/0/0, 165/0/0
+cargo run -p burn-rvc --example load -- contentvec <path/to/hubert_base>  # 210/0/57 raw
 cargo run -p burn-rmvpe --example load -- <path/to/rmvpe.pt>       # 623/0/118
 cargo run -p burn-mdx --example load -- <path/to/MDX23C-8KFFT-InstVoc_HQ.ckpt>  # 319/0/0
-cargo run -p burn-whisper --example load -- <path/to/model.safetensors>  # 587/0
+cargo run -p burn-whisper --example load -- <path/to/model.safetensors>  # 587/0/0 net
 cargo run -p burn-gptsovits --example load -- hubert <chinese-hubert-base/pytorch_model.bin>  # 210/0
 cargo run -p burn-seedvc --example load -- <DiT_seed_v2_...pruned.pth>   # module by module
 cargo run -p seedvc-core --features tch --example coverage -- --dit ... --campplus ...
+# ...CAM++ is `burn-campplus` now and has no `load` example of its own; the two
+# lines above are where its 815/0/122 is printed.
 cargo run -p burn-gptsovits --example keys -- --group <any checkpoint>   # what names to mirror
 cargo run -p burn-seedvc  --example keys -- <any checkpoint>            # likewise
+cargo run -p burn-mdx     --example keys -- --group <any MDX checkpoint>
+# ...that third `keys` is not a copy for symmetry: an MDX file's *architecture*
+# is not recorded anywhere but its shapes, and two checkpoints in one directory
+# under one name-prefix do not have the same one.
 
 # The second kind of check, the one coverage cannot make — see **Verifying a
 # port beyond weight coverage**. These exercise arithmetic on real audio, so
@@ -337,6 +417,8 @@ cargo run -p burn-mdx --example separate --features tch -- --mixture <song.wav> 
 # ...the second form is the *real*-recording mode: no stems exist, so it reports
 # no SI-SDR against a source and every reading is a contrast. 5-6.5 dB of bed
 # removal, and the reason that is not a hedge is in the example's module doc.
+cargo run -p preprocess-core --features tch --example timbre -- --campplus … \
+    --reference <clip> <same speaker> <a different one>   # where `diarize`'s 0.55 came from
 cargo run -p seedvc-core --features tch --example convert  # the engine, end to end
 cargo run -p seedvc-core --features tch --example stream   # the same, through the filter
 cargo run -p rvc-core --features tch --example f0_runtimes # Burn vs ORT F0, median 0.005–1.40 Hz
@@ -376,6 +458,33 @@ one-way version and is what the safetensors loader uses. The bug is silent (the
 model just loses mantissa) except on LibTorch, which rejects a conv whose bias
 dtype stops matching its input. fp16 and fp32 checkpoints of the same model are
 both common on the Hub, so test against both.
+
+**`missing` is not the coverage check, and a wrong-shaped checkpoint reads as
+100%.** `burn_store`'s applier derives `missing` as *visited and not applied and
+not skipped and **not errored***, so a path that failed to apply is dropped from
+`applied` and from `missing` alike. The consequence is exact and it is the worst
+shape a check can have: a file carrying the right tensor **names** at the wrong
+**shapes** — the other preset of the same model, a config field mis-transcribed,
+a head resized upstream — leaves every one of them in `errors`, `missing` empty,
+and the report reading as a clean load while every affected parameter sits at its
+initialised value. Three workers rediscovered this independently in one batch,
+which is what it costs to leave the ordering to whoever writes the next example.
+
+`burn_kit::check_coverage` is the one place that asks in the right order:
+**`errors` first**, then `missing`, then `applied.is_empty()` — that last
+because a rename that matched nothing is a silent success no other field
+reports. It deliberately does **not** check `unused`: a correct load leaves
+tensors over all the time (RMVPE's 118 `num_batches_tracked`, ContentVec's 57
+LayerNorm aliases, CAM++'s 122, or a multi-module `.pth` of which one module is
+being read), so any threshold refuses working weights on somebody, which is
+worse than no check. It returns a `String` rather than a `burn_kit::Error`, and
+that is load-bearing too: every engine's `From<burn_kit::Error>` flattens to its
+own `Device` variant, so a bare `?` would report a shape mismatch as "device
+error". A `String` cannot be `?`-ed anywhere, so each caller has to name the
+variant that fits. The `--strict` gates in `burn-rvc`'s and `burn-whisper`'s
+`load` examples ask the same four questions in the same order, and both allow
+their leftovers **by name** rather than by count — 57 wrong tensors pass a count
+of 57 just as happily.
 
 **A safetensors file is not one format but two**, and `burn-kit` has a loader for
 each. `load_safetensors_into` applies `PyTorchToBurnAdapter`, which transposes
@@ -505,32 +614,34 @@ Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper
 | crate | role |
 |-------|------|
 | `burn-kit` | Burn plumbing with no model knowledge: `--device` resolution and checkpoint loading, shared by every network crate |
-| `audio-kit` | ffmpeg decode/resample + WAV/raw-PCM I/O, all as `futures::Stream<f32>` |
+| `audio-kit` | ffmpeg decode/resample + WAV/raw-PCM I/O, all as `futures::Stream<f32>`; the sentence slicer in both a batch and a streaming form; and `noise_floor`, **one** definition of "how quiet is this recording's quiet", which `preprocess analyze` reports and `rvc-train` reads. **The mono rule has exactly one exception and it stops where it starts**: `decode_path_stereo` → `write_wav_stereo` exists because MDX23C is stereo-native and folding the field away throws out one of the two cues it separates on. Nothing else in the workspace takes `StereoSamples`, and that is the property to keep rather than a stage it has not reached yet |
 | `rvc-core` | the voice-conversion pipeline: `FeatureExtractor` (ContentVec + RMVPE), coarse-pitch/upsample/pitch-shift DSP, streaming `Converter` (block/overlap with an **overlapping** crossfade — consecutive kept blocks share `xf_out` output samples so the blend adds, never deletes, audio), an optional post de-hiss stage (`denoise.rs`, `--denoise`), and **all three** generator backends (ort, Burn/LibTorch, Burn/CubeCL) behind one `Generator` trait. The two *feature* models have the same run-time choice behind `ContentEncoder`/`PitchEstimator` (`analysis.rs`, implemented in `encoder.rs`/`f0.rs` for ORT and `burn_features.rs` for Burn), picked independently of each other and of the generator |
 | `burn-vits` | the VITS blocks RVC and GPT-SoVITS share (both descend from the same source, which is why their `state_dict` names line up): attention stack, `Wn`, flow, posterior encoder, `ResBlock1`, weight-norm convs, discriminators, the family's losses, the differentiable STFT |
 | `burn-rvc` | what is RVC's alone: `SourceModule` (NSF), the 768-dim `TextEncoder`, `GeneratorNsf`, the synthesizer wiring; re-exports `burn-vits` so it still reads as one model. Also `ContentVec` — RVC's *readout* of `burn-hubert` and nothing more, since the network is shared. **RVC v2 takes the final (12th) encoder layer directly** where v1 took layer 9 through `final_proj`, so that head sits in the checkpoint wired to nothing, and `hubert_base/config.json` is `HubertConfig::chinese_base()` field for field (pinned as a constant rather than parsed, so a disagreeing checkpoint fails as a shape mismatch). `examples/load -- contentvec <hubert_base>` reports 210/0 |
 | `burn-hubert` | the HuBERT SSL encoder, its own crate because **two engines read it**: GPT-SoVITS calls it cnhubert, and RVC's ContentVec is the same architecture with other weights. `hidden_states` returns every layer rather than only the last, which is what makes a variant that reads a different layer a choice of index instead of a second port. Lifted out of `burn-gptsovits` with no field renamed, and that extraction is the cleanest proof on record of **Moving a module between crates is free** — the load example still reports 210/0 afterwards. It carries no `cuda`/`tch` features, because those exist to give a crate's *examples* a backend and this network's coverage harness stays `burn-gptsovits`'s |
+| `burn-campplus` | CAM++, a speaker embedding: a clip in, one 192-dim timbre vector out. Its own crate because **a second reader arrived** — the same move, for the same reason, that lifted `burn-hubert` out of `burn-gptsovits`: Seed-VC conditions its transformer on this vector, and `preprocess diarize` compares two of them by cosine. `burn-seedvc` re-exports it, so `burn_seedvc::campplus` and `burn_seedvc::fbank` still resolve and no call site changed. `campplus_cn_common.bin` (`funasr/campplus`) loads at **815/0/122**, the 122 being one `num_batches_tracked` per norm — a **raw** count, not a net one. **The weights are Apache-2.0 and this port is not**: it was written by reading Seed-VC's vendored copy, so it is GPL-3.0 like everything else, and a crate that must stay permissive cannot depend on it however permissive the checkpoint is. Its front end is a **Kaldi filterbank at 16 kHz, mean-normalised over time**, and the normalisation lives inside `fbank` rather than in the model because upstream does it at the *call site* — see the Seed-VC section |
 | `burn-rmvpe` | the RMVPE pitch network, upstream's `E2E(4, 1, (2, 2))`: a five-level U-net, a `Conv2d(16 → 3, 3×3)` head, one bidirectional GRU (384 → 256 each way) and `Linear(512, 360)`. `[batch, 128, T]` log-mel in, `[batch, T, 360]` cents salience out — the mel front end (`rvc-core`'s `mel.rs`) and the salience→Hz decode (`dsp::rmvpe_decode`) stay in `rvc-core` so both runtimes share them, rather than giving the two backends a chance to disagree about something neither computes. `rmvpe.pt` loads at **623/0/118**, the unused being one `num_batches_tracked` per `BatchNorm`. Aligning the frame count to a multiple of 32 is `forward`'s job, not the caller's |
-| `burn-mdx` | MDX23C (TFC-TDF-UNet v3), the source-separation network UVR ships: a complex STFT front end, five TFC-TDF U-net levels over a subband-folded spectrum, and one waveform per stem. What lets a corpus recorded over music be cleaned before anything else touches it. `MDX23C-8KFFT-InstVoc_HQ.ckpt` loads at **319/0/0** — no unused at all, because the norms are `InstanceNorm2d` and so carry no running statistics and no `num_batches_tracked`. The **older MDX-Net v2 models are ONNX-only and deliberately not ported**; see the crate docs for why a Burn port of them cannot be verified |
+| `burn-mdx` | MDX23C (TFC-TDF-UNet v3), the source-separation network UVR ships: a complex STFT front end, five TFC-TDF U-net levels over a subband-folded spectrum, and one waveform per stem. What lets a corpus recorded over music be cleaned before anything else touches it, and what `preprocess separate` runs. **Stereo-native**, which is why `audio-kit` has a stereo path at all. `MDX23C-8KFFT-InstVoc_HQ.ckpt` loads at **319/0/0** — no unused at all, because the norms are `InstanceNorm2d` and so carry no running statistics and no `num_batches_tracked`. The **older MDX-Net v2 models are ONNX-only and deliberately not ported**; see the crate docs for why a Burn port of them cannot be verified |
 | `burn-whisper` | the Whisper network (standalone Burn port); mirrors HF's `state_dict` layout so `openai/whisper-large-v3-turbo` loads unchanged |
 | `burn-gptsovits` | the GPT-SoVITS network. `hubert` at 210/0, `quantizer` at 3/0, and `s2` complete at 773/0 (the 3 unused are the codebook's EMA training statistics). **`s2` is verified numerically, not just structurally**: `examples/reconstruct` round-trips real audio through cnhubert, the quantiser and the synthesizer, and the output tracks the source's energy envelope at r=0.91 against a chance baseline of 0.30. `t2s` (`s1`) is at 295/0. Every network of GPT-SoVITS is now ported; `tts-core`/`tts-cli` wire them into a working `tts`, and `tts-train` fine-tunes **both** stages — `s1` for delivery, `s2` for timbre. `SovitsPartial::forward_train` composes `enc_q` → `flow.forward` → random segment → `dec` and returns the five tensors the VITS losses need; the matching `s2D2333k.pth` discriminator loads at 111/0/0. `examples/keys` lists any checkpoint's tensors, which is the first thing to run against a new one |
 | `rvc-train` | native Rust/Burn adversarial training loop (see `docs/training.md`) |
 | `hub-kit` | auto-download every engine's assets from Hugging Face |
-| `rvc-cli` | lib **and** the `rvc` binary (clap): the bare invocation streams, plus `convert`, `train`, `preprocess`, `download`, `completions` |
+| `rvc-cli` | lib **and** the `rvc` binary (clap): the bare invocation streams, plus `convert`, `train`, `download`, `completions`. **No `preprocess`** — that moved out to its own binary, and it was removed rather than deprecated, so a command line carrying it fails to parse |
 | `stt-core` | speech recognition: Whisper log-mel front-end, BPE vocabulary, KV-cached greedy decode, segmentation via `audio-kit`'s slicer, and **two runtimes** (native Burn, ONNX Runtime) behind one `Engine` trait |
 | `stt-cli` | lib **and** the `stt` binary |
 | `tts-core` | speech synthesis: reference analysis, `s1` sampling with a KV cache, `s2` decode, and the ONNX prosody encoder behind a trait. **Two runtimes**, the same shape `stt-core` uses: `Engine` is the whole boundary, so `Synthesizer` is not generic and the backend is a constructor call rather than a type parameter. `--backend onnx` runs the whole stack — cnhubert, the quantiser, `ref_enc`, `s1` and `s2` — off four exported graphs, and `auto` picks it when the model directory holds an export |
 | `tts-train` | fine-tuning GPT-SoVITS. `s1` is plain next-token cross-entropy over `T2s::forward_prompt_all` — one model, one optimizer, one loss, so unlike `rvc-train` the number means something on its own. `s2` is the other half: an adversarial VITS loop over `burn-vits`'s shared discriminators, inheriting `rvc-train`'s loss family (mel-L1 ×45, KL ×1, feature matching ×2, LSGAN) rather than inventing one, with GPT-SoVITS's five discriminator periods `[2,3,5,7,11]` against RVC's eight. Verified on 13 clips: mel falls 26.6 → 18.2 over two epochs on GPU and on CPU alike. `--stage s1|s2|both` prepares the corpus exactly once — preparation is the expensive half — and each stage writes its own checkpoint family. A corpus is `<stem>.wav` + `<stem>.txt` pairs, and `stt` is how the transcripts get written |
 | `tts-cli` | lib **and** the `tts` binary |
-| `burn-seedvc` | the Seed-VC network: the diffusion transformer and its flow-matching sampler, the length regulator, CAMPPlus, BigVGAN. **The crate the workspace's GPL-3.0 comes from** — see its own section below |
+| `burn-seedvc` | the Seed-VC network: the diffusion transformer and its flow-matching sampler, the length regulator, BigVGAN, and a re-export of `burn-campplus` where CAMPPlus used to be declared. **The crate the workspace's GPL-3.0 comes from** — see its own section below |
 | `seedvc-core` | zero-shot voice conversion: `reference` (one clip → timbre vector + mel prefix + length-regulated content), `convert` (the chunk arithmetic and the equal-power crossfade), the streaming `Converter`, and the Burn backends behind one `Model` trait — the shape `stt-core` and `tts-core` use, so the backend is a constructor call rather than a type parameter. **No `-train` sibling**, and the `onnx` feature adds an `OnnxModel` reading the six graphs `export/export_seedvc.py` writes, behind `--backend onnx --onnx <dir>` |
 | `seedvc-cli` | lib **and** the `seedvc` binary: the bare invocation streams, plus `convert`, `download`, `completions` |
-| `cli-kit` | logging, shell completions, and the shared `--backend`/`--device`/`--cache-dir` flags — one enum and one alias set for all five binaries, so the spellings cannot drift apart again |
-| `preprocess-kit` | the `preprocess` subcommand `rvc` and `tts` both expose: decode, slice on silence, write `<stem>_<NNN>.wav`. One definition, so the flags and the slicing cannot differ between the two engines |
+| `preprocess-core` | corpus preparation as a library, and the one `*-core` that is not an engine's: `clip` (slice on silence), `denoise` (`anlmdn` over a corpus rather than over a conversion), `separate` (MDX23C, chunk-streamed, the only stereo path in the workspace), `diarize` (CAM++ windows scored by cosine against a reference), `analyze` (model-free: what a corpus *is*, and what to set the other stages to). Every stage reads audio files and writes audio files, which is what makes them compose |
+| `preprocess-cli` | lib **and** the `preprocess` binary: `clip`, `denoise`, `separate`, `diarize`, `analyze`, `completions`. **No bare invocation**, and that is the one place the house shape is broken on purpose — see **`preprocess` names a phase, not a transformation** |
+| `cli-kit` | logging, shell completions, and the shared `--backend`/`--device`/`--cache-dir` flags — one enum and one alias set for all six binaries, so the spellings cannot drift apart again. `DenoiseOpts` lives here for the same reason: `rvc --denoise` and `preprocess denoise` tune the same filter and must not grow two spellings of `--denoise-strength` |
 | `train-kit` | training scaffolding with no model knowledge: `Checkpoint`, `ema_update`, `accumulate`, `materialize`, `Dashboard`. Generic over the module trained, so a GAN and a cross-entropy loop share it |
 | `rpath-kit` | a **build-dependency**, not a runtime one: where each binary's `build.rs` gets the loader search order for the two linked libraries, ffmpeg and LibTorch |
 | `text-kit` | grapheme-to-phoneme: script-based language splitting, Mandarin g2p (jieba + pinyin + opencpop + tone sandhi), and GPT-SoVITS's 732-symbol table. English g2p is an embedded CMUdict over upstream's deterministic cascade; Mandarin polyphones come from `pypinyin`'s own 47k phrase dictionary; Japanese is `jpreprocess` (a pure-Rust OpenJTalk rewrite) with the dictionary supplied by the caller. Pure Rust, no ML, no backend — so it is fully testable without weights |
-| `voice-cli` | the `voice` binary: `rvc-cli`, `stt-cli`, `tts-cli` and `seedvc-cli` nested as `voice rvc …`, `voice stt`, `voice tts` and `voice seedvc` |
+| `voice-cli` | the `voice` binary: `rvc-cli`, `stt-cli`, `tts-cli`, `seedvc-cli` and `preprocess-cli` nested as `voice rvc …`, `voice stt`, `voice tts`, `voice seedvc` and `voice preprocess` |
 
 ### Three runtimes, one path (the key abstraction)
 Everything downstream of the generator is shared: the same `FeatureExtractor`, the
@@ -784,8 +895,8 @@ that does not match the text length is the tell.** Illustrative docs are safe �
 `clip.wav` beside a generic transcript is self-consistent, since a reader supplies
 both — but any command naming a real file must name what that file actually says.
 
-### `seedvc-core` depends on `cli-kit`, and that is allowed
-It is the only `*-core` that does, which reads as a layering slip and is not one.
+### `seedvc-core` and `preprocess-core` depend on `cli-kit`, and that is allowed
+Two `*-core` crates do, which reads as a layering slip and is not one.
 `seedvc_core::load` erases the Burn backend behind `Box<dyn Model>`, so it has to
 name a backend, and the rule above is that there is **one** `--backend` enum for
 the whole workspace — declaring a second one in `seedvc-core` to avoid the
@@ -793,8 +904,14 @@ dependency is the thing explicitly forbidden. `cli-kit` is a `*-kit` crate,
 listed as safe for anything to depend on, so the dependency is the sanctioned
 half of that trade.
 
-The other three engines differ only because their cores have no loader at all:
-`stt-cli` and `tts-cli` build the `Engine` themselves. Moving `backend.rs` up to
+`preprocess-core` makes the identical trade twice over, for the identical
+reason: `backend::load` boxes a `dyn Separator` and `embed::load` a speaker
+embedder, so both have to name a backend. **This is the rule generalising rather
+than the exception spreading** — the test is whether the crate erases a Burn
+backend behind a trait object, not which crate it is.
+
+The three engines that do not differ only because their cores have no loader at
+all: `stt-cli` and `tts-cli` build the `Engine` themselves. Moving `backend.rs` up to
 `seedvc-cli` to match would strand `seedvc-core`'s three examples, which are the
 crate's only harness against **real weights** — its unit tests run on synthetic
 tensors and a stub `Model`, because none of the four checkpoints can be
@@ -829,6 +946,16 @@ Each model therefore needs a second check that exercises arithmetic:
 - `tts` end to end — synthesise, then transcribe the result with `stt`. Text in
   and text out are compared by an independent model, which is as close to
   listening as an automated check gets.
+- `burn-campplus` — `preprocess-core`'s `examples/timbre` scores a recording's
+  windows against a reference clip and prints the distribution. Coverage says
+  the tree matches; this says the pair of transforms in front of it separates
+  **speakers**, which is the only claim the stage rests on. Same-speaker windows
+  against different-speaker ones is the reading, and the number to look at is
+  the *gap* — same-speaker 5th percentile against different-speaker 95th. If
+  those overlap, no threshold exists and the honest report says so instead of
+  picking one. It is also where `diarize --threshold`'s default came from, which
+  is the shape to copy: a default that is a measurement rather than a guess has
+  a harness that can be re-run when the model changes.
 - `burn-mdx` — `examples/separate` mixes a known voice with a known
   instrumental bed and reads three things, of which **the first is the one that
   proves the port**: the two stems sum back to the mixture at **41.5 dB**
@@ -1105,9 +1232,15 @@ more than the model runs*:
   18 tensors are a fossil of the training-time model. They are ported anyway,
   because a subtree nobody claims is indistinguishable from one somebody forgot
   — but **wiring inference to them would feed the transformer a timbre vector
-  Seed-VC was never conditioned on.** The real timbre encoder is `campplus.rs`,
-  loading `campplus_cn_common.bin` from HF **`funasr/campplus`** (Apache-2.0,
-  named verbatim in three of upstream's entry points) at 815/0/0.
+  Seed-VC was never conditioned on.** The real timbre encoder is `burn-campplus`
+  (re-exported here as `campplus`, and its own crate since `preprocess diarize`
+  became its second reader), loading `campplus_cn_common.bin` from HF
+  **`funasr/campplus`** (Apache-2.0, named verbatim in three of upstream's entry
+  points) at **815/0/122** — the 122 being one `num_batches_tracked` per norm.
+  An earlier revision of this file recorded that load as 815/0/0, which no run
+  has ever printed: the third column here is the **raw** unused count, and the
+  net-of-allowance convention it was written in belongs to `burn-whisper`'s
+  example rather than to this one.
 - **`net.vq.*` is the same story**, and the length regulator's 2048-entry
   codebook is allocated and never indexed, because this preset sets
   `is_discrete: false`. Port faithfully, document what is live.
@@ -1274,9 +1407,10 @@ with `tts-train` — which is why its 1e-5 mel floor is a two-engine decision, s
 is 6 GB (RTX 2060) → small batch. Warm-start from `--pretrained-g/-d` is strongly
 recommended on a small corpus.
 
-**Preprocess first (`rvc preprocess`).** `sample_batch` draws random 0.48 s
+**Preprocess first (`preprocess clip`, in the binary of that name — `rvc
+preprocess` and `tts preprocess` are gone).** `sample_batch` draws random 0.48 s
 windows uniformly across each corpus file, so raw recordings full of
-between-sentence dead-air collapse the generator to silence. `rvc preprocess
+between-sentence dead-air collapse the generator to silence. `preprocess clip
 raw/*.mp3 -o clips/` then `rvc train clips/*.wav ...` slices the corpus into
 clean per-sentence clips first — it removes between-sentence dead-air while
 **preserving soft, breathy, close-mic content** (energy is used only to find long
@@ -1285,3 +1419,11 @@ silent gaps, never to gate quiet-but-present sound). The shared slicer lives in
 are `--silence-db` (energy floor; lower to keep the softest passages) and
 `--min-silence` (how long a quiet gap must last to be a cut, so sentences are
 never split). Training itself is unchanged — it just consumes the cleaned folder.
+
+**And `preprocess analyze` before that, when the corpus is somebody's stream
+rather than a studio take.** It runs no model and writes nothing, so it costs a
+decode; what it buys is the one failure `clip` cannot report from inside itself —
+a recording with **no dead air at any floor**, which is what speech over a
+continuous music bed looks like from a slicer's side. No `--silence-db` rescues
+that, because the quiet is not there to find, and the fix is `preprocess
+separate` first. Everything else it prints is a knob for the stage after it.
