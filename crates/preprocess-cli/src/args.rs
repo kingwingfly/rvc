@@ -63,6 +63,15 @@ pub enum PreprocessCommand {
     // Same placement and the same reason as the two above.
     #[command(long_about = ANALYZE_LONG_ABOUT)]
     Analyze(AnalyzeArgs),
+    /// Match recordings to one level, by peak or by EBU R128 loudness.
+    #[command(long_about = NORMALIZE_LONG_ABOUT)]
+    Normalize(NormalizeArgs),
+    /// Strip leading and trailing silence, without splitting the recording.
+    #[command(long_about = TRIM_LONG_ABOUT)]
+    Trim(TrimArgs),
+    /// Convert recordings to WAV at one sample rate.
+    #[command(long_about = RESAMPLE_LONG_ABOUT)]
+    Resample(ResampleArgs),
 }
 
 /// What every stage takes: files to read and a directory to write into.
@@ -609,6 +618,268 @@ impl AnalyzeArgs {
         preprocess_core::analyze::AnalyzeOptions {
             sr: self.sr,
             slice: self.slice.options(),
+        }
+    }
+}
+
+/// What `normalize --help` says beyond its one-line summary.
+///
+/// Same placement and the same reason as [`SEPARATE_LONG_ABOUT`]: the choice
+/// between the two targets is the whole of the stage, and a one-line summary
+/// cannot say which one answers which question.
+const NORMALIZE_LONG_ABOUT: &str = "\
+Match recordings to one level, by applying a single constant gain to each.
+
+--peak and --lufs are two ways of saying what level, and they answer different \
+questions:
+
+    --peak 0.95   the loudest sample lands at 95% of full scale. Exact and
+                  instant, and blind to everything but that one sample, so a
+                  stray thump sets the gain for a whole recording.
+
+    --lufs -23    EBU R128 integrated loudness, which is what 'as loud as each
+                  other' means to a listener: K-weighted, and gated so the
+                  silence between sentences does not drag the reading down.
+                  Unbothered by the thump.
+
+Ask for one or the other, never both. Use peak when you want a known headroom, \
+loudness when you want two takes to sit at the same level.
+
+The gain is CONSTANT over each file. Nothing here compresses, limits or rides \
+the level, which is why ffmpeg's own loudnorm filter is not what runs: in \
+single pass that filter is a dynamic normalizer, and this toolkit exists for \
+material whose dynamics are the content. The consequence is that a --lufs run \
+can push the peak past full scale on a recording with a wide range. The \
+per-file line reports the peak it reached, and it is reported rather than \
+limited.
+
+Loudness is measured with ffmpeg's ebur128 scanner, and measured AGAIN after \
+the gain, so the number in the report is a reading rather than arithmetic. A \
+file with no gated reading at all -- under 0.4 s, or entirely silent -- is \
+skipped with that reason, never quietly normalized by peak instead.
+
+No model, no weights, no download: this runs at disk speed over a whole corpus.";
+
+/// What `trim --help` says beyond its one-line summary.
+///
+/// Placed on the variant for [`SEPARATE_LONG_ABOUT`]'s reason. Its job is to
+/// draw the line against `clip`, which is the stage a reader will otherwise
+/// assume this one duplicates.
+const TRIM_LONG_ABOUT: &str = "\
+Strip the silence off the head and tail of a recording. One file in, one file \
+out, and never a split: everything between the first voiced sample and the \
+last is kept exactly as it was, pauses included.
+
+That is the difference from `clip`, which cuts the same recording into one file \
+per sentence. The silence detection is shared, so --silence-db and --pad mean \
+here exactly what they mean there; only the treatment of the gaps in the middle \
+differs.
+
+--measure-floor is for a recording whose room tone sits ABOVE the fixed floor, \
+where -40 dBFS finds no silence to strip at all. It reads the floor off the \
+recording's own quiet frames instead. Off by default, because a moved default \
+would silently re-cut every corpus prepared so far.
+
+A recording with nothing above the floor is written through UNCHANGED rather \
+than emptied. The likeliest cause is a floor set above the whole recording, and \
+a stage that answered that by deleting the audio would be indistinguishable \
+from one that lost it.
+
+No model, no weights, no download: this runs at disk speed over a whole corpus.";
+
+/// What `resample --help` says beyond its one-line summary.
+///
+/// Placed on the variant for [`SEPARATE_LONG_ABOUT`]'s reason. The channel
+/// paragraph is the one that has to be here: `separate` writes stereo on
+/// purpose, and a mono default is a choice a user must be able to see.
+const RESAMPLE_LONG_ABOUT: &str = "\
+Convert recordings to WAV at one sample rate — mp3, m4a, flac, ogg, opus or \
+wav in, <stem>.wav out. Every other stage resamples on the way through because \
+every one of them decodes; this is that step with nothing else attached, so a \
+corpus can be given one obvious normalising pass.
+CHANNELS. Mono by default, because mono is what every engine in this toolkit \
+decodes to and a training corpus has no use for a second channel. That matters \
+in one place: `separate` writes its stems at 44.1 kHz STEREO on purpose — the \
+separation model is stereo-native and folding its output to mono throws away \
+one of the two cues it separates on — so piping `separate` into a default \
+`resample` discards that second channel. Pass --channels stereo to keep it. \
+Nothing downstream in this workspace reads it, so the fold is a loss only if \
+something outside does.
+--sr is the point of the stage, so it has no clever default: 48000 is what \
+voice conversion trains at, 44100 is what `separate` emits, 22050 is Seed-VC's \
+vocoder and 16000 is what recognition eats.
+No model, no weights, no download: this runs at disk speed over a whole corpus.";
+
+/// Match recordings to one level.
+///
+/// The two targets are `Option`s rather than one defaulted flag and one
+/// override, because "which target" is the question and a default on both would
+/// make asking for neither mean something different from asking for peak.
+#[derive(Debug, Args)]
+pub struct NormalizeArgs {
+    #[command(flatten)]
+    pub io: IoArgs,
+    /// Directory to write the level-matched `<stem>.wav` files into. Not the
+    /// input directory by default, for `denoise`'s reason: a stage that
+    /// overwrote its own input would make a badly chosen target unrecoverable.
+    #[arg(short = 'o', long, default_value = "normalized")]
+    pub output_dir: PathBuf,
+    /// Peak target as a fraction of full scale: the loudest sample lands here.
+    /// This is the default target [default: 0.95].
+    // `conflicts_with` rather than a check in `verify`: clap refuses the pair by
+    // name, before an argument is read or a file is opened, and its message
+    // names both flags — which is the whole requirement.
+    #[arg(long, conflicts_with = "lufs")]
+    pub peak: Option<f32>,
+    /// EBU R128 integrated loudness target in LUFS (negative), e.g. -23 for the
+    /// broadcast reference or -16 for a louder corpus.
+    #[arg(long)]
+    pub lufs: Option<f32>,
+}
+
+impl NormalizeArgs {
+    /// Reject a target that is not a level.
+    pub fn verify(&self) -> Result<()> {
+        self.io.verify()?;
+        if let Some(peak) = self.peak {
+            // Above 1.0 is not headroom, it is a request to clip; at or below 0
+            // there is no gain that gets there.
+            anyhow::ensure!(
+                peak > 0.0 && peak <= 1.0,
+                "--peak is a fraction of full scale and must be in (0, 1]; {peak} would {}",
+                if peak > 1.0 {
+                    "clip every peak it lifted"
+                } else {
+                    "have no level to normalize to"
+                }
+            );
+        }
+        if let Some(lufs) = self.lufs {
+            // Full scale is 0 LUFS, so a positive target is a sign mistake and
+            // would ask for a gain nothing can hold.
+            anyhow::ensure!(
+                lufs < 0.0,
+                "--lufs is a loudness in LUFS, which is negative below full scale; \
+                 {lufs} is at or above it (did you mean {})",
+                -lufs.abs()
+            );
+        }
+        Ok(())
+    }
+
+    /// The stage settings these flags describe.
+    pub fn options(&self) -> preprocess_core::normalize::NormalizeOptions {
+        preprocess_core::normalize::NormalizeOptions {
+            sr: self.io.sr,
+            target: match (self.peak, self.lufs) {
+                // Both is refused by clap before this is reached.
+                (_, Some(lufs)) => preprocess_core::normalize::Target::Lufs(lufs),
+                (Some(peak), None) => preprocess_core::normalize::Target::Peak(peak),
+                (None, None) => preprocess_core::normalize::Target::Peak(
+                    preprocess_core::normalize::DEFAULT_PEAK,
+                ),
+            },
+        }
+    }
+}
+
+/// Strip leading and trailing silence.
+///
+/// The two slicer knobs it carries are spelled exactly as `clip`'s, because
+/// they are the same knobs on the same detector. The ones it does not carry are
+/// the ones that only mean something when a recording is being cut into pieces:
+/// `--min-silence`, `--min-clip` and `--max-clip` all describe interior gaps,
+/// and this stage has no interior.
+#[derive(Debug, Args)]
+pub struct TrimArgs {
+    #[command(flatten)]
+    pub io: IoArgs,
+    /// Directory to write the trimmed `<stem>.wav` files into. Not the input
+    /// directory by default, for `denoise`'s reason: a stage that overwrote its
+    /// own input would make a badly chosen `--silence-db` unrecoverable.
+    #[arg(short = 'o', long, default_value = "trimmed")]
+    pub output_dir: PathBuf,
+    /// Energy floor in dBFS: audio quieter than this counts as silence at the
+    /// edges. Lower it (e.g. -50) to keep the very softest onsets and tails.
+    #[arg(long, default_value_t = -40.0)]
+    pub silence_db: f32,
+    /// Keep up to this many seconds of the bordering quiet at each edge, so
+    /// onsets and soft breathy tails are not clipped.
+    #[arg(long, default_value_t = 0.15)]
+    pub pad: f32,
+    /// Read the floor off the recording's own quiet frames instead of using
+    /// `--silence-db`. For a recording whose room tone is above the fixed
+    /// floor, where a fixed pass finds no silence to strip at all.
+    #[arg(long)]
+    pub measure_floor: bool,
+}
+
+impl TrimArgs {
+    /// Reject a floor nothing could be quieter than.
+    pub fn verify(&self) -> Result<()> {
+        self.io.verify()?;
+        anyhow::ensure!(
+            self.silence_db <= 0.0,
+            "--silence-db is dBFS, so it must be at most 0 (full scale); {} would \
+             treat every sample as silence",
+            self.silence_db
+        );
+        anyhow::ensure!(self.pad >= 0.0, "--pad must not be negative");
+        Ok(())
+    }
+
+    /// The stage settings these flags describe.
+    pub fn options(&self) -> preprocess_core::trim::TrimOptions {
+        preprocess_core::trim::TrimOptions {
+            sr: self.io.sr,
+            silence_db: self.silence_db,
+            pad: self.pad,
+            measure_floor: self.measure_floor,
+        }
+    }
+}
+
+/// How many channels [`ResampleArgs`] writes.
+///
+/// A clap mirror of [`preprocess_core::resample::Channels`], for [`Stem`]'s
+/// reason: the stage's types stay free of `clap`, and the flag's spelling stays
+/// here with the rest of the command line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ChannelCount {
+    /// One channel; a stereo input is folded to `(L + R) / 2`.
+    Mono,
+    /// Two channels; a mono input is written to both.
+    Stereo,
+}
+
+/// Convert recordings to WAV at one sample rate.
+#[derive(Debug, Args)]
+pub struct ResampleArgs {
+    #[command(flatten)]
+    pub io: IoArgs,
+    /// Directory to write the converted `<stem>.wav` files into.
+    #[arg(short = 'o', long, default_value = "resampled")]
+    pub output_dir: PathBuf,
+    /// Channels to write. `mono` is what every engine here decodes to;
+    /// `stereo` is what a `separate` stem needs to survive this stage intact.
+    #[arg(long, value_enum, default_value_t = ChannelCount::Mono)]
+    pub channels: ChannelCount,
+}
+
+impl ResampleArgs {
+    /// Reject a rate nothing could be written at.
+    pub fn verify(&self) -> Result<()> {
+        self.io.verify()
+    }
+
+    /// The stage settings these flags describe.
+    pub fn options(&self) -> preprocess_core::resample::ResampleOptions {
+        preprocess_core::resample::ResampleOptions {
+            sr: self.io.sr,
+            channels: match self.channels {
+                ChannelCount::Mono => preprocess_core::resample::Channels::Mono,
+                ChannelCount::Stereo => preprocess_core::resample::Channels::Stereo,
+            },
         }
     }
 }

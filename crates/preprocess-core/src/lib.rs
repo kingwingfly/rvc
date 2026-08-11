@@ -25,12 +25,12 @@
 //! stages composable: the output of one is a legitimate input to the next.
 //!
 //! Each stage is one module with one per-file function ([`clip::file`],
-//! [`denoise::file`], [`separate::file`], [`diarize::file`], [`analyze::file`]).
-//! Driving the batch — tolerating a file that will not decode, tallying what
-//! happened — belongs to the caller, because what is worth reporting differs per
-//! stage: `clip` counts clips against input duration, `denoise` writes exactly
-//! one file per input, `diarize` counts the windows it kept against the ones it
-//! scored.
+//! [`denoise::file`], [`separate::file`], [`diarize::file`], [`analyze::file`],
+//! [`normalize::file`], [`trim::file`], [`resample::file`]). Driving the batch
+//! — tolerating a file that will not decode, tallying what happened — belongs to
+//! the caller, because what is worth reporting differs per stage: `clip` counts
+//! clips against input duration, `denoise` writes exactly one file per input,
+//! `diarize` counts the windows it kept against the ones it scored.
 //!
 //! [`analyze`] is the one stage that writes no audio at all, and so the one
 //! that takes no output directory: it reports what a recording *is*, which is
@@ -71,7 +71,10 @@ pub mod denoise;
 pub mod diarize;
 pub mod embed;
 mod input;
+pub mod normalize;
+pub mod resample;
 pub mod separate;
+pub mod trim;
 
 // Only the loader names a compute backend. Keeping it here rather than in the
 // CLI is `seedvc-core`'s trade, made for the same reason: the erasure has to

@@ -7,6 +7,8 @@
 //! internal look-ahead means [`AudioFilter::process`] may return fewer samples
 //! than it was given until [`AudioFilter::flush`] drains the tail.
 
+use std::collections::HashMap;
+
 use ffmpeg::util::format::Sample as SampleFormat;
 use ffmpeg::util::format::sample::Type as SampleType;
 use ffmpeg::util::frame::audio::Audio as AudioFrame;
@@ -28,6 +30,9 @@ pub struct AudioFilter {
     pts: i64,
     /// Whether EOF has been signalled to the source (idempotent flush).
     flushed: bool,
+    /// The latest value of every metadata key any output frame has carried.
+    /// See [`AudioFilter::metadata`].
+    metadata: HashMap<String, String>,
 }
 
 impl AudioFilter {
@@ -64,7 +69,25 @@ impl AudioFilter {
             sample_rate,
             pts: 0,
             flushed: false,
+            metadata: HashMap::new(),
         })
+    }
+
+    /// The latest value a filter in the chain attached to an output frame under
+    /// `key`, or `None` if no frame has carried it yet.
+    ///
+    /// This is how a *measuring* filter reports: `ebur128=metadata=1` passes the
+    /// audio through untouched and injects its running reading as frame
+    /// metadata under `lavfi.r128.*`, which is the only way that number reaches
+    /// a caller — the summary it also prints goes to ffmpeg's log, where an
+    /// in-process graph cannot read it.
+    ///
+    /// Keys are never cleared, only overwritten, so the value survives frames
+    /// that carry nothing. A running measurement's final value therefore has to
+    /// be read **after [`Self::flush`]**, since the reading that covers the
+    /// whole signal is on the last frame out.
+    pub fn metadata(&self, key: &str) -> Option<&str> {
+        self.metadata.get(key).map(String::as_str)
     }
 
     /// Push `input` into the graph and return whatever filtered samples are
@@ -105,6 +128,9 @@ impl AudioFilter {
         let mut frame = AudioFrame::empty();
         let mut sink = self.graph.get("out").expect("abuffersink present");
         while sink.sink().frame(&mut frame).is_ok() {
+            for (k, v) in frame.metadata().iter() {
+                self.metadata.insert(k.to_string(), v.to_string());
+            }
             let n = frame.samples();
             out.extend_from_slice(&frame.plane::<f32>(0)[..n]);
         }
@@ -171,6 +197,47 @@ mod tests {
         let a = rms(&input[sr as usize..sr as usize + sr as usize / 2]);
         let b = rms(&out[sr as usize..sr as usize + sr as usize / 2]);
         assert!(b < 0.6 * a, "hiss not reduced: in={a} out={b}");
+    }
+
+    /// A measuring filter reports through frame metadata, and the reading that
+    /// covers the whole signal is only there once the graph has been flushed.
+    /// Both halves are pinned here, because reading the value too early gives a
+    /// plausible number for a prefix of the audio rather than an error.
+    #[test]
+    fn a_measuring_filter_reports_through_metadata() {
+        let sr = 48_000u32;
+        let mut f = match AudioFilter::new(sr, "ebur128=metadata=1:peak=none:framelog=quiet") {
+            Ok(f) => f,
+            // ebur128 missing from this ffmpeg build → nothing to test.
+            Err(AudioError::FilterUnavailable(_)) => return,
+            Err(e) => panic!("build graph: {e}"),
+        };
+        assert_eq!(f.metadata("lavfi.r128.I"), None, "nothing measured yet");
+
+        // ffmpeg's own `sine` source at its default amplitude of 0.125, which
+        // `ffmpeg -af ebur128` puts at -21.1 LUFS.
+        let input: Vec<f32> = (0..sr as usize * 3)
+            .map(|i| 0.125 * (std::f32::consts::TAU * 1000.0 * i as f32 / sr as f32).sin())
+            .collect();
+        let mut out = f.process(&input).expect("process");
+        out.extend(f.flush().expect("flush"));
+        // ebur128 is a pass-through: the audio is the measurement's by-product.
+        assert!(
+            (out.len() as isize - input.len() as isize).unsigned_abs() < sr as usize / 10,
+            "ebur128 changed the length: in={} out={}",
+            input.len(),
+            out.len()
+        );
+
+        let measured: f32 = f
+            .metadata("lavfi.r128.I")
+            .expect("an integrated reading after the flush")
+            .parse()
+            .expect("a number");
+        assert!(
+            (measured - -21.1).abs() < 0.2,
+            "expected ~-21.1 LUFS, got {measured}"
+        );
     }
 
     /// `anlmdn` — the de-hiss engine `rvc-core` ships — must **preserve** wanted
