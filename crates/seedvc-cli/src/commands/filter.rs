@@ -26,7 +26,7 @@
 
 use anyhow::{Context, Result};
 use futures::StreamExt;
-use seedvc_core::{CONTENT_SR, Converter, StreamParams, convert_stream};
+use seedvc_core::{CONTENT_SR, Converter, convert_stream};
 use tokio::io::{AsyncWriteExt, BufWriter};
 
 use crate::args::FilterArgs;

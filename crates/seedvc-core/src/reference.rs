@@ -65,11 +65,7 @@ pub const MAX_REFERENCE_SECONDS: f32 = WINDOW_SAMPLES as f32 / CONTENT_SR as f32
 /// Anything ffmpeg opens will do, at any rate and channel count; what comes back
 /// is the [`Reference`] every conversion against this speaker is conditioned on,
 /// so analysing once and converting many times is the intended shape.
-pub async fn analyse(
-    model: &dyn Model,
-    path: impl AsRef<Path>,
-    seconds: f32,
-) -> Result<Reference> {
+pub async fn analyse(model: &dyn Model, path: impl AsRef<Path>, seconds: f32) -> Result<Reference> {
     // Checked before the two decodes rather than inside `analyse_pcm`, so a cap
     // that cannot be used costs a message and not two passes of ffmpeg.
     checked(seconds)?;
