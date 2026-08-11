@@ -49,9 +49,14 @@ pub enum Command {
     // variant `seed-vc`, and the subcommand has to be the binary's own name.
     #[command(name = "seedvc")]
     SeedVc(Box<SeedVcCli>),
-    /// Corpus preparation: `clip` recordings into per-utterance training clips,
-    /// `denoise` them. Not an engine and has no bare invocation — the
-    /// subcommand *is* which stage runs.
+    /// Corpus preparation: `analyze` a corpus, `separate` a music bed off it,
+    /// `diarize` down to one speaker, `denoise`, `normalize`, `trim`,
+    /// `resample`, and `clip` into per-utterance training clips. Not an engine
+    /// and has no bare invocation — the subcommand *is* which stage runs.
+    //
+    // This list is `--help` text, so it goes stale silently as stages are
+    // added: it named two of the eight for as long as there were more than two.
+    // Adding a stage means editing it.
     // No `#[command(name)]`: clap kebab-cases `Preprocess` to `preprocess`,
     // which is already the binary's name. The `SeedVc` variant above needs one
     // only because kebab-case would have spelled it `seed-vc`.

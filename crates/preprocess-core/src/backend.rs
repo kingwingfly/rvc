@@ -111,11 +111,18 @@ pub struct MdxSeparator<B: BurnBackend> {
 impl<B: BurnBackend> MdxSeparator<B> {
     /// Load the checkpoint and report its coverage.
     ///
-    /// The report is logged rather than swallowed: a missing tensor is a
+    /// The report is checked rather than swallowed: a missing tensor is a
     /// silently mis-initialised layer, which separates *something* and cannot be
     /// told from a bad recording by ear. The expected reading is 319 applied, 0
     /// missing, 0 unused — there are no training-only tensors in this file,
     /// because the norms are instance norms.
+    ///
+    /// The check is [`burn_kit::check_coverage`] rather than a condition written
+    /// here, and that is not tidying. **`errors` is not covered by `missing`**:
+    /// `burn_store`'s applier counts a path as missing only when it was visited
+    /// and *not* errored, so a tensor of the wrong shape is excluded from both
+    /// tallies and a mismatched checkpoint reads as **full coverage**. A
+    /// hand-written `missing.is_empty()` — which is what stood here — passes it.
     pub fn load(weights: &Path, device: B::Device) -> Result<Self> {
         let cfg = MdxConfig::mdx23c_8k_instvoc_hq();
         let mut net = TfcTdfNet::<B>::new(&cfg, &device);
@@ -123,13 +130,11 @@ impl<B: BurnBackend> MdxSeparator<B> {
             .load_pytorch(weights)
             .map_err(|e| anyhow::anyhow!("{e}"))
             .with_context(|| format!("loading {}", weights.display()))?;
-        anyhow::ensure!(
-            applied.missing.is_empty() && !applied.applied.is_empty(),
-            "{} is not an MDX23C checkpoint: {} tensors applied, {} missing",
-            weights.display(),
-            applied.applied.len(),
-            applied.missing.len()
-        );
+        burn_kit::check_coverage(
+            &format!("separation weights {}", weights.display()),
+            &applied,
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
         tracing::info!(
             "separation weights: {} applied / {} missing / {} unused",
             applied.applied.len(),

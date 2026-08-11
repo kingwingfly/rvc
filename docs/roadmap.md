@@ -21,6 +21,8 @@ there; a choice still open belongs here.
 - [Exporting a fine-tuned ContentVec or RMVPE](#exporting-a-fine-tuned-contentvec-or-rmvpe)
 - [The duplicated `session()` builder](#the-duplicated-session-builder)
 - [The RVC 2.3 mel floor](#the-rvc-23-mel-floor)
+- [Separation is stereo-native and speech is not](#separation-is-stereo-native-and-speech-is-not)
+- [`preprocess diarize` without a reference](#preprocess-diarize-without-a-reference)
 
 ## `translate` — the missing pipeline stage
 
@@ -231,3 +233,62 @@ is the other engine's regression risk.
 *Note the linear side is already finer than either release.* This repo uses 1e-9
 where 2.2 used 1e-6 and 2.3 uses 2e-7, so only the mel floor is actually in
 question.
+
+## Separation is stereo-native and speech is not
+
+`preprocess separate` runs MDX23C, which reaches 15–20 dB of bed removal on a
+song and **5–6.5 dB** on the material this toolkit is actually for: a person
+talking over somebody else's music. The stems still buy far more than that
+number suggests — a mixture with a continuous bed has no silence to cut on, so
+the difference between "one clip holding a minute" and "twelve holding
+sentences" is the difference between a corpus and a file. But the bed is
+attenuated, not gone, and any consumer should expect that.
+
+*Why the obvious explanation is the wrong one.* The model eats a stereo complex
+STFT and finds a centre-panned vocal by where it sits in the field, so the first
+guess is that a near-mono stream starves it of its cue. That guess was measured
+and is mostly wrong: on the 19.8-minute stream this was read on, the side
+channel sits 14–19 dB under the mid — so the cue really is mostly absent — but
+folding to true mono and re-running costs only **1.4 dB** (6.5 → 5.1). What is
+left is the training distribution: it learned *sung* vocals inside real
+productions, and a speaking voice is not one. The practical corollary is worth
+having: **a mono corpus loses almost nothing here.**
+
+*So what would actually move it* is a separator trained on speech-over-music
+rather than a better use of the stereo field — which means a different
+checkpoint, and possibly a different architecture, not a change to `burn-mdx`.
+Nothing in this repo blocks that: `burn_mdx::MdxConfig` already describes the
+family by shape, and `examples/keys` reads a new checkpoint's architecture off
+its tensors. What blocks it is that no such published checkpoint has been
+identified.
+
+*And the measurement is content-sensitive*, which is the thing not to
+re-derive: the same stems read at a 250 ms gap window give 6.5 dB and at a
+one-second window give 2.1 dB and a verdict that **inverts**, because a
+between-sentence gap is a few hundred milliseconds and at one second no "quiet"
+frame is speech-free. Any future comparison has to pin the window or it is not
+comparing anything.
+
+## `preprocess diarize` without a reference
+
+`diarize` is target-speaker extraction: `--reference` is required, and there is
+no mode that discovers how many speakers a recording holds. That is the useful
+half first — somebody pulling their own speech out of their own stream *has* a
+clean sample of themselves, and matching one known voice is far more robust than
+clustering — but it is a genuine gap rather than a statement, unlike `seedvc`'s
+missing `train`.
+
+*What blocks it* is not the embedding, which already exists in `burn-campplus`
+and already separates speakers well enough to threshold. It is that clustering
+needs a number of speakers or a stopping rule, and every cheap answer
+(agglomerative with a distance cutoff, say) reintroduces exactly the calibration
+problem `--threshold` solves by being handed a reference. Worse, the
+calibration would be *per recording* rather than per model: what CAM++'s known
+failure mode keys on is the channel and the room, which is why two clips of one
+speaker from one session score 0.87–0.90 while the same speaker across sessions
+scores 0.36–0.78 — a spread wider than the gap between speakers.
+
+*So the honest shape*, if it is built, is clustering that reports its own
+confidence and refuses rather than guessing when the modes overlap — the same
+thing `preprocess-core`'s `examples/timbre` already does when it prints a gap
+that does not exist.

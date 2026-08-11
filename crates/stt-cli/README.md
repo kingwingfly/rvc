@@ -63,7 +63,8 @@ that window instead of being balanced across the whole run.
 `stt --help` lists every flag with its default. What is worth knowing beyond
 that is **segmentation**, because Whisper handed a long quiet stretch invents
 fluent sentences to fill it and nothing in the output says so. The slicer
-([`audio-kit`](../audio-kit/src/slice.rs), shared with `rvc preprocess`) cuts
+([`audio-kit`](../audio-kit/src/slice.rs), shared with
+[`preprocess clip`](../preprocess-cli/README.md)) cuts
 only where audio is both below `--silence-db` *and* quiet for longer than
 `--min-silence`, so soft breathy tails stay inside their segment. Lower the floor
 (`--silence-db=-50`) when soft speech is being cut into fragments; raise
@@ -199,5 +200,6 @@ rather than new network code.
 
 - [repository README](../../README.md) — what `voice` is and how the engines compose
 - [`docs/setup.md`](../../docs/setup.md) — ffmpeg, ONNX Runtime, LibTorch
-- [`rvc`](../rvc-cli/README.md) and [`tts`](../tts-cli/README.md) — the other two engines
+- [`rvc`](../rvc-cli/README.md), [`tts`](../tts-cli/README.md) and [`seedvc`](../seedvc-cli/README.md) — the other three engines
+- [`preprocess`](../preprocess-cli/README.md) — corpus preparation, and where `stt` fits in it: it writes the transcript beside each clip
 - [`CLAUDE.md`](../../CLAUDE.md) — why the code is shaped the way it is

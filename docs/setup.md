@@ -1,6 +1,6 @@
-# Setup — shared by `rvc`, `stt`, `tts`, `seedvc` and `voice`
+# Setup — shared by `rvc`, `stt`, `tts`, `seedvc`, `preprocess` and `voice`
 
-All five binaries find their dependencies the same way, take the same
+All six binaries find their dependencies the same way, take the same
 `--backend` and `--device` spellings, and cache downloaded models in the same
 place. Driving them *live* — the sample rate at each end of a pipe, playback,
 virtual microphones — is [`realtime.md`](realtime.md).
@@ -111,12 +111,13 @@ LD_LIBRARY_PATH=$PWD/libtorch/lib cargo test --workspace
 export ORT_DYLIB_PATH=/usr/lib/libonnxruntime.so
 export LIBTORCH=$PWD/libtorch        # omit to build without the tch backend
 
-cargo build --release                # all five binaries
-cargo build --release -p rvc-cli     # just `rvc`
-cargo build --release -p stt-cli     # just `stt`
-cargo build --release -p tts-cli     # just `tts`
-cargo build --release -p seedvc-cli  # just `seedvc`
-cargo build --release -p voice-cli   # just `voice`
+cargo build --release                    # all six binaries
+cargo build --release -p rvc-cli         # just `rvc`
+cargo build --release -p stt-cli         # just `stt`
+cargo build --release -p tts-cli         # just `tts`
+cargo build --release -p seedvc-cli      # just `seedvc`
+cargo build --release -p preprocess-cli  # just `preprocess`
+cargo build --release -p voice-cli       # just `voice`
 ```
 
 The backend features are all on by default, so one binary carries every runtime
@@ -132,8 +133,12 @@ cargo build --release -p stt-cli --no-default-features --features cuda,tch,wgpu
 
 `stt-cli`, `tts-cli` and `seedvc-cli` have `cuda`, `tch`, `wgpu` and `onnx`;
 `rvc-cli` has the first three only, because `rvc-core` depends on `ort`
-unconditionally and so there is nothing to gate.
-`voice-cli` re-declares the same four names and forwards each to the engines
+unconditionally and so there is nothing to gate. `preprocess-cli` has the first
+three too, for a different reason that is worth not misreading as an omission:
+its two models are published as PyTorch checkpoints and nothing in this
+workspace exports either, so `--backend onnx` is refused *with that reason*
+rather than pointing at a feature flag that could not exist.
+`voice-cli` re-declares the same four names and forwards each to the binaries
 that have it, so one `--no-default-features --features cuda` line means the same
 thing for every binary.
 
@@ -222,7 +227,8 @@ Two kinds of weight are downloaded, and they land in different places because
 different things read them.
 
 **Inference assets** — ContentVec, RMVPE, Whisper, the prosody encoder,
-cnhubert, `s1*.ckpt`, `s2G*.pth`, and Seed-VC's four networks — are shared
+cnhubert, `s1*.ckpt`, `s2G*.pth`, Seed-VC's four networks, and the two
+`preprocess` fetches (MDX23C for `separate`, CAM++ for `diarize`) — are shared
 across runs and projects, so they go to a **cache**, resolved in this order:
 
 1. `--cache-dir`,
@@ -248,6 +254,13 @@ Every engine will fetch what it needs on its first run, and each has a
 filled, which are what that engine's own weight flags take, so this is also how a
 machine that will be offline later is set up. There is deliberately no top-level
 `voice download`: naming the engine is what says whose gigabytes are being spent.
+
+**`preprocess` has no `download`, and that is the same rule rather than a gap.**
+A `download` fetches what a default bare invocation would fetch on demand, and
+`preprocess` has no bare invocation to have a default — six of its eight stages
+run no model at all. `separate` (448 MB) and `diarize` (28 MB) fetch on their
+first run like everything else; `--model` on either points at a copy you already
+have.
 
 **Training warm-start bases** — RVC's `f0G48k.pth`/`f0D48k.pth` and
 GPT-SoVITS's `s2D*.pth` — are shared in the same way, so they go to

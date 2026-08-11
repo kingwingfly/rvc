@@ -213,7 +213,17 @@ loaded and immediately overwritten. See
 
 ## Corpus preparation
 
-**RVC**: `rvc preprocess raw/*.mp3 -o clips/` first, always. `sample_batch`
+**Both trainers eat a corpus that `preprocess` produced, and it is its own
+binary.** `rvc preprocess` and `tts preprocess` existed and are **gone** —
+removed rather than deprecated, so an old command line fails to parse rather
+than doing something else. What replaced them is not a rename: corpus
+preparation grew stages that run models (source separation, speaker
+diarisation), which is more than a subcommand on two engines that neither of
+them is about. Every flag and default is
+[`crates/preprocess-cli/README.md`](../crates/preprocess-cli/README.md); what
+follows is only why a trainer cares.
+
+**RVC**: `preprocess clip raw/*.mp3 -o clips/` first, always. `sample_batch`
 draws random 0.48 s windows uniformly across each file, so raw recordings full
 of between-sentence dead air collapse the generator to silence. The slicer
 (`audio_kit::slice`) cuts on long silent gaps only — energy is used to *find*
@@ -221,12 +231,24 @@ gaps, never to gate quiet-but-present sound, so breathy and whispered passages
 survive. `--silence-db` lowers the floor, `--min-silence` sets how long a gap
 must last to be a cut, and neither ever splits a sentence.
 
-**GPT-SoVITS**: a corpus is `<stem>.wav` + `<stem>.txt` pairs. `tts preprocess`
-— the same slicer, from the same crate — cuts raw recordings into per-sentence
+**GPT-SoVITS**: a corpus is `<stem>.wav` + `<stem>.txt` pairs. `preprocess clip`
+— the same slicer, run the same way — cuts raw recordings into per-sentence
 clips, and `stt` writes the transcript beside each. Preparation runs cnhubert and the quantiser over
 each clip to produce the 25 Hz semantic tokens both stages agree on, and it is
 the expensive half of a fine-tune — which is why `--stage s1|s2|both` prepares
 exactly once and each stage then writes its own checkpoint family.
+
+**When the source is a stream rather than a studio take**, slicing is not the
+first step and running it first tells you nothing about why. `audio_kit::slice`
+cuts on silence, and a continuous music bed means the recording has none — the
+whole file comes back as a handful of minutes-long clips, from which
+`sample_batch` then draws windows of somebody else's music. `preprocess analyze`
+is what reports that condition rather than leaving it to be inferred: it runs
+the slicer at the floor you asked for *and* at one measured from the recording,
+and says outright when no floor can work. The fix is `preprocess separate` to
+take the bed off, then `preprocess diarize` if a second voice is in it, and
+`clip` last. The stages compose because each one reads audio files and writes
+audio files.
 
 ## Stability knobs
 

@@ -41,6 +41,21 @@
 //! gate or a fused bias is not content-dependent and does not spare the
 //! confident frames.
 //!
+//! **Check the jointly-voiced count before reading anything else**, and this is
+//! the trap the numbers above do not show. Re-run over five clips of a *stream*
+//! recording — speech over a music bed, rather than the close-mic corpus — the
+//! medians came out 0.0033, 0.0035, 0.041 and 1.71 Hz on four of them, and
+//! **161.6 Hz with correlation −0.58** on the fifth. That clip is not a
+//! regression: it has **8 jointly voiced frames out of 201**, so its "median" is
+//! the fourth-largest of eight differences over frames where neither runtime was
+//! confident there was pitch at all. A clip that is mostly music, breath or
+//! silence has nothing for this comparison to be about.
+//!
+//! The rule that follows is worth stating because the summary line invites the
+//! opposite reading: **a median over fewer than a few dozen voiced frames is
+//! noise, and a negative correlation beside a tiny count is the tell.** Compare
+//! clips with speech in them, and read `voiced` first.
+//!
 //! ```sh
 //! cargo run -p rvc-core --features tch --example f0_runtimes -- \
 //!     rmvpe.onnx rmvpe.pt vec-768-layer-12.onnx clip.wav

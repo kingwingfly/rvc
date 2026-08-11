@@ -149,7 +149,7 @@ silent fallback.
 
 `--device auto|cpu|gpu|gpu:N|mps|vulkan` picks *which* device inside the chosen
 backend (`cuda`/`cuda:N` are accepted spellings of `gpu`). The spellings are
-identical on all five binaries — see
+identical on all six binaries — see
 [`docs/setup.md`](../../docs/setup.md#backends-and-devices).
 
 **This is not realtime today.** Measured on an RTX 2060 with
@@ -264,4 +264,5 @@ arithmetic and the crossfade are tested directly.
 - [`docs/setup.md`](../../docs/setup.md) — ffmpeg, LibTorch, backends and devices
 - [`docs/seedvc-architecture.pdf`](../../docs/seedvc-architecture.pdf) — what each of the six networks computes
 - [`rvc`](../rvc-cli/README.md), [`stt`](../stt-cli/README.md) and [`tts`](../tts-cli/README.md) — the other three engines
+- [`preprocess`](../preprocess-cli/README.md) — corpus preparation. `seedvc` needs no corpus, but its `diarize` stage runs the same CAM++ timbre encoder this engine conditions on
 - [`CLAUDE.md`](../../CLAUDE.md) — why the code is shaped the way it is

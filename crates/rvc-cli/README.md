@@ -18,7 +18,6 @@ describes a binary rather than an engine: use `voice completions` there.
 | `rvc -m <weights> …` | **the bare invocation is the filter** — raw f32le mono PCM on stdin, converted PCM on stdout |
 | `rvc convert <files…>` | batch-convert files to WAV |
 | `rvc train <corpus…>` | fine-tune a generator on a target voice |
-| `rvc preprocess <files…>` | slice a corpus into clean per-sentence clips |
 | `rvc download` | prefetch what a conversion fetches on its first run |
 | `rvc completions <shell>` | completion script for bash, zsh, fish, powershell or elvish |
 
@@ -35,11 +34,11 @@ leaves breaths, which sit above it. `--denoise-strength`, `--denoise-patch` and
 of GPU time and the corpus that made it may be gone, so it is never clobbered
 silently.
 
-**`--silence-db` and `--min-silence`** are what you reach for in `preprocess`.
-The first is the energy floor — lower it (e.g. `-50`) to keep the very softest
-passages, raise it to strip harder. The second is how long a quiet gap must last
-to count as a sentence boundary, so a shorter internal pause never splits a
-sentence. Listen to a few output clips before committing a training run to them.
+**`rvc preprocess` is gone**, and it was removed rather than deprecated, so an
+old command line fails to parse rather than quietly doing something else.
+Corpus preparation is the [`preprocess`](../preprocess-cli/README.md) binary now
+— `preprocess clip` is the slicer this used to be, and `--silence-db` and
+`--min-silence` are still the two knobs you reach for.
 
 ## Backends
 
@@ -120,7 +119,7 @@ between-sentence dead-air teach the generator to output silence. Energy finds
 soft breathy passages survive the slicing.
 
 ```sh
-rvc preprocess raw/*.mp3 -o clips/     # or a directory: rvc preprocess raw/ -o clips/
+preprocess clip raw/*.mp3 -o clips/    # or a directory: preprocess clip raw/ -o clips/
 rvc train clips/*.wav -o models/voice --backend tch
 
 # continue a stopped run; -y because models/voice.safetensors already exists

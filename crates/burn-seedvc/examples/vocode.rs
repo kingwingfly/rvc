@@ -24,6 +24,27 @@
 //! cargo run -p burn-seedvc --example vocode -- bigvgan_generator.pt clip.raw out.raw
 //! ffmpeg -f f32le -ac 1 -ar 22050 -i out.raw out.wav
 //! ```
+//!
+//! # What it reads on this repository's own corpus
+//!
+//! 3 s of close-mic speech from `dataset/`, `nvidia/bigvgan_v2_22khz_80band_256x`
+//! on the `ndarray` backend:
+//!
+//! ```text
+//! weights : 783 applied, 0 missing, 0 unused
+//! r vs source      : 0.9792
+//! r vs shuffled    : 0.0957   (chance baseline)
+//! spectral flatness: 0.2761   (1.0 would be white noise)
+//! ```
+//!
+//! **The chance baseline is what makes the first number mean anything**, and it
+//! is why the shuffle is printed rather than assumed: an envelope correlation
+//! taken against a signal of the same overall shape can be high for reasons that
+//! have nothing to do with the vocoder. 0.98 against 0.10 is the port working.
+//!
+//! Expect this to be slow off a GPU — 3 s of audio is a couple of minutes on
+//! `ndarray`, which is fine for a check that is run when the model changes and
+//! not in a loop.
 
 #[path = "common/mod.rs"]
 mod common;

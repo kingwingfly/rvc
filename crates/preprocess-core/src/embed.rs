@@ -98,14 +98,14 @@ impl<B: BurnBackend> BurnEmbedder<B> {
         // Read rather than glanced at: a renamed tensor leaves its module at the
         // values `new` initialised, and a speaker encoder running on those still
         // returns finite, repeatable, entirely meaningless vectors.
-        if !applied.missing.is_empty() {
-            bail!(
-                "CAM++ checkpoint {} is missing {} tensors this port needs, first few: {:?}",
-                campplus.display(),
-                applied.missing.len(),
-                &applied.missing[..applied.missing.len().min(5)],
-            );
-        }
+        //
+        // `check_coverage` rather than a `missing.is_empty()` written here,
+        // because **`errors` is not covered by `missing`**: `burn_store`'s
+        // applier counts a path as missing only when it was visited and *not*
+        // errored, so a tensor of the wrong shape falls out of both tallies and
+        // a mismatched checkpoint reads as full coverage.
+        burn_kit::check_coverage(&format!("CAM++ weights {}", campplus.display()), &applied)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         tracing::debug!(
             applied = applied.applied.len(),
             unused = applied.unused.len(),
