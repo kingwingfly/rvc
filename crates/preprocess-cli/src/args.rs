@@ -58,6 +58,11 @@ pub enum PreprocessCommand {
     // Same placement and the same reason as `separate`'s above.
     #[command(long_about = DIARIZE_LONG_ABOUT)]
     Diarize(DiarizeArgs),
+    /// Report what a corpus is — noise floor, SNR, peaks, silence — and what
+    /// to set the other stages to.
+    // Same placement and the same reason as the two above.
+    #[command(long_about = ANALYZE_LONG_ABOUT)]
+    Analyze(AnalyzeArgs),
 }
 
 /// What every stage takes: files to read and a directory to write into.
@@ -91,14 +96,15 @@ impl IoArgs {
     }
 }
 
-/// Slice a corpus into clean per-utterance clips.
-#[derive(Debug, Args)]
-pub struct ClipArgs {
-    #[command(flatten)]
-    pub io: IoArgs,
-    /// Directory to write the sliced `<stem>_<NNN>.wav` clips into.
-    #[arg(short = 'o', long, default_value = "dataset")]
-    pub output_dir: PathBuf,
+/// Where a slicer cuts.
+///
+/// Flattened by `clip`, which does the cutting, and by `analyze`, which reports
+/// what that cutting would produce. One definition for the same reason `IoArgs`
+/// is one: the numbers `analyze` prints have to come from the very knobs `clip`
+/// will act on, and two copies of five defaults would drift the first time one
+/// of them moved.
+#[derive(Debug, Args, Clone)]
+pub struct SliceArgs {
     /// Energy floor in dBFS: audio quieter than this counts as between-sentence
     /// dead-air. Lower it (e.g. -50) to keep the very softest passages —
     /// energy is used only to find silent gaps, never to gate quiet content.
@@ -119,15 +125,11 @@ pub struct ClipArgs {
     /// onsets and soft breathy tails are not clipped.
     #[arg(long, default_value_t = 0.15)]
     pub pad: f32,
-    /// Peak-normalize each written clip to ~0.95 full-scale.
-    #[arg(long)]
-    pub normalize: bool,
 }
 
-impl ClipArgs {
+impl SliceArgs {
     /// Reject a slicer configuration that would silently produce no clips.
     pub fn verify(&self) -> Result<()> {
-        self.io.verify()?;
         anyhow::ensure!(
             self.silence_db <= 0.0,
             "--silence-db is dBFS, so it must be at most 0 (full scale); {} would \
@@ -152,17 +154,45 @@ impl ClipArgs {
         Ok(())
     }
 
+    /// Where these flags say to cut.
+    pub fn options(&self) -> audio_kit::SliceOptions {
+        audio_kit::SliceOptions {
+            silence_db: self.silence_db,
+            min_silence: self.min_silence,
+            min_clip: self.min_clip,
+            max_clip: self.max_clip,
+            pad: self.pad,
+        }
+    }
+}
+
+/// Slice a corpus into clean per-utterance clips.
+#[derive(Debug, Args)]
+pub struct ClipArgs {
+    #[command(flatten)]
+    pub io: IoArgs,
+    /// Directory to write the sliced `<stem>_<NNN>.wav` clips into.
+    #[arg(short = 'o', long, default_value = "dataset")]
+    pub output_dir: PathBuf,
+    #[command(flatten)]
+    pub slice: SliceArgs,
+    /// Peak-normalize each written clip to ~0.95 full-scale.
+    #[arg(long)]
+    pub normalize: bool,
+}
+
+impl ClipArgs {
+    /// Reject a slicer configuration that would silently produce no clips.
+    pub fn verify(&self) -> Result<()> {
+        self.io.verify()?;
+        self.slice.verify()
+    }
+
     /// The stage settings these flags describe.
     pub fn options(&self) -> preprocess_core::clip::ClipOptions {
         preprocess_core::clip::ClipOptions {
             sr: self.io.sr,
-            slice: audio_kit::SliceOptions {
-                silence_db: self.silence_db,
-                min_silence: self.min_silence,
-                min_clip: self.min_clip,
-                max_clip: self.max_clip,
-                pad: self.pad,
-            },
+            slice: self.slice.options(),
             normalize: self.normalize,
         }
     }
@@ -481,6 +511,104 @@ impl DiarizeArgs {
             hop: self.hop,
             threshold: self.threshold,
             min_segment: self.min_segment,
+        }
+    }
+}
+
+/// What `analyze --help` says beyond its one-line summary.
+///
+/// Same placement and the same reason as [`SEPARATE_LONG_ABOUT`]. What it has
+/// to say that the others do not is the *negative* space — no model, no
+/// backend, no download — because that is what makes it free to run on a whole
+/// corpus before deciding anything, and nothing else in this binary is.
+const ANALYZE_LONG_ABOUT: &str = "\
+Measure a corpus and report what it is: noise floor, speech level, SNR, peak, \
+how much of it is dead air, and what `clip` would cut it into.
+
+This stage is MODEL-FREE. No --backend, no --device, no weights, no downloads — \
+it decodes the audio and does arithmetic, so it runs over a whole corpus at \
+decode speed and can be run before anything is decided.
+
+It writes nothing. The report goes to stdout: --format text to read, --format \
+json to drive something with. Per-file lines are opt-in (--per-file); the \
+corpus summary is the answer to 'is this corpus usable', and comes last.
+
+The suggested --silence-db is derived from the recordings' own quiet frames, \
+and it is CHECKED rather than asserted: the slicer is run twice, once at the \
+floor you passed and once at the measured one, and both verdicts are reported. \
+That is what makes the last line worth acting on.
+
+If a recording holds no dead air at either floor, no --silence-db can help — \
+the quiet is not there to find. Speech over a continuous music bed is that \
+shape, and `separate` is what removes the bed; a lower floor cannot. This stage \
+says so rather than suggesting a threshold that could not work.
+
+There is no loudness (LUFS) column: ffmpeg reports that through its log rather \
+than through the audio, and peak, floor and SNR answer the same question here.";
+
+/// How the report is printed.
+///
+/// Spelled `--format`, and its text arm spelled `text`, to match the one other
+/// command in this workspace that has a choice of output shape (`stt`). `json`
+/// rather than `jsonl` because this stage's answer is one document — a corpus
+/// summary with its files inside it — and not a stream of records.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum Format {
+    /// Aligned columns for a terminal.
+    #[default]
+    Text,
+    /// One JSON document: `{summary, files}`.
+    Json,
+}
+
+/// Report what a corpus is.
+///
+/// `input` and `--sr` are declared here rather than flattened from [`IoArgs`],
+/// for `separate`'s reason mirrored: that struct's `--sr` documents "the sample
+/// rate of the written audio", and this stage writes none. What the rate
+/// decides here is the grid the measurement is taken on.
+#[derive(Debug, Args)]
+pub struct AnalyzeArgs {
+    /// Input audio files and/or directories (directories are expanded
+    /// recursively to their audio files: mp3, wav, flac, m4a, ogg, opus, aac,
+    /// wma).
+    #[arg(required = true)]
+    pub input: Vec<PathBuf>,
+    /// Sample rate to decode at for the measurement. Nothing is written, so
+    /// this only sets the grid; matching the rate you will train at is what
+    /// makes the report describe the audio a trainer will see.
+    #[arg(long, alias = "model-sr", default_value_t = 48000)]
+    pub sr: u32,
+    /// The slicer settings to report against: the clip counts, the length
+    /// histogram and the silence ratio are what `clip` would produce from these
+    /// very flags.
+    #[command(flatten)]
+    pub slice: SliceArgs,
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = Format::Text)]
+    pub format: Format,
+    /// Print a line per file as well as the corpus summary. The summary is the
+    /// answer for a corpus of hundreds; this is for the handful you then go
+    /// looking at.
+    #[arg(long)]
+    pub per_file: bool,
+}
+
+impl AnalyzeArgs {
+    /// Reject a configuration whose report would describe nothing.
+    pub fn verify(&self) -> Result<()> {
+        anyhow::ensure!(self.sr > 0, "--sr must be positive");
+        // The same checks `clip` makes, because these are the same flags and
+        // the report would otherwise print what an invalid `clip` invocation
+        // "would produce".
+        self.slice.verify()
+    }
+
+    /// The stage settings these flags describe.
+    pub fn options(&self) -> preprocess_core::analyze::AnalyzeOptions {
+        preprocess_core::analyze::AnalyzeOptions {
+            sr: self.sr,
+            slice: self.slice.options(),
         }
     }
 }

@@ -25,11 +25,16 @@
 //! stages composable: the output of one is a legitimate input to the next.
 //!
 //! Each stage is one module with one per-file function ([`clip::file`],
-//! [`denoise::file`], [`separate::file`], [`diarize::file`]). Driving the batch
-//! — tolerating a file that will not decode, tallying what happened — belongs to
-//! the caller, because what is worth reporting differs per stage: `clip` counts
-//! clips against input duration, `denoise` writes exactly one file per input,
-//! `diarize` counts the windows it kept against the ones it scored.
+//! [`denoise::file`], [`separate::file`], [`diarize::file`], [`analyze::file`]).
+//! Driving the batch — tolerating a file that will not decode, tallying what
+//! happened — belongs to the caller, because what is worth reporting differs per
+//! stage: `clip` counts clips against input duration, `denoise` writes exactly
+//! one file per input, `diarize` counts the windows it kept against the ones it
+//! scored.
+//!
+//! [`analyze`] is the one stage that writes no audio at all, and so the one
+//! that takes no output directory: it reports what a recording *is*, which is
+//! what every other stage's knobs are a guess at.
 //!
 //! # Two stages run a model, and neither pays for the other's
 //!
@@ -60,6 +65,7 @@
 //! separator's next to `separate` would make the two match; that is a tidy for
 //! whoever owns that stage rather than something to do to it from here.
 
+pub mod analyze;
 pub mod clip;
 pub mod denoise;
 pub mod diarize;

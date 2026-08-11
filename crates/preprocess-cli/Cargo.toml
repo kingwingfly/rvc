@@ -45,6 +45,11 @@ hub-kit.workspace = true
 tokio = { workspace = true }
 clap.workspace = true
 anyhow.workspace = true
+# `analyze --format json` only. Its report is a nested document with two
+# float-heavy tables in it, which is past where hand-rolled escaping (`stt`'s,
+# for one string field) stays the cheaper answer. The stages' own types derive
+# nothing: the document is built here, beside the other formatter.
+serde_json.workspace = true
 
 [build-dependencies]
 rpath-kit.workspace = true

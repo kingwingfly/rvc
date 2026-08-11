@@ -48,15 +48,18 @@ pub async fn run(cli: PreprocessCli) -> Result<()> {
         PreprocessCommand::Denoise(a) => commands::denoise::run(a).await,
         PreprocessCommand::Separate(a) => commands::separate::run(a).await,
         PreprocessCommand::Diarize(a) => commands::diarize::run(a).await,
+        PreprocessCommand::Analyze(a) => commands::analyze::run(a).await,
     }
 }
 
 /// Initialise tracing.
 ///
-/// Everything goes to stderr, and there is nothing to route around: no stage
-/// here writes data to stdout, and none of them raises a dashboard. Its own
-/// function all the same, so `preprocess` and `voice` cannot disagree about it
-/// the moment one of those stops being true.
+/// Everything goes to stderr, and there is a reason that matters now rather
+/// than in principle: `analyze --format json` puts one parseable document on
+/// stdout, and a log line landing beside it would corrupt the document in the
+/// consumer rather than here. No stage raises a dashboard, so there is nothing
+/// else to route around. Its own function all the same, so `preprocess` and
+/// `voice` cannot disagree about it.
 pub fn init_logging() {
     cli_kit::init_logging(None);
 }
