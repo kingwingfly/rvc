@@ -44,6 +44,35 @@
 //! What works is either genuinely different recordings of a speaker you know, or
 //! — as a lower bound that needs no second speaker at all — the two halves of one
 //! recording, which should sit near 0.85.
+//!
+//! # What it reads here, and how narrow the gap really is
+//!
+//! `campplus_cn_common.bin` loads at **815 applied, 0 missing, 122 unused** —
+//! the 122 being one `num_batches_tracked` per `BatchNorm`, which is a training
+//! statistic no forward pass reads.
+//!
+//! Two 8 s windows of one speaker taken from the same recording, against a
+//! third-party clip and against a music-only stem:
+//!
+//! ```text
+//!           [0]     [1]     [2]     [3]
+//! [0]    1.000   0.866   0.729   0.651
+//! [1]    0.866   1.000   0.549   0.579
+//! [2]    0.729   0.549   1.000   0.721
+//! [3]    0.651   0.579   0.721   1.000
+//! ```
+//!
+//! `[0]`/`[1]` are the same speaker and land at **0.866**, which is the 0.85
+//! this page predicts. But read the rest before trusting a threshold: the
+//! cross-speaker entries run **0.55–0.73**, and `[3]` is *music with no voice in
+//! it at all* — yet it sits at 0.65–0.72 against real speech, higher than one
+//! genuine cross-speaker pair.
+//!
+//! **So the absolute value carries much less than the ordering does.** Anything
+//! built on this — `preprocess diarize` above all — has to compare a window
+//! against a *reference of the target*, and take the margin, rather than test a
+//! cosine against a fixed number. A threshold tuned on clean speech will admit a
+//! backing track.
 
 #[path = "common/mod.rs"]
 mod common;
