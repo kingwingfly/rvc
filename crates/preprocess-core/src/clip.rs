@@ -159,7 +159,7 @@ mod tests {
 
         let out = dir.join("out");
         std::fs::create_dir_all(&out).expect("create out");
-        let files = crate::plan(&[dir.clone()], &out).expect("plan");
+        let files = crate::plan(std::slice::from_ref(&dir), &out).expect("plan");
         assert_eq!(files.len(), 2);
 
         let opts = ClipOptions {

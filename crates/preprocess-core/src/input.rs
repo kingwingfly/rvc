@@ -184,7 +184,7 @@ mod tests {
         // A previous run's clips, sitting inside the input tree.
         touch(&out.join("a_000.wav"));
 
-        let files = plan(&[dir.clone()], &out).expect("plan");
+        let files = plan(std::slice::from_ref(&dir), &out).expect("plan");
         assert_eq!(
             files.len(),
             1,
@@ -196,7 +196,7 @@ mod tests {
         // directory exists. Callers create it first; pinned here because
         // nothing else would notice the ordering dependency.
         let missing = dir.join("not-yet");
-        let files = plan(&[dir.clone()], &missing).expect("plan");
+        let files = plan(std::slice::from_ref(&dir), &missing).expect("plan");
         assert_eq!(files.len(), 2);
     }
 
@@ -210,7 +210,7 @@ mod tests {
         let out = dir.join("out");
         std::fs::create_dir_all(&out).expect("create out");
 
-        let bases: Vec<_> = plan(&[dir.clone()], &out)
+        let bases: Vec<_> = plan(std::slice::from_ref(&dir), &out)
             .expect("plan")
             .into_iter()
             .map(|f| f.base)
