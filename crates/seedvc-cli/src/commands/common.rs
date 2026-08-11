@@ -144,17 +144,19 @@ pub async fn load_model(
         })?
     };
 
-    let analysed = seedvc_core::reference::analyse(model.as_ref(), reference)
+    let analysed = seedvc_core::reference::analyse(model.as_ref(), reference, opts.reference_secs)
         .await
         .with_context(|| format!("analysing the reference {}", reference.display()))?;
     // The frame count is worth logging because it is the number that decides how
     // much source fits in a chunk — a long reference silently buys short chunks,
-    // and this is where that becomes visible.
+    // and this is where that becomes visible. It is also the reading that says
+    // whether `--reference-secs` bit: a clip under the cap is unchanged by it.
     tracing::info!(
-        "reference {}: {} mel frames ({:.2} s)",
+        "reference {}: {} mel frames ({:.2} s, capped at {} s)",
         reference.display(),
         analysed.frames,
         analysed.frames as f32 / model.config().frame_rate(),
+        opts.reference_secs,
     );
 
     Ok((model, analysed))

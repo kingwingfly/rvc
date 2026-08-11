@@ -18,15 +18,15 @@
 //! through is a window rather than a filter, so nothing can be emitted until a
 //! whole chunk exists: at [`StreamParams::realtime`] that is 2.2 s of buffering
 //! plus one chunk of model time. `--chunk` is only how much stdin is read at a
-//! time and does not move it; the window arithmetic that does is
-//! [`seedvc_core::stream`]'s. On the hardware this was developed against the
-//! model is slower than realtime, so a live pipe falls behind — what the preset
-//! buys is that the audio which does come out comes out in steps rather than
-//! after the whole recording.
+//! time and does not move it — **`--block-frames` is the flag that does**, and
+//! the arithmetic behind it is [`seedvc_core::stream`]'s. On the hardware this
+//! was developed against the model is slower than realtime, so a live pipe falls
+//! behind — what the preset buys is that the audio which does come out comes out
+//! in steps rather than after the whole recording.
 
 use anyhow::{Context, Result};
 use futures::StreamExt;
-use seedvc_core::{CONTENT_SR, Converter, StreamParams, convert_stream};
+use seedvc_core::{CONTENT_SR, Converter, convert_stream};
 use tokio::io::{AsyncWriteExt, BufWriter};
 
 use crate::args::FilterArgs;
@@ -40,12 +40,10 @@ pub async fn run(args: FilterArgs) -> Result<()> {
     let reference = args.models.reference()?;
 
     let (model, analysed) = load_model(&args.models, args.backend, args.device).await?;
-    let converter = Converter::new(
-        model,
-        analysed,
-        StreamParams::realtime(),
-        args.sampler.options(),
-    )?;
+    // `Converter::new` clamps the block to what the reference left of the shared
+    // window, so a long `--reference-secs` quietly lowers whatever was asked for
+    // here — which is the arithmetic both flags are dials on.
+    let converter = Converter::new(model, analysed, args.params(), args.sampler.options())?;
     let out_sr = converter.output_sr();
     tracing::info!(
         "{}: stdin f32le mono @{CONTENT_SR} Hz -> stdout f32le mono @{out_sr} Hz",

@@ -48,6 +48,12 @@ fn main() {
 
     let backend = flag(&mut args, "backend").unwrap_or_else(|| "tch".into());
     let device = flag(&mut args, "device").unwrap_or_else(|| "cpu".into());
+    // The one number a caller here is most likely to want to move, because it
+    // decides how much source fits in a chunk — see `seedvc_core::reference`.
+    let reference_secs: f32 = parse(
+        flag(&mut args, "reference-secs"),
+        seedvc_core::reference::REFERENCE_SECONDS,
+    );
     let opts = ConvertOptions {
         sampler: Sampler {
             steps: parse(flag(&mut args, "steps"), Sampler::default().steps),
@@ -84,7 +90,8 @@ fn main() {
     else {
         eprintln!(
             "usage: convert [--backend tch] [--device cpu] [--steps 30] [--guidance 0.7] \
-             [--length-adjust 1.0] [--seed 0] --dit <ckpt.pth> --campplus <campplus_cn_common.bin> \
+             [--length-adjust 1.0] [--seed 0] [--reference-secs 25] \
+             --dit <ckpt.pth> --campplus <campplus_cn_common.bin> \
              --bigvgan <bigvgan_generator.pt> --content <whisper-small/model.safetensors> \
              --reference <voice-to-become.wav> --input <audio-to-convert.wav> -o <out.wav>"
         );
@@ -110,11 +117,11 @@ fn main() {
         let model = load(&paths, backend, device).expect("loading the model");
 
         let started = std::time::Instant::now();
-        let reference = seedvc_core::reference::analyse(model.as_ref(), &reference)
+        let reference = seedvc_core::reference::analyse(model.as_ref(), &reference, reference_secs)
             .await
             .expect("analysing the reference");
         println!(
-            "reference: {} mel frames ({:.2} s), {:.1?}",
+            "reference: {} mel frames ({:.2} s, capped at {reference_secs} s), {:.1?}",
             reference.frames,
             reference.frames as f32 / model.config().frame_rate(),
             started.elapsed(),

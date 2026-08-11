@@ -116,22 +116,16 @@
 //! difference: the seams are phase-independent by construction.
 
 use audio_kit::Samples;
+use burn_seedvc::SeedVcConfig;
 use burn_seedvc::content::{CONTENT_STRIDE, WINDOW_SAMPLES};
 use futures::{Stream, StreamExt};
 use tokio::sync::mpsc;
 
-use crate::convert::{CONTEXT_SECONDS, ConvertOptions, OVERLAP_FRAMES, Rng, crossfade, room};
+use crate::convert::{
+    CONTEXT_SECONDS, ConvertOptions, OVERLAP_FRAMES, Rng, context_frames, crossfade, room,
+};
 use crate::error::{Error, Result};
 use crate::model::{CONTENT_SR, Model, Reference};
-
-/// Upstream's `max_context_window` at this preset — 30 s at 86.13 Hz, the same
-/// 2580 [`crate::convert`] derives from the config.
-///
-/// Written down rather than derived because a preset is an associated function
-/// with no model in hand. [`Converter::new`] computes the real number from the
-/// config it is handed and clamps to it, so this going stale would cost a clamp
-/// rather than a wrong window.
-const CONTEXT_FRAMES: usize = 2580;
 
 /// Chunk geometry, in **mel frames** at the preset's 86.13 Hz.
 ///
@@ -183,9 +177,18 @@ impl StreamParams {
     /// chunks land where [`crate::convert`] would put them for the same source:
     /// the highest-quality, highest-latency end of the same mechanism, for a
     /// caller that wants file behaviour out of a stream.
+    ///
+    /// The window is **derived from the preset's own config**, where it used to
+    /// be a literal `2580` beside the expression [`crate::convert`] computes it
+    /// with. The old reasoning was that a preset is an associated function with
+    /// no model in hand — true, and the answer is to name the preset's config
+    /// rather than to write the number down twice. `Converter::new` still clamps
+    /// to the config it is actually handed, so a model built from some other
+    /// preset gets *that* preset's window and this stays a clamp rather than a
+    /// wrong answer.
     pub fn batch() -> Self {
         Self {
-            block: CONTEXT_FRAMES,
+            block: context_frames(&SeedVcConfig::uvit_whisper_small_wavenet()),
             crossfade: OVERLAP_FRAMES,
         }
     }
@@ -683,8 +686,9 @@ mod tests {
         let reference_frames = 2153;
         // What `convert` picks for its own window is everything the reference
         // leaves; `block` is the *new* audio in a chunk, so the crossfade comes
-        // off it.
-        let room = CONTEXT_FRAMES - reference_frames;
+        // off it. Asked of the same function the batch path asks, which is what
+        // makes this test sensitive to the two windows disagreeing at all.
+        let room = context_frames(&cfg) - reference_frames;
         let params = StreamParams {
             block: room - OVERLAP_FRAMES,
             crossfade: OVERLAP_FRAMES,
