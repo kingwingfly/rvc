@@ -19,6 +19,19 @@ mod trainer;
 // the drift the settings struct was introduced to prevent.
 pub use trainer::{SEGMENT_FRAMES, WINDOW_FRAMES};
 
+/// The shortest segment or window the mel front end can transform, and so the
+/// floor both counts are refused below — see
+/// [`burn_vits::SpectralConfig::min_frames`], which owns the `n_fft`/`hop` it
+/// is derived from. Re-exported for the same reason as the two counts above: a
+/// second copy of the number in `rvc-cli` is exactly the drift to avoid.
+///
+/// **Not `dataset`'s `min_frames`**, which is the *clip*-length floor and comes
+/// from `window_frames`. Two floors, two mechanisms, and the STFT's is the one
+/// named after where it comes from.
+pub fn mel_min_frames() -> usize {
+    burn_vits::SpectralConfig::v2_48k().min_frames()
+}
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -165,6 +178,25 @@ pub fn train(req: TrainRequest) -> Result<PathBuf> {
     );
     // Reject an unusable backend before the corpus is decoded, not after.
     resolve_backend(&req)?;
+    // Same reason, and this is the boundary a caller that is not the CLI comes
+    // through: `trainer::run` subtracts these two unsigned and divides by
+    // `window_frames`, so a bad pair is a panic in arithmetic there instead of
+    // an error naming the settings. The floor is the STFT's, and it is asked
+    // for rather than written down.
+    let floor = mel_min_frames();
+    anyhow::ensure!(
+        req.settings.segment_frames >= floor,
+        "segment_frames ({}) must be at least {floor}: below that the mel front \
+         end has too little to reflect-pad and panics instead of transforming",
+        req.settings.segment_frames
+    );
+    anyhow::ensure!(
+        req.settings.window_frames >= req.settings.segment_frames,
+        "window_frames ({}) must be at least segment_frames ({}): the segment is \
+         a slice of the window",
+        req.settings.window_frames,
+        req.settings.segment_frames
+    );
 
     // A self-contained runtime drains the async decode streams; GPU training is
     // synchronous.

@@ -1448,9 +1448,39 @@ small value leaves too little input for the pad `SCALE_ALIGN` wants, on the one
 backend that aborts rather than absorbing. It does not: `--segment-frames 4` and
 the degenerate `--segment-frames 48 --window-frames 48` (where
 `rng.below(window - segment + 1)` is `rng.below(1)`) both complete steps on
-LibTorch and save a best at step 30, at mel 67.8 and 65.8. So `verify()` checks
-only `> 0` and `<= --window-frames`, and **a floor added later would be
-superstition** — the reflect-pad is the mechanism, and it is general. No `Learner` (the GAN loop doesn't fit it: `TrainStep::step`
+LibTorch and save a best at step 30, at mel 67.8 and 65.8. **A floor justified by
+*that* pad would be superstition** — it is general, and it is guarded (`pad < t`).
+
+**There is a floor, and it comes from the other front end.** `center=False`
+costs `burn_vits::Spectral` a `(n_fft - hop) / 2` reflect pad — 784 samples at
+48 kHz — and `reflect_pad` slices `(l - 1 - p)..(l - 1)` **unsigned**, so a
+waveform of one 480-sample frame underflows that subtraction and panics inside
+the mel loss, where `--segment-frames 4` (1920 samples) is fine. Both trainers
+therefore refuse below `SpectralConfig::min_frames()`, which is 2 for each of
+the two configs (785 samples of 480, 705 of 640) — **asked for rather than
+written down**, because a `n_fft` or `hop` change moves it and a literal in each
+CLI would go stale in silence. That is the shape to keep: the floor belongs
+beside the numbers it is derived from, not beside the flag it constrains.
+
+**And the floor is sufficient, not merely necessary — which is the half a
+derivation cannot establish.** A number that only stops *this* panic would move
+it to the next unguarded subtraction downstream, so `--segment-frames 2` was run
+on **both** loops, which is the point: they have different hops, different
+discriminator periods and different segment arithmetic, so `rvc` completing says
+nothing about `s2`. `rvc train` did 855 steps over six clips at best mel 35.3;
+`tts train --stage s2` did 3 steps over three utterances at mel 21.0, both on
+LibTorch, neither panicking. The arithmetic is pinned by `burn-vits`'s
+`the_floor_covers_the_reflect_pad`, which asserts the floor is the *shortest*
+safe count as well as a safe one, and each CLI has a test that its `verify()`
+refuses below it and accepts it exactly.
+
+One thing that measurement cost, worth knowing before repeating it: `s2`'s unit
+of work is a **whole utterance**, so corpus clip length — not `--segment-frames`
+— is what decides its memory. 68 s clips OOM'd a 6 GB card at
+`--segment-frames 2` before reaching a step; 6 s ones ran. `--segment-frames`
+sets only the slice the decoder renders, which is why it is not the knob to
+reach for when `s2` runs out of memory.
+No `Learner` (the GAN loop doesn't fit it: `TrainStep::step`
 takes `&self` and yields one `GradientsParams` for one optimizer, while a GAN needs
 two models, two optimizers at different LRs, and D updated *between* the two
 backward passes) — the

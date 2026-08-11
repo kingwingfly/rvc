@@ -15,6 +15,14 @@ pub mod s1;
 pub mod s2;
 
 pub use dataset::{Clip, SAMPLES_PER_FRAME, encoders, pairs, prepare};
+
+/// The shortest `--segment-frames` `s2`'s mel front end can transform — see
+/// [`burn_vits::SpectralConfig::min_frames`], which owns the `n_fft`/`hop` it
+/// is derived from. Exposed so `tts-cli` refuses below it without keeping its
+/// own copy of a number this crate's spectral config decides.
+pub fn mel_min_frames() -> usize {
+    burn_vits::SpectralConfig::gptsovits_v2_32k().min_frames()
+}
 pub use error::{Result, TrainError};
 pub use s1::S1Settings;
 pub use s2::S2Settings;

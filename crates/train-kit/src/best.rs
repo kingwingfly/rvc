@@ -38,8 +38,8 @@ pub struct Best {
 
 impl Best {
     /// Track the best-so-far family beside `out` (`out.best()`).
-    /// `window` overrides the derived one; `None` keeps `total_steps / 20`
-    /// clamped to `1..=50`.
+    /// `window` overrides the derived one (floored at 1); `None` keeps
+    /// `total_steps / 20` clamped to `1..=50`.
     pub fn new(out: &Checkpoint, enabled: bool, total_steps: usize, window: Option<usize>) -> Self {
         let ck = enabled.then(|| out.best());
         // A sidecar whose weights are gone is ignored: it would veto every save.
@@ -61,8 +61,11 @@ impl Best {
             // on a single step is the noise this whole mechanism exists to
             // average out. That is why the override exists rather than a wider
             // clamp: only the caller knows whether 200 steps is the whole run
-            // or the part of it somebody sat through.
-            window: window.unwrap_or((total_steps / 20).clamp(1, 50)),
+            // or the part of it somebody sat through. A zero override still
+            // floors at 1 — `observe` closes a window on `n == window`, so a
+            // zero would never close one and would silently disable the whole
+            // mechanism rather than shortening it.
+            window: window.unwrap_or((total_steps / 20).clamp(1, 50)).max(1),
             sum: 0.0,
             n: 0,
             score: prev.map_or(f32::INFINITY, |m| m.mel),
@@ -186,5 +189,28 @@ impl Best {
             }
             Err(e) => tracing::warn!("could not save best checkpoint: {e:#}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    /// A zero override is the one value that does not shorten the window but
+    /// **removes** it: `observe` closes on `n == window` and `n` starts at 1, so
+    /// zero would leave every window open and quietly disable best-checkpointing
+    /// altogether. `rvc train`'s `verify()` rejects it, but this is a public API
+    /// and that is the wrong place for the only guard.
+    #[test]
+    fn a_zero_window_override_floors_at_one() {
+        let out = Checkpoint::new(Path::new("/nonexistent/voice"));
+        assert_eq!(Best::new(&out, false, 1000, Some(0)).window, 1);
+        // And an override that is usable is still honoured verbatim, rather
+        // than being clamped into the derived range.
+        assert_eq!(Best::new(&out, false, 1000, Some(200)).window, 200);
+        // The derived default is unchanged: `total_steps / 20`, clamped.
+        assert_eq!(Best::new(&out, false, 1000, None).window, 50);
+        assert_eq!(Best::new(&out, false, 10, None).window, 1);
     }
 }

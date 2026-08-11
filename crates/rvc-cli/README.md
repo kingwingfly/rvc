@@ -138,8 +138,10 @@ on a 50-step mean because one step's minimum is luck.
 those are the weights that actually faced the saved discriminator, where the EMA
 snapshot never did.
 
-`--segment-frames` (36) and `--window-frames` (48) are `tts train`'s knobs of the
-same name, and they were constants here until now. **`--window-frames` is the one
+`--segment-frames` (36) and `--window-frames` (48) were constants here until now.
+The first is `tts train`'s knob of the same name; the second has no counterpart
+there, because `s2`'s unit of work is a whole utterance rather than a fixed
+window. **`--window-frames` is the one
 to be careful with**: it is the context width fed to `enc_q` and the flow, and it
 doubles as the *minimum clip length*, so a clip shorter than it is discarded
 rather than padded. Raising it on a corpus of short per-sentence clips shrinks

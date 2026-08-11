@@ -73,6 +73,16 @@ pub async fn prepare_clips(
     let mut fx = FeatureExtractor::load(content_onnx, rmvpe_onnx)
         .map_err(|e| anyhow!("loading ContentVec/RMVPE ONNX: {e}"))?;
 
+    // `Clip::snr` is a linear amplitude ratio because `clip_weights` raises it to
+    // `snr^alpha`, and a dB value there would change what `--snr-weight` means.
+    // So the conversion happens at every log line instead — in one place, so the
+    // per-clip line and the corpus summary cannot report the same clip in two
+    // units. A *ratio* was once printed with `dB` after it, which understates
+    // every reading by a factor of ~2.6 in the units a reader compares against:
+    // `preprocess analyze` reports this corpus at 13 dB, where that line called
+    // the same material 4.5.
+    let db = |ratio: f32| 20.0 * ratio.max(f32::MIN_POSITIVE).log10();
+
     let mut clips = Vec::new();
     for path in data {
         let wav16k = decode_mono(path, FeatureExtractor::ANALYSIS_SR).await?;
@@ -112,7 +122,7 @@ pub async fn prepare_clips(
             "  {}: {} frames (snr {:.1} dB)",
             path.display(),
             frames,
-            20.0 * snr.max(f32::MIN_POSITIVE).log10()
+            db(snr)
         );
         clips.push(Clip {
             content: cflat,
@@ -130,19 +140,15 @@ pub async fn prepare_clips(
     );
 
     let frames: usize = clips.iter().map(|c| c.frames).sum();
-    // Converted at the log, not at the source. `Clip::snr` is a linear amplitude
-    // ratio because `clip_weights` raises it to `snr^alpha`, and a dB value
-    // there would change what `--snr-weight` means. But a *ratio* was being
-    // printed with `dB` after it, which understates every reading by a factor of
-    // ~2.6 in the units a reader compares against — `preprocess analyze` reports
-    // this corpus at 13 dB, where this line called the same material 4.5.
-    let db = |ratio: f32| 20.0 * ratio.max(f32::MIN_POSITIVE).log10();
     let mut snrs: Vec<f32> = clips.iter().map(|c| c.snr).collect();
     snrs.sort_by(f32::total_cmp);
     tracing::info!(
         "corpus: {} clips, {:.1} min audio, snr {:.0}/{:.0}/{:.0} dB (min/median/max){}",
         clips.len(),
-        (frames * HOP) as f64 / 16_000.0 / 60.0,
+        // `frames * HOP` counts samples at the *model* rate, which is what `gt`
+        // was decoded to — dividing by the 16 kHz analysis rate instead reported
+        // every corpus as three times its real length.
+        (frames * HOP) as f64 / f64::from(model_sr) / 60.0,
         db(snrs[0]),
         db(snrs[snrs.len() / 2]),
         db(snrs[snrs.len() - 1]),

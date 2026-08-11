@@ -203,9 +203,19 @@ impl TrainArgs {
             self.max_frames(),
             self.segment_frames
         );
+        // Two, not one, and the mechanism is the mel front end: `center=False`
+        // costs a reflect pad wider than a single frame, and `reflect_pad`
+        // slices `(l - 1 - p)..(l - 1)` unsigned — so `--segment-frames 1`
+        // underflows that subtraction and panics inside the mel loss instead of
+        // being refused here. `rvc train` carries the same floor for the same
+        // reason, and both ask the spectral config for it rather than spelling
+        // a number the config decides.
+        let floor = tts_train::mel_min_frames();
         anyhow::ensure!(
-            self.segment_frames > 0,
-            "--segment-frames must be at least 1: it is the window the decoder is trained on"
+            self.segment_frames >= floor,
+            "--segment-frames must be at least {floor}: it is the window the decoder is \
+             trained on, and below that the mel front end has too little audio to \
+             reflect-pad"
         );
         anyhow::ensure!(
             self.lr > 0.0 && self.lr.is_finite(),
@@ -351,4 +361,50 @@ pub async fn run(args: TrainArgs) -> Result<()> {
         )
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::args::{TtsCli, TtsCommand};
+    use clap::Parser;
+
+    /// The `tts` binary's own tree, minus `completions` — which belongs to the
+    /// executable rather than to the engine.
+    #[derive(Parser)]
+    #[command(name = "tts")]
+    struct Cli {
+        #[command(flatten)]
+        tts: TtsCli,
+    }
+
+    fn train(extra: &[&str]) -> TrainArgs {
+        let mut argv = vec!["tts", "train", "corpus/"];
+        argv.extend_from_slice(extra);
+        match Cli::try_parse_from(&argv)
+            .unwrap_or_else(|e| panic!("{argv:?} rejected: {e}"))
+            .tts
+            .command
+        {
+            Some(TtsCommand::Train(a)) => *a,
+            other => panic!("expected `train`, got {other:?}"),
+        }
+    }
+
+    /// The mirror of `rvc train`'s floor, and the same defect: one 640-sample
+    /// frame is under the 704 the 32 kHz mel front end reflect-pads by, so
+    /// `--segment-frames 1` panicked inside the mel loss — after the corpus had
+    /// been prepared, which is the expensive half of this loop.
+    #[test]
+    fn a_segment_shorter_than_the_mel_pad_is_refused() {
+        let floor = tts_train::mel_min_frames();
+        let err = train(&["--segment-frames", "1"])
+            .verify()
+            .expect_err("one frame is under the reflect pad")
+            .to_string();
+        assert!(err.contains(&floor.to_string()), "{err}");
+        train(&["--segment-frames", &floor.to_string()])
+            .verify()
+            .expect("the floor itself must be accepted");
+    }
 }

@@ -157,7 +157,10 @@ pub struct SttArgs {
     /// invocation wait longer before emitting anything — while `convert`, which
     /// has the whole file, is unaffected. That asymmetry is the reason this is
     /// worth a flag rather than a constant.
-    #[arg(long, default_value_t = 0.15)]
+    // Read from the slicer's own `Default` rather than spelled again: this one
+    // does not diverge from it the way `--min-silence` and `--min-clip`
+    // deliberately do, so a literal here could only ever drift out of step.
+    #[arg(long, default_value_t = audio_kit::SliceOptions::default().pad)]
     pub pad: f32,
     /// Cap on tokens generated per segment. Raise it if dense speech is being
     /// cut off (a warning says so); lower it to bound a hallucination loop.

@@ -106,20 +106,16 @@ pub fn run<AB: AutodiffBackend>(
     let weight_decay = req.settings.weight_decay;
     // Read once, so the loop and the tensor shapes below cannot disagree about
     // them. `window_frames` is the clip-length floor as well as the context
-    // width — `load_clips` was given the same value, and a shorter clip was
+    // width — `prepare_clips` was given the same value, and a shorter clip was
     // discarded there rather than truncated here.
+    //
+    // Both are checked by `crate::train`, before the corpus is decoded and
+    // before either checkpoint is loaded: `window_frames - segment_frames`
+    // below is unsigned and `total_frames / (batch * window_frames)` divides by
+    // one of them, so a caller that is not the CLI would otherwise reach a panic
+    // in arithmetic rather than an error naming the two settings.
     let window_frames = req.settings.window_frames;
     let segment_frames = req.settings.segment_frames;
-    // Checked here as well as in `rvc train`'s `verify`, and not as belt and
-    // braces: `train` is a public entry point, so a caller that is not the CLI
-    // reaches this with whatever it built — and `window_frames - segment_frames`
-    // below is unsigned, so getting it wrong is a panic in a subtraction rather
-    // than an error naming the two settings.
-    anyhow::ensure!(
-        window_frames >= segment_frames,
-        "window_frames ({window_frames}) must be at least segment_frames \
-         ({segment_frames}): the segment is a slice of the window"
-    );
     let mut opt_g = AdamWConfig::new()
         .with_beta_1(0.8)
         .with_beta_2(0.99)
@@ -177,7 +173,6 @@ pub fn run<AB: AutodiffBackend>(
 
     let mut rng = Rng::new(0x51D_u64.wrapping_mul(req.settings.epochs as u64 + 1));
     let sid = req.settings.speaker_id;
-    let seg_len = segment_frames * HOP;
 
     // Generator weight EMA (kept on the inner backend): averaged over the
     // adversarial oscillation, so cleaner than any single step, and what every
@@ -275,7 +270,6 @@ pub fn run<AB: AutodiffBackend>(
                     ids: &ids,
                     batch: b,
                     sid,
-                    seg_len,
                     window_frames,
                     segment_frames,
                     update_d,
@@ -363,10 +357,11 @@ struct MicroIn<'a, AB: AutodiffBackend> {
     ids: &'a [usize],
     batch: usize,
     sid: i64,
-    seg_len: usize,
     /// Carried per micro-batch rather than read from a constant, because both
     /// are now settings — and the tensor shapes below are built from them, so a
-    /// stale copy is a shape mismatch rather than a wrong number.
+    /// stale copy is a shape mismatch rather than a wrong number. The waveform
+    /// length is derived from `segment_frames` inside rather than passed beside
+    /// it, so the two cannot disagree.
     window_frames: usize,
     segment_frames: usize,
     update_d: bool,
@@ -398,11 +393,11 @@ fn micro_step<AB: AutodiffBackend>(input: MicroIn<'_, AB>) -> MicroOut<AB> {
         ids,
         batch: b,
         sid,
-        seg_len,
         window_frames,
         segment_frames,
         update_d,
     } = input;
+    let seg_len = segment_frames * HOP;
 
     let phone = Tensor::<AB, 3>::from_data(
         TensorData::new(data.phone, [b, window_frames, CONTENT_DIM]),

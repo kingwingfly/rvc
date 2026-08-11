@@ -222,6 +222,6 @@ mod tests {
     #[test]
     fn the_ceiling_is_whispers_own_window() {
         assert_eq!(MAX_REFERENCE_SECONDS, 30.0);
-        assert!(REFERENCE_SECONDS < MAX_REFERENCE_SECONDS);
+        const { assert!(REFERENCE_SECONDS < MAX_REFERENCE_SECONDS) };
     }
 }

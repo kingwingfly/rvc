@@ -37,10 +37,11 @@ can only do because RVC's conditioning is frame-aligned content features with no
 sequence structure — any 0.48 s of a clip is a valid training example. `enc_q`
 and the flow see the window; the decoder renders a 36-frame slice of it.
 
-Both counts are `--window-frames` and `--segment-frames`, the same two knobs
-`tts train` has — and they were constants here until the two loops were brought
-to parity. **`--window-frames` carries a second job that `s2`'s has no
-equivalent of**: because the window is a *fixed* size drawn out of a clip, a clip
+Both counts are `--window-frames` and `--segment-frames`, and they were constants
+here until the two loops were brought to parity. `--segment-frames` is `tts
+train`'s knob of the same name; **`--window-frames` has no counterpart there at
+all**, because `s2` never draws a fixed window. That is also why it carries a
+second job here: since the window is a *fixed* size drawn out of a clip, a clip
 shorter than one window is not a valid example at all, so the same number is the
 corpus's minimum clip length and clips below it are dropped before the loop
 starts. On this repository's own 92-clip corpus, 48 → 400 leaves 32. `s2` has no

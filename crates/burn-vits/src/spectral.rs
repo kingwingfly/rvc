@@ -55,6 +55,22 @@ impl SpectralConfig {
     pub fn n_bins(&self) -> usize {
         self.n_fft / 2 + 1
     }
+
+    /// The shortest input, in frames, that [`Spectral::linear`] can transform.
+    ///
+    /// `center=False` costs a `(n_fft - hop) / 2` reflect pad, and reflecting
+    /// needs at least that many samples to mirror — [`reflect_pad`] slices
+    /// `(l - 1 - p)..(l - 1)`, which is an **unsigned** subtraction, so a
+    /// shorter waveform underflows and panics rather than producing a small
+    /// spectrogram. Both trainers expose their segment length as a flag, so
+    /// this is the floor their `verify()` refuses below; deriving it here keeps
+    /// the number with the `n_fft`/`hop` it comes from instead of putting a
+    /// copy in each CLI, where a config change would leave it stale in silence.
+    ///
+    /// Two frames for both configs today: 785 samples of 480, 705 of 640.
+    pub fn min_frames(&self) -> usize {
+        ((self.n_fft - self.hop) / 2 + 1).div_ceil(self.hop)
+    }
 }
 
 /// Precomputed STFT/mel transform on a device.
@@ -201,4 +217,34 @@ fn mel_filterbank(cfg: &SpectralConfig) -> Vec<f32> {
         }
     }
     fb
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The floor and the pad it protects are computed in two different places —
+    /// `min_frames` from the config, the pad inside `Spectral::new` — so this
+    /// pins them to each other. A backend would be needed to observe the panic
+    /// itself; the arithmetic is what a config change would break, and it needs
+    /// none.
+    #[test]
+    fn the_floor_covers_the_reflect_pad() {
+        for cfg in [SpectralConfig::v2_48k(), SpectralConfig::gptsovits_v2_32k()] {
+            // `reflect_pad` mirrors `1..(p + 1)` and `(l - 1 - p)..(l - 1)`, so
+            // `l - 1 - p` is the subtraction that underflows: the shortest safe
+            // waveform is one sample longer than the pad, not as long as it.
+            let shortest = (cfg.n_fft - cfg.hop) / 2 + 1;
+            let floor = cfg.min_frames();
+            assert!(
+                floor * cfg.hop >= shortest,
+                "{} Hz: {floor} frames is {} samples, under the {shortest} the pad needs",
+                cfg.sample_rate,
+                floor * cfg.hop
+            );
+            // And it is the *shortest* such count, not merely a safe one — a
+            // floor that overshoots would refuse segments that train fine.
+            assert!((floor - 1) * cfg.hop < shortest);
+        }
+    }
 }

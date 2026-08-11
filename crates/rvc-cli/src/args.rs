@@ -723,9 +723,16 @@ impl TrainArgs {
             "--ema-frac is a fraction of the run and must be in [0, 1); 0 saves the \
              raw weights"
         );
+        // Two, not one, and the mechanism is the mel front end rather than the
+        // discriminator: `center=False` costs a reflect pad wider than a single
+        // frame, and `reflect_pad` slices unsigned — so `--segment-frames 1`
+        // reaches a subtraction that underflows instead of being refused here.
+        // The number comes from the spectral config rather than from a literal.
+        let floor = rvc_train::mel_min_frames();
         anyhow::ensure!(
-            self.segment_frames > 0,
-            "--segment-frames must be at least 1"
+            self.segment_frames >= floor,
+            "--segment-frames must be at least {floor}: below that the mel front end \
+             has too little audio to reflect-pad"
         );
         anyhow::ensure!(
             self.window_frames >= self.segment_frames,
@@ -961,6 +968,24 @@ mod tests {
             .to_string();
         assert!(err.contains("--rmvpe-backend"), "{err}");
         assert!(err.contains("ONNX Runtime only"), "{err}");
+    }
+
+    /// One frame is 480 samples and the mel front end reflect-pads by 784, so
+    /// `--segment-frames 1` used to reach an unsigned subtraction inside the mel
+    /// loss — a panic two downloads and two checkpoint loads after the flag that
+    /// caused it. The floor is asked of the spectral config rather than written
+    /// here, so this test cannot go stale against a `hop` change either.
+    #[test]
+    fn a_segment_shorter_than_the_mel_pad_is_refused() {
+        let floor = rvc_train::mel_min_frames();
+        let err = train(&["--segment-frames", "1"])
+            .verify()
+            .expect_err("one frame is under the reflect pad")
+            .to_string();
+        assert!(err.contains(&floor.to_string()), "{err}");
+        train(&["--segment-frames", &floor.to_string()])
+            .verify()
+            .expect("the floor itself must be accepted");
     }
 
     /// Passing none of the geometry flags must reproduce the preset **exactly**,
