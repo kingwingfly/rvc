@@ -39,11 +39,14 @@
 //! reports it through `av_log` rather than through the samples, so reading it
 //! from [`audio_kit::AudioFilter`] would mean installing a **global** ffmpeg log
 //! callback and parsing stderr. Its `ebur128` sibling attaches the same numbers
-//! as frame metadata, which `AudioFilter` discards and does not expose. Either
-//! route is a change to a shared crate for one column, so neither was taken, and
-//! hand-rolling BS.1770 here would be a third definition of loudness in a
-//! toolkit that already has [`NoiseFloor`](audio_kit::NoiseFloor). Peak, floor
-//! and SNR answer "is this corpus usable" without it.
+//! as frame metadata, and [`crate::normalize::integrated_lufs`] reads them
+//! through [`audio_kit::AudioFilter::metadata`] — so the measurement is a
+//! function call away rather than a shared-crate change, and what keeps it out
+//! of here is what it would be *for*: loudness answers "do these two recordings
+//! match", which is [`crate::normalize`]'s question, where peak, floor and SNR
+//! answer "is this corpus usable at all", which is this stage's. Hand-rolling
+//! BS.1770 here would additionally be a third definition of loudness in a
+//! toolkit that already has [`NoiseFloor`](audio_kit::NoiseFloor).
 
 use std::path::{Path, PathBuf};
 

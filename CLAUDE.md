@@ -346,11 +346,15 @@ once grew ninety lines of engine manual:
 
   **"One per network" was the rule and the fifth paper breaks it deliberately**,
   because `preprocess` is not a network: it is a phase running two of them
-  (MDX23C, CAM++) plus six model-free stages, so its paper covers a *binary*,
-  and what it has to explain about those six is what they **refuse** to do —
-  `normalize` never compresses, `trim` never splits, `analyze` writes nothing —
-  rather than what they compute. A paper for a future non-engine binary goes
-  here on the same terms. **Adding a `.typ` does not move the count of places
+  (MDX23C, CAM++) plus six stages that run none. What makes it a paper rather
+  than a manual is that those six are still *algorithms* — a framed RMS
+  measurement read by percentile, hysteresis on the silent gap, non-local means,
+  gated R128 loudness — so the page explains what each one computes and why,
+  and the binary's shape (which subcommand, which output directory, which flag)
+  stays in `crates/preprocess-cli/README.md` where it belongs. **A flag spelling
+  in an architecture paper is the tell that the two got mixed**, and this one
+  was rewritten once for exactly that. A paper for a future non-engine binary
+  goes here on the same terms. **Adding a `.typ` does not move the count of places
   below**: this bullet is one place however many files it holds, and the
   "editing the opening line and the closing bullet" rule is about adding a
   *place*, not a file inside one.
