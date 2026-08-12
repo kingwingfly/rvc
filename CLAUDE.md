@@ -336,13 +336,24 @@ once grew ninety lines of engine manual:
   the trap it avoids goes here, a decision still **open** goes there. Every
   entry names what actually blocks it, because the value is entirely in the
   constraint rather than in the wish.
-- **`docs/*.typ`** are the long-form architecture papers, one per network —
-  `rvc-architecture`, `gptsovits-architecture`, `whisper-architecture`,
-  `seedvc-architecture` — for
+- **`docs/*.typ`** are the long-form architecture papers — `rvc-architecture`,
+  `gptsovits-architecture`, `whisper-architecture`, `seedvc-architecture` and
+  `preprocess-architecture` — for
   *reviewing* a port rather than using it: what each block computes, what every
   loss term is for, why the training loop has the shape it does. Typst sources
   with the rendered PDF committed beside them, so reading needs no toolchain;
   rebuild with `typst compile docs/<name>.typ` and commit both.
+
+  **"One per network" was the rule and the fifth paper breaks it deliberately**,
+  because `preprocess` is not a network: it is a phase running two of them
+  (MDX23C, CAM++) plus six model-free stages, so its paper covers a *binary*,
+  and what it has to explain about those six is what they **refuse** to do —
+  `normalize` never compresses, `trim` never splits, `analyze` writes nothing —
+  rather than what they compute. A paper for a future non-engine binary goes
+  here on the same terms. **Adding a `.typ` does not move the count of places
+  below**: this bullet is one place however many files it holds, and the
+  "editing the opening line and the closing bullet" rule is about adding a
+  *place*, not a file inside one.
 - **`export/README.md`** is the exporter's own manual, and it is a place rather
   than a footnote because it is the only documentation of the *other* side of a
   port: which graphs each model is split into and why, what to pass, and the

@@ -423,6 +423,7 @@ is published as a graph and nothing here exports them.
 
 - [repository README](../../README.md) — what `voice` is and how the engines compose
 - [`docs/setup.md`](../../docs/setup.md) — ffmpeg, LibTorch, backends and devices
+- [`docs/preprocess-architecture.pdf`](../../docs/preprocess-architecture.pdf) — what each stage computes, the two networks in detail, and what every default here was measured on
 - [`docs/training.md`](../../docs/training.md) — why a trainer needs any of this
 - [`rvc`](../rvc-cli/README.md), [`stt`](../stt-cli/README.md), [`tts`](../tts-cli/README.md) and [`seedvc`](../seedvc-cli/README.md) — the engines this feeds
 - [`CLAUDE.md`](../../CLAUDE.md) — why the code is shaped the way it is

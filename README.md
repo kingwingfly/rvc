@@ -78,12 +78,16 @@ READMEs and [`docs/setup.md`](docs/setup.md):
 | [`docs/gptsovits-architecture.typ`](docs/gptsovits-architecture.typ) | GPT-SoVITS v2 — cnhubert, the semantic quantiser, `s1` (text → tokens) and `s2` (tokens → waveform) |
 | [`docs/whisper-architecture.typ`](docs/whisper-architecture.typ) | Whisper large-v3-turbo — the log-mel front-end, the encoder/decoder stack, KV-cached greedy decoding |
 | [`docs/seedvc-architecture.typ`](docs/seedvc-architecture.typ) | Seed-VC — flow matching, in-context conditioning on a reference clip, and why it needs no training |
+| [`docs/preprocess-architecture.typ`](docs/preprocess-architecture.typ) | Corpus preparation — the eight stages, MDX23C separation, CAM++ diarisation, and what every default was measured on |
 | [`docs/training.md`](docs/training.md) | every training loop in the toolkit: the shared objective, `train-kit`, warm-start, devices |
 | [`docs/realtime.md`](docs/realtime.md) | driving the engines live: sample rates, ffmpeg capture and playback, virtual microphones and OBS, and the latency each engine costs |
 | [`docs/roadmap.md`](docs/roadmap.md) | what is not built yet — `translate`, `seedvc train`, a native audio backend — and what each would cost |
 
 The architecture papers are written for *reviewing and maintaining a port*
-rather than for driving the CLI. The convention is a [Typst](https://typst.app)
+rather than for driving the CLI. Four of them take one network apart; the
+`preprocess` one covers a phase instead — two networks and six stages that run
+none — so it is also where the corpus-preparation measurements live. The
+convention is a [Typst](https://typst.app)
 source with its rendered PDF committed beside it, so reading one needs no
 toolchain; rebuild with `typst compile docs/<name>.typ` and commit both.
 
