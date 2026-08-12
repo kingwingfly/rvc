@@ -504,6 +504,17 @@ decodes. This is that operation with nothing else attached, so a corpus arriving
 as mp3, m4a, flac and opus at three different rates can be given one normalising
 step.
 
+Rate conversion is ffmpeg's, and the part worth knowing about it is the
+low-pass. Halving a sample rate halves the Nyquist frequency, and any energy
+that was above the new one does not disappear — it *folds back* below it, as an
+inharmonic mirror image that no later stage can distinguish from signal. So a
+downsample is a band-limiting filter followed by a decimation, never a
+decimation alone, and the filter is where the quality of a resampler lives.
+Upsampling has the mirror problem and the same answer: interpolate, then remove
+the images the interpolation creates. This is also the overshoot the peak target
+of #ref(<sec-normalize>) leaves headroom for — a band-limited reconstruction can
+exceed the largest sample it was built from.
+
 Mono by default, because mono `f32` is what crosses every crate boundary here
 and a training corpus has no use for a second channel. A stereo input is folded
 to $(L + R) slash 2$; a mono input written as stereo goes to both channels, so
@@ -1105,4 +1116,10 @@ recordings are already one utterance each and only have dead ends.
   `preprocess-core`'s `examples/timbre`, which are where those numbers stay
   current; where this page and a module doc disagree, the module doc is right,
   because it sits beside the code that would change. Nothing here is estimated.
+
+  Three algorithms are described where the code delegates to somebody else's
+  implementation of them, and their sources are the standards rather than this
+  workspace: gated loudness is ITU-R BS.1770 / EBU R128, and the de-hiss and
+  resampling stages are ffmpeg's `anlmdn` and `swresample`. What is measured
+  here is what they do to this material.
 ]
