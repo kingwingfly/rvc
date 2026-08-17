@@ -620,44 +620,52 @@ ContentVec + RMVPE auto-download from Hugging Face in whichever of the two
 weight formats the chosen backend reads (the `download` subcommand prefetches
 them, and takes `--backend` so it knows which). Only 48 kHz is supported today.
 
-### De-hiss is dead on ffmpeg 9.0.1, and it is not our graph
-`anlmdn` — the non-local-means filter behind `rvc --denoise` and `preprocess
-denoise` — **corrupts the heap on ffmpeg 9.0.1**. Measured: 5 of 5 segfaults
-denoising a 30 s file. The stock binary does it too, on defaults, with nothing
-of ours in the process:
+### De-hiss is ours, because ffmpeg 9.0 broke `anlmdn`
+`rvc --denoise` and `preprocess denoise` no longer touch libavfilter.
+`audio_kit::Denoiser` computes non-local means directly, ported from
+`libavfilter/af_anlmdn.c` and verified against it: **1.2e-7 relative RMS, max
+absolute 1.7e-7** over 96 000 samples, which is float summation order and
+nothing else. `crates/audio-kit/examples/nlm_parity.rs` is that check, and it
+takes the reference as a file precisely because the ffmpeg that can produce one
+is not the ffmpeg you have.
 
-```sh
-ffmpeg -cpuflags 0 -filter_threads 1 -f lavfi -i sine=d=1:r=48000 -af anlmdn -f null -
-```
+**Do not "simplify" this back to a filter string.** `anlmdn` corrupts the heap
+from ffmpeg 9.0 onward — 20 failures in 20 at 48 kHz on 9.0.1 against 0 in 20 on
+8.1.2, same machine, same glibc, *both packages built with gcc 16*, so the
+compiler is not the explanation. Arch keeps old packages, so that A/B is
+reproducible from `/var/cache/pacman/pkg`.
 
-`-cpuflags 0` and `-filter_threads 1` are in that line on purpose — they rule
-out the SIMD kernels and slice threading, which are the two things anybody would
-suspect first. `libavfilter/af_anlmdn.c` is byte-identical between n8.0 and n9.0
-but for an `#if ARCH_X86 && HAVE_X86ASM` guard, and no commit touches it after
-n9.0, so waiting for a package bump is not a plan.
+**The defect is one line, and knowing it is what made the port safe.**
+`filter_channel` always writes `H` samples to its output frame, but at EOF
+`ff_inlink_consume_samples` hands it the short final frame, where `out = in`
+holds only `nb_samples`. The `memset` two lines above it zeroes the *window* by
+that same shortfall — so the partial frame was anticipated for the input and
+forgotten for the output. Confirmed by construction rather than by reading:
+`H` is 193 at 48 kHz, and **19 300 samples pass while 19 301 abort**. That is
+also why the rate mattered (16/44.1/48 kHz abort, 8/22.05 kHz do not) — the
+overflow is 76 bytes at one rate and 600 at another, and the small ones fit in
+the allocation's slack. `Nlm::frame` bounds its output loop by the input length,
+which is the fix.
 
-**Read it as allocation slack, not as a parameter we could avoid.** It aborts at
-16/44.1/48 kHz and passes at 8/22.05 kHz, on identical settings — that is a
-small out-of-bounds write landing in padding for some buffer sizes and in a
-neighbour's chunk for others. There is no `--denoise-*` value that escapes it,
-and 48 kHz is the only rate this toolkit converts at.
+**`AudioFilter` stays, and de-hiss leaving it is the whole point.** It still
+carries `ebur128` for `preprocess normalize`, where there is no upstream defect
+and a rewrite would only be a second implementation of a broadcast standard. The
+narrowing also deleted a promise that could not be kept: the old wrapper failed
+**open** when ffmpeg lacked `anlmdn`, and that branch could never catch this bug
+anyway, because the graph builds *successfully* and then corrupts memory.
 
-**Two things follow that are easy to get wrong.** First, `audio-kit`'s
-`anlmdn_preserves_content` is `#[ignore]`d, because a SIGABRT takes the whole
-test binary down and the crate's other 33 tests never report — in a repo whose
-own gate is `cargo test`, one broken filter must not cost the other 33. Second,
-`audio-kit::denoise`'s documented **fail-open** promise is void here and cannot
-be rescued: the graph builds fine and *then* corrupts memory, so there is no
-`FilterUnavailable` to catch. Fail-open covers a filter that is missing, never
-one that is broken.
+**`afftdn` was floated as a fallback in an earlier revision and that was bad
+advice.** It is spectral subtraction, and breath *is* broadband noise, so no
+spectral test separates it from mic hiss — the stage would remove exactly what
+this toolkit exists to preserve. `arnndn` fails next door: RNNoise keys on pitch
+and harmonic structure, which whispered material does not have, so it gates it.
+**The property worth protecting is not "denoising", it is non-local means** —
+averaging each patch with *self-similar* patches, where breath texture repeats
+and hiss does not. Any future replacement has to keep that, which is why the
+answer was to own sixty lines rather than to shop for another filter.
 
-**The bump did not cause this and swapping the filter is not the fix.**
-`ffmpeg-next` was pinned at 8.1 against a machine already running 9.0.1, so the
-bindings and the libraries disagreed; moving to 9.0 is what makes the tree build
-against what is installed, and it *revealed* this. Reaching for `afftdn` instead
-would trade a crash for spectral subtraction on soft, breathy material, which is
-the exact thing `anlmdn` was chosen over — that is a product decision, not a
-repair.
+The bug is still unreported upstream at the time of writing; the reproducer
+above is a complete report if anyone wants to file it.
 
 ### Exit 134 when an ORT session drops (RTX 2060, accepted)
 Dropping an ONNX Runtime session on the CUDA execution provider aborts with

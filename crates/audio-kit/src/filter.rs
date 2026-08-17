@@ -6,6 +6,13 @@
 //! pushed frame-by-frame and pulled as they become available; the filter's
 //! internal look-ahead means [`AudioFilter::process`] may return fewer samples
 //! than it was given until [`AudioFilter::flush`] drains the tail.
+//!
+//! **De-hiss no longer comes through here**, and that is a deliberate
+//! narrowing rather than an oversight: `anlmdn` corrupts the heap from ffmpeg
+//! 9.0 onward, so [`crate::Denoiser`] computes non-local means itself. What is
+//! left leaning on libavfilter is *measurement* — `ebur128` for
+//! `preprocess normalize` — where there is nothing to port, no upstream defect,
+//! and a rewrite would only be a second implementation of a broadcast standard.
 
 use std::collections::HashMap;
 
@@ -237,62 +244,6 @@ mod tests {
         assert!(
             (measured - -21.1).abs() < 0.2,
             "expected ~-21.1 LUFS, got {measured}"
-        );
-    }
-
-    /// `anlmdn` — the de-hiss engine `rvc-core` ships — must **preserve** wanted
-    /// content, which is the whole reason it's chosen over spectral subtraction
-    /// for soft, breathy material. Its hiss *removal* is signal-dependent (it
-    /// keys off the broadband self-similarity of real breath/whisper texture,
-    /// so it can't be exercised by a synthetic tone) and is covered by manual
-    /// evaluation; here we lock in that a structured signal passes through at
-    /// ~unity energy.
-    ///
-    /// **`#[ignore]`d on ffmpeg 9.0.1, because `anlmdn` corrupts the heap there
-    /// and an abort takes the whole test binary with it** — the other 33 tests
-    /// in this crate never get to report. It is not our graph: the stock
-    /// binary does it too, on defaults, with no chain of ours in sight —
-    ///
-    /// ```text
-    /// ffmpeg -cpuflags 0 -filter_threads 1 -f lavfi -i sine=d=1:r=48000 -af anlmdn -f null -
-    /// ```
-    ///
-    /// — so it is neither the SIMD kernels nor slice threading. `af_anlmdn.c`
-    /// is byte-identical between n8.0 and n9.0 apart from an `#if HAVE_X86ASM`
-    /// guard, which is why this reads as a small out-of-bounds write that older
-    /// allocators happened to absorb: it aborts at 16/44.1/48 kHz and passes at
-    /// 8/22.05 kHz, i.e. it turns on the slack in the frame buffer rather than
-    /// on anything the filter is asked to do. Un-`ignore` when the system
-    /// ffmpeg stops reproducing that one-liner; nothing here needs changing.
-    #[test]
-    #[ignore = "anlmdn corrupts the heap on ffmpeg 9.0.1; see the doc comment"]
-    fn anlmdn_preserves_content() {
-        let sr = 48_000u32;
-        let mut f = match AudioFilter::new(sr, "anlmdn=s=0.008:p=0.002:r=0.006") {
-            Ok(f) => f,
-            // anlmdn missing from this ffmpeg build → nothing to test.
-            Err(AudioError::FilterUnavailable(_)) => return,
-            Err(e) => panic!("build graph: {e}"),
-        };
-        // A clean multi-harmonic tone (no added noise): energy must survive.
-        let input: Vec<f32> = (0..sr as usize * 2)
-            .map(|i| {
-                let t = i as f32 / sr as f32;
-                use std::f32::consts::TAU;
-                0.2 * ((TAU * 220.0 * t).sin()
-                    + 0.5 * (TAU * 440.0 * t).sin()
-                    + 0.3 * (TAU * 880.0 * t).sin())
-            })
-            .collect();
-        let mut out = f.process(&input).expect("process");
-        out.extend(f.flush().expect("flush"));
-        // Energy in a settled interior region should be within a few % of input
-        // (anlmdn adds latency, so compare region energy, not sample-aligned).
-        let a = rms(&input[sr as usize..sr as usize + sr as usize / 2]);
-        let b = rms(&out[sr as usize..sr as usize + sr as usize / 2]);
-        assert!(
-            (b / a - 1.0).abs() < 0.1,
-            "anlmdn altered clean-signal energy: in={a} out={b}"
         );
     }
 }
