@@ -18,7 +18,7 @@ virtual microphones — is [`realtime.md`](realtime.md).
 
 | | needed by | how it is found |
 |---|---|---|
-| **ffmpeg 8.1** | everyone — decode, resample and PCM I/O | linked at build time; found automatically at run time |
+| **ffmpeg 9.0** | everyone — decode, resample and PCM I/O | linked at build time; found automatically at run time |
 | **ONNX Runtime** | any `--backend onnx` path, plus `tts`'s prosody encoder and `seedvc`'s six exported graphs | dlopened on first use from `ORT_DYLIB_PATH` |
 | **LibTorch 2.9.0** | optional — only `--backend tch` | linked at build time; found automatically at run time |
 
@@ -26,7 +26,7 @@ virtual microphones — is [`realtime.md`](realtime.md).
 
 ## ffmpeg
 
-The **8.1** development libraries, from your package manager. They are linked,
+The **9.0** development libraries, from your package manager. They are linked,
 not dlopened, so they must be present at build time.
 
 To build against your own instead, name it the way you name LibTorch:
@@ -37,6 +37,19 @@ export FFMPEG_DIR=$PWD/ffmpeg      # expects ffmpeg/lib and ffmpeg/include
 
 An unpacked `./ffmpeg` at the project root that you have *not* named in it fails
 the build saying so.
+
+**One feature does not work on 9.0.1: de-hiss.** `rvc --denoise` and
+`preprocess denoise` drive ffmpeg's `anlmdn`, which corrupts the heap on that
+release and takes the process down with it — reproducible with the stock binary
+and nothing of ours involved:
+
+```sh
+ffmpeg -cpuflags 0 -filter_threads 1 -f lavfi -i sine=d=1:r=48000 -af anlmdn -f null -
+```
+
+There is no flag that avoids it and no workaround on our side; leave `--denoise`
+off until the system ffmpeg stops reproducing that. Every other stage — decode,
+resample, WAV I/O, `afftdn`, `ebur128` — is unaffected.
 
 ## ONNX Runtime
 

@@ -608,7 +608,7 @@ model load is the most visible case, 18 s of `underrun 0 < 8192` before the firs
 sample. Into a *pipe* the same shortfall shows up as the opposite symptom, an
 unbounded delay, because the reader does apply backpressure.
 
-Requires **ffmpeg 8.1** dev libraries (and the `ffmpeg` binary for the realtime
+Requires **ffmpeg 9.0** dev libraries (and the `ffmpeg` binary for the realtime
 filter examples, which is what captures and plays PCM at either end of the pipe).
 A system package needs no configuration; `FFMPEG_DIR` names your own build at
 **build time**, exactly as `LIBTORCH` does and with the same run-time search
@@ -619,6 +619,45 @@ its pkg-config failure never mentions the directory sitting in front of you.
 ContentVec + RMVPE auto-download from Hugging Face in whichever of the two
 weight formats the chosen backend reads (the `download` subcommand prefetches
 them, and takes `--backend` so it knows which). Only 48 kHz is supported today.
+
+### De-hiss is dead on ffmpeg 9.0.1, and it is not our graph
+`anlmdn` — the non-local-means filter behind `rvc --denoise` and `preprocess
+denoise` — **corrupts the heap on ffmpeg 9.0.1**. Measured: 5 of 5 segfaults
+denoising a 30 s file. The stock binary does it too, on defaults, with nothing
+of ours in the process:
+
+```sh
+ffmpeg -cpuflags 0 -filter_threads 1 -f lavfi -i sine=d=1:r=48000 -af anlmdn -f null -
+```
+
+`-cpuflags 0` and `-filter_threads 1` are in that line on purpose — they rule
+out the SIMD kernels and slice threading, which are the two things anybody would
+suspect first. `libavfilter/af_anlmdn.c` is byte-identical between n8.0 and n9.0
+but for an `#if ARCH_X86 && HAVE_X86ASM` guard, and no commit touches it after
+n9.0, so waiting for a package bump is not a plan.
+
+**Read it as allocation slack, not as a parameter we could avoid.** It aborts at
+16/44.1/48 kHz and passes at 8/22.05 kHz, on identical settings — that is a
+small out-of-bounds write landing in padding for some buffer sizes and in a
+neighbour's chunk for others. There is no `--denoise-*` value that escapes it,
+and 48 kHz is the only rate this toolkit converts at.
+
+**Two things follow that are easy to get wrong.** First, `audio-kit`'s
+`anlmdn_preserves_content` is `#[ignore]`d, because a SIGABRT takes the whole
+test binary down and the crate's other 33 tests never report — in a repo whose
+own gate is `cargo test`, one broken filter must not cost the other 33. Second,
+`audio-kit::denoise`'s documented **fail-open** promise is void here and cannot
+be rescued: the graph builds fine and *then* corrupts memory, so there is no
+`FilterUnavailable` to catch. Fail-open covers a filter that is missing, never
+one that is broken.
+
+**The bump did not cause this and swapping the filter is not the fix.**
+`ffmpeg-next` was pinned at 8.1 against a machine already running 9.0.1, so the
+bindings and the libraries disagreed; moving to 9.0 is what makes the tree build
+against what is installed, and it *revealed* this. Reaching for `afftdn` instead
+would trade a crash for spectral subtraction on soft, breathy material, which is
+the exact thing `anlmdn` was chosen over — that is a product decision, not a
+repair.
 
 ### Exit 134 when an ORT session drops (RTX 2060, accepted)
 Dropping an ONNX Runtime session on the CUDA execution provider aborts with

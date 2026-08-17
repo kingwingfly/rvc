@@ -123,8 +123,8 @@ ort = { version = "=2.0.0-rc.13", default-features = false, features = [
 ] }
 ndarray = "0.17"
 
-# Audio (ffmpeg 8.1)
-ffmpeg-next = "8.1"
+# Audio (ffmpeg 9.0)
+ffmpeg-next = "9.0"
 
 # Model download (async API is the default in 1.0; `blocking` is opt-in)
 hf-hub = { version = "1.0", features = ["rustls-tls"] }

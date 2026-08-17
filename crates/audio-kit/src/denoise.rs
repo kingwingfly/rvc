@@ -28,6 +28,15 @@
 //! built lazily and, if ffmpeg cannot build it (e.g. a build without
 //! `anlmdn`), the stage fails **open** — audio passes through unchanged with a
 //! warning rather than being dropped.
+//!
+//! **That guarantee does not cover ffmpeg 9.0.1, and cannot.** `anlmdn`
+//! corrupts the heap there (see [`crate::AudioFilter`]'s
+//! `anlmdn_preserves_content` for the stock-binary reproducer), and the graph
+//! builds *successfully* first — so there is no `FilterUnavailable` to catch
+//! and no error to pass through on. De-hiss is fatal rather than degraded on
+//! that release: 5 of 5 segfaults on a 30 s file. Nothing in this module can
+//! detect it; the honest note is that fail-open protects against a filter that
+//! is **missing**, never against one that is broken.
 
 use crate::AudioFilter;
 

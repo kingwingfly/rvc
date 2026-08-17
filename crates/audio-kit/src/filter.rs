@@ -247,7 +247,25 @@ mod tests {
     /// so it can't be exercised by a synthetic tone) and is covered by manual
     /// evaluation; here we lock in that a structured signal passes through at
     /// ~unity energy.
+    ///
+    /// **`#[ignore]`d on ffmpeg 9.0.1, because `anlmdn` corrupts the heap there
+    /// and an abort takes the whole test binary with it** — the other 33 tests
+    /// in this crate never get to report. It is not our graph: the stock
+    /// binary does it too, on defaults, with no chain of ours in sight —
+    ///
+    /// ```text
+    /// ffmpeg -cpuflags 0 -filter_threads 1 -f lavfi -i sine=d=1:r=48000 -af anlmdn -f null -
+    /// ```
+    ///
+    /// — so it is neither the SIMD kernels nor slice threading. `af_anlmdn.c`
+    /// is byte-identical between n8.0 and n9.0 apart from an `#if HAVE_X86ASM`
+    /// guard, which is why this reads as a small out-of-bounds write that older
+    /// allocators happened to absorb: it aborts at 16/44.1/48 kHz and passes at
+    /// 8/22.05 kHz, i.e. it turns on the slack in the frame buffer rather than
+    /// on anything the filter is asked to do. Un-`ignore` when the system
+    /// ffmpeg stops reproducing that one-liner; nothing here needs changing.
     #[test]
+    #[ignore = "anlmdn corrupts the heap on ffmpeg 9.0.1; see the doc comment"]
     fn anlmdn_preserves_content() {
         let sr = 48_000u32;
         let mut f = match AudioFilter::new(sr, "anlmdn=s=0.008:p=0.002:r=0.006") {
