@@ -105,6 +105,46 @@
 //! against hand-computed erf values, and `tch_aliasing` (`--features tch`) pins
 //! the backend hazard that produced every retracted number here.
 //!
+//! ## Two backends on the real checkpoint, which is how the bug was found
+//!
+//! `tch_aliasing::libtorch_agrees_with_ndarray` asks this question on a toy
+//! configuration and random weights, which is what makes it a unit test. The
+//! same question on **`MDX23C-8KFFT-InstVoc_HQ.ckpt` and real audio** needs no
+//! new code — `--out` writes the mixture and both stems, so running the example
+//! twice and differencing the files is the whole check:
+//!
+//! ```text
+//! for b in tch-gpu cuda; do
+//!     cargo run -p burn-mdx --example separate --features tch,cuda -- \
+//!         --backend $b --out /tmp/$b <MDX23C-*.ckpt> <speech.wav>
+//! done
+//! ```
+//!
+//! Measured that way on one 261,120-sample chunk, LibTorch-on-CUDA against
+//! CubeCL/CUDA:
+//!
+//! | file | max abs diff | rms(diff)/rms |
+//! |---|---|---|
+//! | `mixture.wav` | **0** | **0** |
+//! | `vocals.wav` (peak 0.514) | 2.4e-07 | 3.7e-07 (−128.5 dB) |
+//! | `instrumental.wav` (peak 0.468) | 2.5e-07 | 4.0e-07 (−127.9 dB) |
+//!
+//! That is about one `f32` ulp at that magnitude, and **every printed reading
+//! above — all four tables, digit for digit — comes out identical on the two
+//! backends.** CLAUDE.md records this agreement as "five figures", which is an
+//! understatement rather than a different measurement.
+//!
+//! **Read the `mixture.wav` row as the control, not as a triviality.** Both
+//! runs build that file from the same deterministic bed and the same decoded
+//! clip, so an exact zero there is what says the comparison is reading two runs
+//! rather than one file twice — the failure mode a diff of two directories has.
+//!
+//! **The two backends are not close in speed, and the gap is the reason `auto`
+//! picks LibTorch.** One chunk took **1.1 s** on LibTorch-on-CUDA and **23.6 s**
+//! on CubeCL/CUDA, same card, same weights, back to back — 21x, on a debug
+//! build with other work on the machine, which is why the number below the
+//! usage block is a range rather than a constant.
+//!
 //! # What `--mixture` establishes on real material
 //!
 //! Excerpts of one stereo stream at 44.1 kHz — a streamer talking over somebody
@@ -174,8 +214,10 @@
 //! One chunk: 261,120 samples, 5.92 s, one forward pass over `[1, 16, 1024,
 //! 256]` — around 1 TFLOP and 134 MB per activation at the widest. That is why
 //! this example carries `required-features = ["tch"]` and why `--backend
-//! tch-gpu` is the sensible way to run it. Measured there: **0.82 s per chunk**,
-//! so `--mixture` runs at roughly 3.5x realtime at 50% overlap.
+//! tch-gpu` is the sensible way to run it. Measured there: **0.8–1.1 s per
+//! chunk** across runs on one RTX 2060, so `--mixture` runs at roughly 3–3.5x
+//! realtime at 50% overlap. `--backend cuda` is **23.6 s** for the same chunk
+//! and is therefore a correctness cross-check rather than a way to run this.
 //!
 //! Usage:
 //! ```text
