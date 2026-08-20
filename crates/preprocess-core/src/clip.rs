@@ -174,4 +174,160 @@ mod tests {
             ]
         );
     }
+
+    /// A sine of `hz` at half scale, for a fixture whose *content* identifies
+    /// which run it came from and not only its length.
+    fn tone(secs: f32, hz: f64) -> Vec<f32> {
+        let n = (secs * SR as f32) as usize;
+        (0..n)
+            .map(|i| (0.5 * (std::f64::consts::TAU * hz * i as f64 / SR as f64).sin()) as f32)
+            .collect()
+    }
+
+    /// Peak amplitude, which is what `--normalize` targets.
+    fn peak(samples: &[f32]) -> f32 {
+        samples.iter().fold(0.0f32, |m, x| m.max(x.abs()))
+    }
+
+    /// The dominant frequency of a signal, counted off its zero crossings.
+    /// Independent of the slicer and of the stage alike, which is the point: it
+    /// says *which* run a clip holds where a sample-range comparison can only
+    /// say that some range was copied faithfully.
+    fn dominant_hz(samples: &[f32]) -> f64 {
+        let crossings = samples
+            .windows(2)
+            .filter(|w| (w[0] < 0.0) != (w[1] < 0.0))
+            .count();
+        crossings as f64 / 2.0 / (samples.len() as f64 / f64::from(SR))
+    }
+
+    fn options() -> ClipOptions {
+        ClipOptions {
+            sr: SR,
+            slice: SliceOptions {
+                silence_db: -40.0,
+                min_silence: 0.3,
+                min_clip: 1.0,
+                max_clip: 0.0,
+                pad: 0.15,
+            },
+            normalize: false,
+        }
+    }
+
+    /// The test above checks *counts and filenames*, which a stage that wrote
+    /// the right number of wrong clips would pass. This one decodes each
+    /// written file and compares it sample for sample against the range the
+    /// slicer chose, then identifies the run it came from by its frequency —
+    /// so a clip written from the wrong segment, in the wrong order, or one
+    /// boundary out is caught by the audio as well as by the arithmetic.
+    #[tokio::test]
+    async fn each_written_clip_is_exactly_the_range_the_slicer_cut() {
+        let dir = scratch("clip-exact");
+        let runs = [(2.0f32, 220.0f64), (2.5, 440.0), (1.5, 880.0)];
+        let mut sig = Vec::new();
+        for (i, (secs, hz)) in runs.iter().enumerate() {
+            if i > 0 {
+                sig.extend(silence(1.0));
+            }
+            sig.extend(tone(*secs, *hz));
+        }
+        write_tone(&dir.join("take.wav"), sig).await;
+
+        let out = dir.join("out");
+        std::fs::create_dir_all(&out).expect("create out");
+        let files = crate::plan(std::slice::from_ref(&dir), &out).expect("plan");
+        let opts = options();
+        let report = file(&files[0], &opts, &out).await.expect("clip");
+        assert_eq!(report.clips, 3);
+
+        let input = crate::decode_mono(&files[0].path, SR)
+            .await
+            .expect("decode input");
+        let segments = audio_kit::slice(&input, SR, &opts.slice);
+        assert_eq!(segments.len(), 3, "{segments:?}");
+
+        let mut kept = 0.0f64;
+        for (i, (start, end)) in segments.iter().enumerate() {
+            let path = out.join(format!("take_{i:03}.wav"));
+            let written = crate::decode_mono(&path, SR).await.expect("decode clip");
+            assert_eq!(
+                written,
+                input[*start..*end],
+                "clip {i} is not the samples {start}..{end} the slicer chose"
+            );
+            kept += written.len() as f64 / f64::from(SR);
+
+            // Half a clip, taken from its middle, is inside the tone whatever
+            // the padding did at the edges.
+            let mid = &written[written.len() / 4..written.len() * 3 / 4];
+            let hz = dominant_hz(mid);
+            assert!(
+                (hz - runs[i].1).abs() < runs[i].1 * 0.02,
+                "clip {i} sounds like {hz:.0} Hz, not {} Hz",
+                runs[i].1
+            );
+        }
+        assert!(
+            (kept - report.kept_secs).abs() < 1e-6,
+            "kept_secs {} does not describe what was written ({kept})",
+            report.kept_secs
+        );
+    }
+
+    /// `--normalize` is per *clip*, and the difference is the whole reason the
+    /// flag exists rather than a pass of the `normalize` stage afterwards: a
+    /// batch- or file-wide gain leaves the quiet sentence quiet. Three runs two
+    /// decades apart in level have to come out at one peak.
+    #[tokio::test]
+    async fn normalize_scales_each_clip_by_its_own_peak() {
+        let dir = scratch("clip-normalize");
+        let amps = [0.9f32, 0.05, 0.4];
+        let mut sig = Vec::new();
+        for (i, amp) in amps.iter().enumerate() {
+            if i > 0 {
+                sig.extend(silence(1.0));
+            }
+            sig.extend(tone(2.0, 220.0).iter().map(|x| x * amp / 0.5));
+        }
+        write_tone(&dir.join("take.wav"), sig).await;
+
+        let out = dir.join("out");
+        std::fs::create_dir_all(&out).expect("create out");
+        let files = crate::plan(std::slice::from_ref(&dir), &out).expect("plan");
+        let opts = ClipOptions {
+            normalize: true,
+            ..options()
+        };
+        assert_eq!(file(&files[0], &opts, &out).await.expect("clip").clips, 3);
+
+        let input = crate::decode_mono(&files[0].path, SR)
+            .await
+            .expect("decode input");
+        let segments = audio_kit::slice(&input, SR, &opts.slice);
+        assert_eq!(segments.len(), 3, "{segments:?}");
+
+        for (i, (start, end)) in segments.iter().enumerate() {
+            let written = crate::decode_mono(&out.join(format!("take_{i:03}.wav")), SR)
+                .await
+                .expect("decode clip");
+            let mut want = input[*start..*end].to_vec();
+            let source_peak = peak(&want);
+            assert!(
+                (source_peak - amps[i]).abs() < 0.01,
+                "clip {i} was cut from a run peaking at {source_peak}, not {}",
+                amps[i]
+            );
+            assert!(
+                (peak(&written) - crate::normalize::DEFAULT_PEAK).abs() < 1e-6,
+                "clip {i} peaks at {}, not {}",
+                peak(&written),
+                crate::normalize::DEFAULT_PEAK
+            );
+            // ...and it is a gain rather than a limiter: one constant scales
+            // the whole clip, so the waveform is unchanged in shape.
+            crate::normalize::peak_normalize(&mut want, crate::normalize::DEFAULT_PEAK);
+            assert_eq!(written, want, "clip {i} is not its own range, scaled");
+        }
+    }
 }

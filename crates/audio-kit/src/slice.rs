@@ -1207,4 +1207,173 @@ mod tests {
         assert!(slicer.push(&[0.5; 4096]).is_empty());
         assert!(slicer.finish().is_empty());
     }
+
+    /// dBFS of a hand-computed RMS, in the exact form [`window_db`] reports it
+    /// — the `+1e-9` included, so an expectation and a reading can be compared
+    /// without a fudge factor standing in for it.
+    fn expected_db(rms: f64) -> f64 {
+        20.0 * (rms + 1e-9).log10()
+    }
+
+    /// The energy every cut in this file is decided by, against signals whose
+    /// RMS is known from their algebra rather than from another run of the same
+    /// code.
+    ///
+    /// `streaming_matches_batch` cannot see an error here and neither can any
+    /// other test in this module: both paths call [`window_db`], so a wrong
+    /// frame energy is wrong identically on each side and the equivalence still
+    /// holds. That is the shape the separation bug had — an invariant that
+    /// survives the answer being wrong — which is why the oracle has to come
+    /// from outside the module.
+    #[test]
+    fn frame_energy_is_the_dbfs_of_a_hand_computed_rms() {
+        // A full-scale square: every sample is +/-1, so the RMS is exactly 1
+        // and the reading is exactly 0 dBFS.
+        let square: Vec<f32> = (0..1440)
+            .map(|i: usize| if i.is_multiple_of(2) { 1.0 } else { -1.0 })
+            .collect();
+        assert!(
+            (f64::from(window_db(&square))).abs() < 1e-6,
+            "a full-scale square is 0 dBFS, read {:.6}",
+            window_db(&square)
+        );
+
+        // ...and at half scale, exactly 6.0206 dB under it.
+        let half: Vec<f32> = square.iter().map(|x| x * 0.5).collect();
+        assert!((f64::from(window_db(&half)) - expected_db(0.5)).abs() < 1e-4);
+
+        // A sine of amplitude `a` has RMS `a / sqrt(2)` — over a whole number
+        // of periods *exactly*, which is why this is 1 kHz at 48 kHz (48
+        // samples to a period, 30 of them in the 1440-sample window) and not
+        // the 220 Hz the stages' own fixtures use.
+        let sine: Vec<f32> = (0..1440)
+            .map(|i| (0.5 * (std::f64::consts::TAU * 1000.0 * i as f64 / SR as f64).sin()) as f32)
+            .collect();
+        let want = expected_db(0.5 / 2f64.sqrt());
+        assert!(
+            (f64::from(window_db(&sine)) - want).abs() < 1e-3,
+            "a half-scale sine is {want:.4} dBFS, read {:.4}",
+            window_db(&sine)
+        );
+
+        // Uniform noise on +/-a has RMS `a / sqrt(3)`. That identity is what
+        // `push_noise` is built on, so every measured-floor test in this file
+        // rests on it holding.
+        let mut rng = Rng(0x1111_2222_3333_4444);
+        let amp = 0.2f64;
+        let noise: Vec<f32> = (0..480_000)
+            .map(|_| ((f64::from(rng.unit()) * 2.0 - 1.0) * amp) as f32)
+            .collect();
+        let want = expected_db(amp / 3f64.sqrt());
+        assert!(
+            (f64::from(window_db(&noise)) - want).abs() < 0.05,
+            "uniform noise on +/-{amp} is {want:.4} dBFS, read {:.4}",
+            window_db(&noise)
+        );
+
+        // Digital silence is the `+1e-9` and nothing else: -180 dBFS.
+        assert!((f64::from(window_db(&[0.0; 256])) - expected_db(0.0)).abs() < 1e-6);
+    }
+
+    /// Where a frame starts, how long its window is, and how many of them a
+    /// signal yields — pinned with an impulse, since an off-by-one in the
+    /// geometry moves every cut in the file by a hop and leaves both paths
+    /// agreeing about the wrong place.
+    #[test]
+    fn the_frame_grid_is_ten_millisecond_hops_of_thirty_millisecond_windows() {
+        assert_eq!(frame_geometry(48_000), (480, 1440));
+        assert_eq!(frame_geometry(44_100), (441, 1323));
+        assert_eq!(frame_geometry(16_000), (160, 480));
+        // A rate at which neither duration rounds to a whole sample still has
+        // to yield a usable grid rather than a division by zero.
+        assert_eq!(frame_geometry(1), (1, 1));
+
+        let (hop, win) = frame_geometry(SR);
+
+        // Ten whole hops of silence with one full-scale sample at 2500. Frame
+        // `f` covers `[f * hop, f * hop + win)`, so exactly frames 3, 4 and 5
+        // can see it — 2 ends at 2400 and 6 starts at 2880.
+        let mut sig = vec![0.0f32; 10 * hop];
+        sig[2500] = 1.0;
+        let db = frame_db(&sig, hop, win);
+        assert_eq!(
+            db.len(),
+            10,
+            "one frame per hop over a whole number of hops"
+        );
+        let loud: Vec<usize> = (0..db.len()).filter(|&f| db[f] > -100.0).collect();
+        assert_eq!(loud, vec![3, 4, 5], "frame windows start at f * hop");
+        for f in loud {
+            let want = expected_db((1.0 / win as f64).sqrt());
+            assert!(
+                (f64::from(db[f]) - want).abs() < 1e-4,
+                "frame {f} spreads one sample over {win}: {want:.4} dBFS, read {:.4}",
+                db[f]
+            );
+        }
+
+        // A trailing partial window is measured rather than dropped, and it is
+        // divided by the samples actually there: 100 past the last whole hop is
+        // an eleventh frame, and the two before it reach into the same impulse
+        // over windows the end of the input truncates.
+        let mut sig = vec![0.0f32; 10 * hop + 100];
+        sig[10 * hop + 50] = 1.0;
+        let db = frame_db(&sig, hop, win);
+        assert_eq!(db.len(), 11, "the short final frame is included");
+        for (f, len) in [(10usize, 100usize), (9, hop + 100), (8, 2 * hop + 100)] {
+            let want = expected_db((1.0 / len as f64).sqrt());
+            assert!(
+                (f64::from(db[f]) - want).abs() < 1e-4,
+                "frame {f} covers {len} samples: {want:.4} dBFS, read {:.4}",
+                db[f]
+            );
+        }
+    }
+
+    /// [`noise_floor`] reads two *ranks* off the sorted frame levels, and this
+    /// is what says so: a mean, a minimum, or a percentile transcribed one
+    /// decimal out lands on a different step of a staircase.
+    ///
+    /// 101 blocks of 25 hops, each 1 dB louder than the last, from -100 to
+    /// 0 dBFS. Every frame whose window lies inside a block reads that block's
+    /// level exactly, and the two frames straddling each boundary read
+    /// something strictly between its neighbours — so the sorted array *is* the
+    /// staircase and rank `i` names block `i / 25`. 2525 frames put the 10th
+    /// percentile at index 252 (block 10, -90 dBFS) and the 75th at 1893
+    /// (block 75, -25 dBFS), neither of them within a block of an extreme.
+    #[test]
+    fn a_percentile_names_the_frame_level_at_that_rank() {
+        // 8 kHz keeps the fixture small; the window is three hops there just as
+        // it is at 48 kHz, which is the only property the construction needs.
+        const RATE: u32 = 8_000;
+        const HOPS: usize = 25;
+        let (hop, win) = frame_geometry(RATE);
+        assert_eq!(win, 3 * hop);
+
+        let mut sig = Vec::with_capacity(101 * HOPS * hop);
+        for k in 0..101 {
+            let amp = 10f32.powf((k as f32 - 100.0) / 20.0);
+            sig.extend((0..HOPS * hop).map(|i| if i.is_multiple_of(2) { amp } else { -amp }));
+        }
+
+        let m = noise_floor(&sig, RATE).expect("2525 frames is plenty to measure");
+        assert!(
+            (f64::from(m.floor_db) + 90.0).abs() < 0.01,
+            "the 10th percentile is block 10's -90 dBFS, read {:.4}",
+            m.floor_db
+        );
+        assert!(
+            (f64::from(m.signal_db) + 25.0).abs() < 0.01,
+            "the 75th percentile is block 75's -25 dBFS, read {:.4}",
+            m.signal_db
+        );
+        // The quietest frame in the signal is 10 dB under the reported floor
+        // and the loudest 25 dB over the reported signal, so neither reading is
+        // an extreme dressed up as a percentile.
+        assert!(
+            (m.snr_db() - 65.0).abs() < 0.02,
+            "-25 over -90 is 65 dB, read {:.2}",
+            m.snr_db()
+        );
+    }
 }

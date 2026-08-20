@@ -228,4 +228,129 @@ mod tests {
         assert!(report.head_secs > 1.5, "{report:?}");
         assert!(report.tail_secs > 1.5, "{report:?}");
     }
+
+    /// A sine of `hz` at half scale, at whatever rate the fixture runs at.
+    fn tone_at(rate: u32, secs: f32, hz: f64) -> Vec<f32> {
+        let n = (secs * rate as f32) as usize;
+        (0..n)
+            .map(|i| (0.5 * (std::f64::consts::TAU * hz * i as f64 / f64::from(rate)).sin()) as f32)
+            .collect()
+    }
+
+    fn peak(samples: &[f32]) -> f32 {
+        samples.iter().fold(0.0f32, |m, x| m.max(x.abs()))
+    }
+
+    /// The three tests above assert *durations*, and a boundary a hop out — or
+    /// a head and a tail read the wrong way round — gives the same durations on
+    /// a symmetric fixture. This one decodes what was written and compares it
+    /// sample for sample against the input at the offset the report names,
+    /// which is the only reading that tells "3.3 s of the right audio" from
+    /// "3.3 s".
+    #[tokio::test]
+    async fn the_written_file_is_the_input_between_the_head_and_tail_it_reports() {
+        let dir = scratch("trim-exact");
+        // Asymmetric at both ends and two different tones inside, so a slice
+        // taken from the wrong end shows up in the samples as well as in the
+        // arithmetic.
+        let mut sig = silence(1.0);
+        sig.extend(voiced(1.0));
+        sig.extend(silence(0.5));
+        sig.extend(tone_at(SR, 2.0, 660.0));
+        sig.extend(silence(3.0));
+        write_tone(&dir.join("take.wav"), sig).await;
+
+        let out = dir.join("out");
+        std::fs::create_dir_all(&out).expect("create out");
+        let files = crate::plan(std::slice::from_ref(&dir), &out).expect("plan");
+        let report = file(&files[0], &options(), &out).await.expect("trim");
+
+        let input = crate::decode_mono(&files[0].path, SR)
+            .await
+            .expect("decode input");
+        let written = crate::decode_mono(&out.join("take.wav"), SR)
+            .await
+            .expect("decode output");
+
+        let head = (report.head_secs * f64::from(SR)).round() as usize;
+        let tail = (report.tail_secs * f64::from(SR)).round() as usize;
+        assert_eq!(
+            head + written.len() + tail,
+            input.len(),
+            "the report must account for every sample: {report:?}"
+        );
+        assert_eq!(
+            written,
+            input[head..input.len() - tail],
+            "the file is not the interior the report describes"
+        );
+
+        // ...and it is the *right* interior: everything discarded is under the
+        // floor, and the loudest sample in the recording is inside what stayed.
+        assert!(
+            peak(&input[..head]) < 0.01,
+            "the head that went was not silence: {}",
+            peak(&input[..head])
+        );
+        assert!(peak(&input[input.len() - tail..]) < 0.01);
+        assert!((peak(&written) - peak(&input)).abs() < 1e-9);
+    }
+
+    /// The stage strips edges and never splits, and this is the case that
+    /// would break a stage that reached for a plausible constant instead: a
+    /// twenty-second pause is longer than any `--min-silence` a user would
+    /// name, and it still has to survive into the output.
+    ///
+    /// It is guarded twice over, which is worth knowing before changing
+    /// either half: [`file`] sets `min_silence` past the recording's own
+    /// length so the slicer cannot cut in the middle at all, *and* it writes
+    /// `first.0 .. last.1`, so an interior cut would be spanned even if one
+    /// happened. The second guard holds only while `min_clip` is 0 — with a
+    /// floor under a segment's length, a split could drop the piece that
+    /// carries `last.1` and the tail would be trimmed into the speech.
+    #[tokio::test]
+    async fn an_interior_gap_longer_than_any_sentence_survives() {
+        // 16 kHz, written and read at its own rate so nothing resamples, and a
+        // fixture this long stays a few megabytes rather than tens.
+        const RATE: u32 = 16_000;
+        let dir = scratch("trim-long-gap");
+        let mut sig = vec![0.0f32; 2 * RATE as usize];
+        sig.extend(tone_at(RATE, 30.0, 220.0));
+        sig.extend(std::iter::repeat_n(0.0, 20 * RATE as usize));
+        sig.extend(tone_at(RATE, 30.0, 440.0));
+        sig.extend(std::iter::repeat_n(0.0, 2 * RATE as usize));
+
+        let path = dir.join("long.wav");
+        let s = stream::iter([Ok::<_, audio_kit::AudioError>(sig)]);
+        write_wav_file(&path, RATE, s).await.expect("write fixture");
+
+        let out = dir.join("out");
+        std::fs::create_dir_all(&out).expect("create out");
+        let files = crate::plan(std::slice::from_ref(&dir), &out).expect("plan");
+        let opts = TrimOptions {
+            sr: RATE,
+            ..options()
+        };
+        let report = file(&files[0], &opts, &out).await.expect("trim");
+
+        assert!(!report.silent, "{report:?}");
+        assert!((report.in_secs - 84.0).abs() < 0.05, "{report:?}");
+        // 30 + 20 + 30, plus 0.15 s of pad kept at each end.
+        assert!((report.out_secs - 80.3).abs() < 0.05, "{report:?}");
+        assert!((report.head_secs - 1.85).abs() < 0.05, "{report:?}");
+        assert!((report.tail_secs - 1.85).abs() < 0.05, "{report:?}");
+
+        // The written file still has the pause in it: a stage that split here
+        // would have written the first sentence alone, or the two with the gap
+        // squeezed out, and either shows up as missing silence.
+        let written = crate::decode_mono(&out.join("long.wav"), RATE)
+            .await
+            .expect("decode output");
+        let quiet = written.iter().filter(|x| x.abs() < 0.01).count();
+        assert!(
+            quiet >= 19 * RATE as usize,
+            "only {:.2} s of the 20 s pause survived",
+            quiet as f64 / f64::from(RATE)
+        );
+    }
 }
