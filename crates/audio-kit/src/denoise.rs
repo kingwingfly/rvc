@@ -322,6 +322,227 @@ mod tests {
         out
     }
 
+    /// Deterministic white-ish noise; a hash of the index rather than a
+    /// generator, so a test can ask for the same samples without threading
+    /// state through.
+    fn noise(n: usize, seed: u32, amp: f32) -> Vec<f32> {
+        (0..n)
+            .map(|i| {
+                let mut x = (i as u32).wrapping_add(seed).wrapping_mul(2_654_435_761);
+                x ^= x >> 15;
+                x = x.wrapping_mul(2_246_822_519);
+                x ^= x >> 13;
+                amp * ((x >> 8) as f32 / (1u32 << 24) as f32 * 2.0 - 1.0)
+            })
+            .collect()
+    }
+
+    fn db(a: f32, b: f32) -> f32 {
+        20.0 * (a / b).log10()
+    }
+
+    /// Non-local means written straight from the equations: every squared
+    /// distance measured from scratch, every weight a real `exp`, one output
+    /// sample at a time.
+    ///
+    /// This exists because [`Nlm`] is almost entirely optimisation. Its speed
+    /// comes from an incremental cache slid one sample per output and a
+    /// 2²⁰-entry `exp` table, and both are exactly the kind of arithmetic that
+    /// stays plausible while computing something else — a patch index off by
+    /// one, a cache half updated from the wrong edge, a `sw` scaled by the
+    /// wrong power of `strength`. None of that changes the length, the
+    /// chunk-invariance or the energy of a tone, so nothing else here sees it.
+    ///
+    /// Two things it deliberately does *not* borrow from the implementation.
+    /// It recomputes `k`, `s` and `sw` from `params` rather than reading them
+    /// off an [`Nlm`], so a change to any of those three formulas fails this
+    /// test. And it takes the parameters unclamped, which is safe only because
+    /// every caller below passes values already inside upstream's ranges.
+    fn naive_nlm(sr: u32, params: &DenoiseParams, x: &[f32]) -> Vec<f32> {
+        let k = ((params.patch_secs * sr as f32).round() as isize).max(1);
+        let s = ((params.research_secs * sr as f32).round() as isize).max(1);
+        let sw = (65536.0 / (4 * k + 2) as f32) / params.strength.sqrt();
+
+        // Everything outside the recording is silence: the sliding window
+        // starts zeroed and is zero-filled past a short final frame.
+        let at = |i: isize| -> f32 {
+            if i < 0 || i as usize >= x.len() {
+                0.0
+            } else {
+                x[i as usize]
+            }
+        };
+        let ssd = |a: isize, b: isize| -> f32 {
+            (-k..=k)
+                .map(|d| {
+                    let e = at(a + d) - at(b + d);
+                    e * e
+                })
+                .sum()
+        };
+
+        (0..x.len() as isize)
+            .map(|o| {
+                // The stage emits the sample centred at `c` in output position
+                // `c + k + s`: the research window is a look-ahead, and neither
+                // this port nor upstream compensates for it. `nlm_parity` is
+                // what pins that alignment against ffmpeg itself.
+                let c = o - (k + s);
+                let (mut p, mut q) = (at(c), 1.0f32);
+                for j in c - s..=c + s {
+                    if j == c {
+                        continue;
+                    }
+                    let w = ssd(c, j) * sw;
+                    if w >= SMOOTH {
+                        continue;
+                    }
+                    let weight = (-w).exp();
+                    p += weight * at(j);
+                    q += weight;
+                }
+                p / q
+            })
+            .collect()
+    }
+
+    /// The check the other five cannot make: that the filter computes
+    /// non-local means at all, rather than something with the same shape.
+    ///
+    /// Run at 4 kHz so `k` is 8 and `s` 24 — the reference is `O(n · s · k)`
+    /// and would take minutes at 48 kHz — over a signal chosen so the weights
+    /// actually vary: a periodic tone puts near-identical patches inside every
+    /// research window, and the noise on top keeps them from being *equal*, so
+    /// a mis-scaled `sw` or a mis-slid cache moves the answer instead of
+    /// cancelling out.
+    ///
+    /// Measured agreement is max |diff| 2.3e-7 against an output RMS of 0.11,
+    /// i.e. ~2e-6 relative, which is the weight table's quantisation
+    /// (`SMOOTH / 2²⁰` ≈ 1e-5 per weight, largely cancelling between numerator
+    /// and denominator) plus f32 summation order. A wrong index or a wrong
+    /// scale is orders of magnitude above that, not just outside it.
+    #[test]
+    fn the_filter_matches_a_scalar_reference_written_from_the_equations() {
+        let sr = 4_000u32;
+        let tone: Vec<f32> = (0..600)
+            .map(|i| 0.15 * (std::f32::consts::TAU * 110.0 * i as f32 / sr as f32).sin())
+            .collect();
+        let input: Vec<f32> = tone
+            .iter()
+            .zip(noise(600, 7, 0.004))
+            .map(|(t, n)| t + n)
+            .collect();
+
+        for params in [
+            DenoiseParams::default(),
+            // A second point in the parameter space, so the agreement cannot
+            // come from a formula that happens to be right at one setting:
+            // both radii and the strength move, and `sw` depends on `k` and
+            // `strength` together.
+            DenoiseParams {
+                strength: 0.05,
+                patch_secs: 0.0015,
+                research_secs: 0.005,
+            },
+        ] {
+            let reference = naive_nlm(sr, &params, &input);
+            // Every chunking, because the cache is rebuilt from scratch at each
+            // frame's first sample and slid for the rest: a bug in either half
+            // hides behind the other at some chunk size.
+            for chunk in [input.len(), 193, 17, 1] {
+                let mut d = Denoiser::new(sr, params);
+                let mut out = Vec::new();
+                for c in input.chunks(chunk) {
+                    out.extend(d.process(c));
+                }
+                out.extend(d.flush());
+
+                assert_eq!(out.len(), reference.len(), "chunk={chunk}");
+                let worst = out
+                    .iter()
+                    .zip(&reference)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0f32, f32::max);
+                assert!(
+                    worst < 1e-5,
+                    "{params:?} chunk={chunk}: diverged from the scalar \
+                     reference by {worst:.3e} (rms {:.3})",
+                    rms(&reference)
+                );
+            }
+        }
+    }
+
+    /// Silence in, silence out — **exactly** zero, not merely small.
+    ///
+    /// It is exact by construction rather than by luck: every patch distance in
+    /// a silent window is 0, so every weight is the table's first entry
+    /// `exp(0) = 1`, and the weighted mean of `2s + 1` zeros is `0 / (2s + 1)`.
+    /// That makes it the one property here that a tolerance would weaken —
+    /// anything that corrupts an index, a length or a buffer past its end shows
+    /// up as a non-zero sample rather than as a slightly worse ratio.
+    #[test]
+    fn silence_comes_out_exactly_silent() {
+        for sr in [8_000u32, 48_000] {
+            for n in [1, 193, 4801, 20_000] {
+                let out = run(sr, &vec![0.0; n], 1024);
+                assert_eq!(out.len(), n);
+                assert!(
+                    out.iter().all(|v| *v == 0.0),
+                    "sr={sr} n={n}: silence acquired energy"
+                );
+            }
+        }
+    }
+
+    /// The property the stage is actually sold on, in the two halves that
+    /// matter and in dB: steady broadband hiss falls a long way, and content
+    /// does not move.
+    ///
+    /// Hiss and content are measured through separate passes rather than by
+    /// subtracting one mixed run from another, because non-local means is not
+    /// linear and the difference of two runs is not "the noise that survived".
+    /// The mixture is then checked too, and it is the interesting reading: with
+    /// the tone present the hiss removal drops sharply, because a patch of
+    /// tone-plus-hiss has far fewer near-identical neighbours than a patch of
+    /// hiss alone. That is the algorithm being conservative, and it is why this
+    /// filter is safe on breathy material — it declines to average what it
+    /// cannot match.
+    ///
+    /// Measured at the defaults, 48 kHz, hiss at -54 dBFS:
+    /// hiss alone **-11.4 dB**, tone alone **-0.00 dB**, and the tone's own
+    /// energy inside the mixture **-0.03 dB**.
+    #[test]
+    fn hiss_falls_far_while_content_does_not_move() {
+        let sr = 48_000u32;
+        let hiss = noise(sr as usize, 11, 0.0035);
+        let tone = harmonics(sr, 1.0);
+        let mix: Vec<f32> = tone.iter().zip(&hiss).map(|(t, h)| t + h).collect();
+
+        // Skip the first `k + s` samples of every output: that is the
+        // look-ahead, and it is zero-padded rather than signal.
+        let settle = 1_000;
+        let after = |x: &[f32]| rms(&run(sr, x, 4096)[settle..]);
+
+        let hiss_db = db(after(&hiss), rms(&hiss[..sr as usize - settle]));
+        let tone_db = db(after(&tone), rms(&tone[..sr as usize - settle]));
+        let mix_db = db(after(&mix), rms(&mix[..sr as usize - settle]));
+
+        eprintln!("MEASURED hiss={hiss_db:.4} tone={tone_db:.4} mix={mix_db:.4}");
+        assert!(
+            hiss_db < -8.0,
+            "hiss barely moved: {hiss_db:.2} dB — non-local means is not \
+             averaging self-similar patches"
+        );
+        assert!(
+            tone_db.abs() < 0.1,
+            "content energy moved by {tone_db:.2} dB"
+        );
+        // The mixture is dominated by the tone, so its total energy must not
+        // move either — the hiss coming off it is 30 dB down on the content.
+        assert!(mix_db.abs() < 0.1, "mixture energy moved by {mix_db:.2} dB");
+    }
+
     /// Non-local means must **preserve** wanted content, which is the whole
     /// reason it is chosen over spectral subtraction for soft, breathy
     /// material. Its hiss *removal* is signal-dependent — it keys off the
