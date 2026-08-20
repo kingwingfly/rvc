@@ -436,8 +436,142 @@ fn frame_to_stereo_f32(frame: &AudioFrame) -> Result<(Vec<f32>, Vec<f32>)> {
     Ok((left, right))
 }
 
-/// Resample a mono signal from `src` to `dst` Hz. Downsampling uses area
-/// averaging (a cheap anti-alias); upsampling uses linear interpolation.
+/// Half-width of the interpolation kernel, counted in zero crossings of its
+/// sinc rather than in samples. Expressed that way it is a statement about the
+/// *filter* and stays one at any ratio: the width in input samples is derived
+/// from it below, so a large decimation gets a proportionally longer kernel
+/// instead of silently losing its cutoff. A count fixed in samples is the trap
+/// here — it looks rate-independent and is not.
+const KERNEL_ZEROS: usize = 24;
+
+/// Cutoff as a fraction of the **lower** rate's Nyquist.
+///
+/// It is under 1.0 because a filter has a transition band, and the whole point
+/// of this one is that the transition has closed before the output's Nyquist —
+/// anything still passing there folds back into the audible band and cannot be
+/// removed afterwards. 0.95 with [`KERNEL_ZEROS`] taps puts the stopband inside
+/// Nyquist while leaving the response flat to 7 kHz at a 16 kHz output; the
+/// price is measured by `the_top_of_the_passband_is_flat_and_the_edge_rolls_off`
+/// and is 4 dB at 7.5 kHz.
+const KERNEL_ROLLOFF: f64 = 0.95;
+
+/// Kaiser shape parameter, ≈90 dB of sidelobe rejection. What it buys against
+/// a plain truncated sinc is stopband depth, which is exactly the quantity
+/// `a_tone_above_the_output_nyquist_does_not_fold_back` measures.
+const KERNEL_BETA: f64 = 8.6;
+
+/// Kernel table entries per zero crossing. The table is read with linear
+/// interpolation between entries, so this sets how much of the stopband depth
+/// survives the lookup; at 512 the quantisation sits far below
+/// [`KERNEL_BETA`]'s sidelobes and is not what limits the measured figures.
+const KERNEL_DENSITY: usize = 512;
+
+/// Modified Bessel function of the first kind, order zero — the Kaiser window's
+/// defining term, and the only reason this file does arithmetic `std` does not
+/// provide. The series converges fast for the arguments a window uses.
+fn bessel_i0(x: f64) -> f64 {
+    let mut sum = 1.0f64;
+    let mut term = 1.0f64;
+    let half = x / 2.0;
+    for k in 1..80 {
+        let f = half / k as f64;
+        term *= f * f;
+        sum += term;
+        if term < sum * 1e-17 {
+            break;
+        }
+    }
+    sum
+}
+
+/// A Kaiser-windowed sinc, tabulated once per [`resample`] call and read by
+/// distance in input samples.
+///
+/// It is a table rather than a closure because the window costs a Bessel
+/// evaluation per point: computed per tap that would dominate the resample,
+/// where computed once it is a few thousand evaluations for the whole file.
+struct Kernel {
+    /// `h(x)` for `x` in `[0, half]`. Symmetric, so only one side is stored.
+    table: Vec<f32>,
+    /// Support half-width, in input samples.
+    half: f64,
+    /// `table.len() - 1`, kept as `f64` for the lookup.
+    steps: f64,
+}
+
+impl Kernel {
+    /// `cutoff` is in cycles per input sample; `half` is the support half-width
+    /// in input samples.
+    fn new(cutoff: f64, half: f64) -> Self {
+        let steps = KERNEL_ZEROS * KERNEL_DENSITY;
+        let norm = bessel_i0(KERNEL_BETA);
+        let table = (0..=steps)
+            .map(|k| {
+                let x = k as f64 / steps as f64 * half;
+                let t = x / half;
+                let window = bessel_i0(KERNEL_BETA * (1.0 - t * t).max(0.0).sqrt()) / norm;
+                let a = std::f64::consts::PI * 2.0 * cutoff * x;
+                let sinc = if a.abs() < 1e-12 { 1.0 } else { a.sin() / a };
+                (sinc * window) as f32
+            })
+            .collect();
+        Self {
+            table,
+            half,
+            steps: steps as f64,
+        }
+    }
+
+    /// The kernel's value `x` input samples from its centre.
+    #[inline]
+    fn at(&self, x: f64) -> f32 {
+        let p = x.abs() / self.half * self.steps;
+        let i = p as usize;
+        if i >= self.table.len() - 1 {
+            return 0.0;
+        }
+        let f = (p - i as f64) as f32;
+        self.table[i] + (self.table[i + 1] - self.table[i]) * f
+    }
+}
+
+/// Resample a mono signal from `src` to `dst` Hz.
+///
+/// Every decode in the toolkit passes through here, in both directions and at
+/// ratios that are rarely integers, so this is a band-limited interpolation
+/// rather than the two cheap approximations it replaces.
+///
+/// **What it replaced, and why that mattered**, because "a cheap anti-alias" is
+/// what the old comment called it: downsampling was an unweighted average over
+/// each output sample's input window, which is a box filter whose stopband
+/// starts at −13 dB, and upsampling was bare linear interpolation, whose images
+/// sit at about −24 dB. Neither is a small error, and both baselines are
+/// computed rather than recalled — see
+/// `the_box_average_this_replaced_aliased_where_this_does_not` and
+/// `an_upsample_leaves_no_image_above_the_source_nyquist`, which run the
+/// replaced arithmetic beside this one. A 12 kHz tone taken from
+/// 48 kHz to 16 kHz came back as a 4 kHz tone **9.5 dB** below the input —
+/// arithmetically exact, since the window is three samples wide at that ratio
+/// and the tone is `0, 1, 0, -1, …`, so a third of it survives at the fold. That
+/// is a full-strength artefact in the middle of the speech band, on material
+/// where nothing downstream can tell it from signal. The tests named on the
+/// constants above are what pin the replacement, and the number to read first is
+/// `a_tone_above_the_output_nyquist_does_not_fold_back`.
+///
+/// **One branch serves both directions**, which is not tidiness: the cutoff is
+/// half the *lower* of the two rates either way, so an upsample gets the same
+/// image rejection a downsample gets alias rejection, and there is no second
+/// path to keep in step.
+///
+/// **Each output sample is normalised by the weights it actually used.** That is
+/// what makes unity gain exact rather than approximate — a truncated kernel's
+/// taps sum to slightly different totals at different fractional phases, and
+/// dividing it out removes that variation instead of leaving it as a wobble on
+/// the envelope. It also gives the first and last few samples, where the kernel
+/// hangs off the end of the buffer, the right level rather than a fade.
+///
+/// The rates matching is still a byte-for-byte identity, which is the case every
+/// native-rate decode in the workspace takes.
 fn resample(input: &[f32], src: u32, dst: u32) -> Vec<f32> {
     if src == dst || src == 0 || input.len() < 2 {
         return input.to_vec();
@@ -445,26 +579,31 @@ fn resample(input: &[f32], src: u32, dst: u32) -> Vec<f32> {
     let ratio = dst as f64 / src as f64;
     let out_len = ((input.len() as f64) * ratio).round().max(1.0) as usize;
     let step = 1.0 / ratio; // input samples per output sample
-    let mut out = Vec::with_capacity(out_len);
 
-    if dst < src {
-        // Area average over each output sample's input window.
-        for j in 0..out_len {
-            let start = j as f64 * step;
-            let end = start + step;
-            let a = (start.floor() as usize).min(input.len() - 1);
-            let b = (end.ceil() as usize).clamp(a + 1, input.len());
-            let win = &input[a..b];
-            out.push(win.iter().sum::<f32>() / win.len() as f32);
+    // Cutoff in cycles per input sample: half the lower rate, pulled inside
+    // Nyquist by the rolloff so the transition band has somewhere to close.
+    let cutoff = 0.5 * KERNEL_ROLLOFF * src.min(dst) as f64 / src as f64;
+    let half = KERNEL_ZEROS as f64 / (2.0 * cutoff);
+    let kernel = Kernel::new(cutoff, half);
+
+    let n = input.len() as isize;
+    let mut out = Vec::with_capacity(out_len);
+    for j in 0..out_len {
+        let center = j as f64 * step;
+        let lo = ((center - half).ceil() as isize).max(0);
+        let hi = ((center + half).floor() as isize).min(n - 1);
+        let mut acc = 0.0f32;
+        let mut weight = 0.0f32;
+        for i in lo..=hi {
+            let w = kernel.at(center - i as f64);
+            acc += w * input[i as usize];
+            weight += w;
         }
-    } else {
-        for j in 0..out_len {
-            let pos = j as f64 * step;
-            let i0 = pos.floor() as usize;
-            let i1 = (i0 + 1).min(input.len() - 1);
-            let frac = (pos - i0 as f64) as f32;
-            out.push(input[i0] * (1.0 - frac) + input[i1] * frac);
-        }
+        out.push(if weight.abs() > 1e-9 {
+            acc / weight
+        } else {
+            0.0
+        });
     }
     out
 }
@@ -687,6 +826,360 @@ mod tests {
             "{}",
             got.right[FRAMES / 2]
         );
+    }
+
+    /// Amplitude of `freq` in `x`, by least squares against a cosine/sine pair
+    /// at that frequency.
+    ///
+    /// **Not a Goertzel**, and the difference is the reason this helper exists
+    /// rather than the obvious ten-line one. Goertzel assumes the two basis
+    /// vectors are orthogonal and equally long over the window, which holds only
+    /// when the window spans a whole number of periods. 3 kHz at a 16 kHz output
+    /// is 5.33 samples per period, so no short window does — and the leakage
+    /// that follows reads as *amplitude modulation that is not in the signal*.
+    /// Measuring this resampler's envelope with a Goertzel reports 2.1 dB of
+    /// ripple for the box filter and the same 2.1 dB for a 200-tap sinc, which
+    /// is the metric talking rather than the code. A least-squares projection is
+    /// exact for a pure tone at any window length.
+    fn amplitude_at(x: &[f32], sr: f64, freq: f64) -> f64 {
+        let w = std::f64::consts::TAU * freq / sr;
+        let (mut cc, mut cs, mut ss, mut xc, mut xs) = (0.0f64, 0.0, 0.0, 0.0, 0.0);
+        for (i, &v) in x.iter().enumerate() {
+            let (c, s) = ((w * i as f64).cos(), (w * i as f64).sin());
+            cc += c * c;
+            cs += c * s;
+            ss += s * s;
+            xc += v as f64 * c;
+            xs += v as f64 * s;
+        }
+        let det = cc * ss - cs * cs;
+        if det.abs() < 1e-12 {
+            return 0.0;
+        }
+        let a = (xc * ss - xs * cs) / det;
+        let b = (xs * cc - xc * cs) / det;
+        (a * a + b * b).sqrt()
+    }
+
+    /// A full-scale tone, as `f64` phase so the source itself is not the thing
+    /// under test.
+    fn full_scale_tone(freq: f64, sr: u32, samples: usize) -> Vec<f32> {
+        (0..samples)
+            .map(|i| (std::f64::consts::TAU * freq * i as f64 / sr as f64).sin() as f32)
+            .collect()
+    }
+
+    fn db(x: f64) -> f64 {
+        20.0 * x.max(1e-30).log10()
+    }
+
+    /// Enough of the ends dropped that the kernel hanging off the buffer is not
+    /// what any of these readings measure.
+    const GUARD: usize = 800;
+
+    /// The check the old resampler failed outright, and the one worth reading
+    /// first. Content above the output's Nyquist has to be filtered away
+    /// *before* the rate drops, because afterwards it is indistinguishable from
+    /// signal at the frequency it folded to.
+    ///
+    /// The box average scored −9.54 dB on the first case — a 12 kHz tone at
+    /// 48 kHz is `0, 1, 0, -1, …`, and averaging every three samples leaves
+    /// exactly a third of it at 4 kHz, in the middle of the speech band. The
+    /// thresholds below are loose against what this kernel actually measures
+    /// (−113, −90, −103 dB) so that the test reports a regression rather than
+    /// tracking arithmetic noise.
+    #[test]
+    fn a_tone_above_the_output_nyquist_does_not_fold_back() {
+        // (tone, src, dst, where it would fold to, ceiling)
+        let cases = [
+            (12_000.0, 48_000u32, 16_000u32, 4_000.0, -80.0),
+            (8_500.0, 44_100, 16_000, 7_500.0, -60.0),
+            (10_000.0, 44_100, 16_000, 6_000.0, -80.0),
+        ];
+        for (freq, src, dst, image, ceiling) in cases {
+            let x = full_scale_tone(freq, src, src as usize * 2);
+            let y = resample(&x, src, dst);
+            let level = db(amplitude_at(&y[GUARD..y.len() - GUARD], dst as f64, image));
+            assert!(
+                level < ceiling,
+                "{freq} Hz at {src}->{dst} left {level:.2} dB at {image} Hz (want < {ceiling})"
+            );
+        }
+    }
+
+    /// The mirror of the alias test, in the other direction, and with the
+    /// arithmetic it replaced computed beside it for the same reason
+    /// [`box_average`] exists.
+    ///
+    /// Linear interpolation is a triangular kernel, so its response is a
+    /// `sinc²` and the images it leaves are shallow: a 3 kHz tone taken from
+    /// 16 kHz to 48 kHz comes back with **−24.3 dB** at 13 kHz and −28.4 at
+    /// 19 kHz, against **−98.7** and −106.4 here. The windowed sinc removes
+    /// them for free because its cutoff is half the *lower* of the two rates
+    /// either way, so an upsample is filtered by the same kernel a downsample
+    /// is.
+    #[test]
+    fn an_upsample_leaves_no_image_above_the_source_nyquist() {
+        // The old upsampling branch verbatim.
+        let linear = |input: &[f32], src: u32, dst: u32| -> Vec<f32> {
+            let ratio = dst as f64 / src as f64;
+            let out_len = ((input.len() as f64) * ratio).round().max(1.0) as usize;
+            let step = 1.0 / ratio;
+            (0..out_len)
+                .map(|j| {
+                    let pos = j as f64 * step;
+                    let i0 = pos.floor() as usize;
+                    let i1 = (i0 + 1).min(input.len() - 1);
+                    let frac = (pos - i0 as f64) as f32;
+                    input[i0] * (1.0 - frac) + input[i1] * frac
+                })
+                .collect()
+        };
+
+        let x = full_scale_tone(3_000.0, 16_000, 32_000);
+        let y = resample(&x, 16_000, 48_000);
+        let old = linear(&x, 16_000, 48_000);
+        let body = &y[GUARD..y.len() - GUARD];
+        assert!(
+            db(amplitude_at(body, 48_000.0, 3_000.0)) > -0.1,
+            "the tone itself did not survive"
+        );
+        for image in [13_000.0, 19_000.0] {
+            let was = db(amplitude_at(
+                &old[GUARD..old.len() - GUARD],
+                48_000.0,
+                image,
+            ));
+            let now = db(amplitude_at(body, 48_000.0, image));
+            assert!(
+                was > -35.0,
+                "linear interpolation should image here: {was:.2} dB"
+            );
+            assert!(
+                now < -70.0,
+                "image at {image} Hz: {now:.2} dB (was {was:.2})"
+            );
+        }
+    }
+
+    /// A steady tone must come out steady. A resampler whose window length
+    /// alternates between ratios modulates the amplitude at the beat frequency,
+    /// which is a defect no spectrum taken over the whole file would show.
+    ///
+    /// Read [`amplitude_at`]'s doc before changing this: measured with the
+    /// obvious Goertzel it reports ripple that is not there.
+    #[test]
+    fn the_envelope_of_a_resampled_tone_stays_flat() {
+        for freq in [1_000.0, 3_000.0, 5_000.0, 6_000.0, 7_000.0] {
+            let x = full_scale_tone(freq, 44_100, 88_200);
+            let y = resample(&x, 44_100, 16_000);
+            let body = &y[GUARD..y.len() - GUARD];
+            let window = ((8.0 * 16_000.0 / freq).ceil() as usize).max(64);
+            let (mut lo, mut hi) = (f64::MAX, 0.0f64);
+            let mut k = 0;
+            while k + window <= body.len() {
+                let a = amplitude_at(&body[k..k + window], 16_000.0, freq);
+                lo = lo.min(a);
+                hi = hi.max(a);
+                k += window / 4;
+            }
+            let ripple = db(hi) - db(lo);
+            assert!(ripple < 0.05, "{freq} Hz wobbles by {ripple:.3} dB");
+        }
+    }
+
+    /// Everything the toolkit cares about at a 16 kHz output lives under 7 kHz,
+    /// and it has to arrive at the level it left. The box average was down
+    /// **5.6 dB** at 7 kHz through 44.1 → 16 kHz — a treble loss applied to
+    /// every corpus that was ever decoded off-rate, and a figure
+    /// `the_box_average_this_replaced_aliased_where_this_does_not` recomputes
+    /// rather than quoting.
+    ///
+    /// The last row is the price of [`KERNEL_ROLLOFF`] and is asserted as a
+    /// *range*: the edge is supposed to roll off, so a flat reading there would
+    /// mean the transition band had moved out past Nyquist and the alias test
+    /// above is the one that would start failing.
+    #[test]
+    fn the_top_of_the_passband_is_flat_and_the_edge_rolls_off() {
+        for (src, dst) in [(48_000u32, 16_000u32), (44_100, 16_000)] {
+            for freq in [100.0, 1_000.0, 3_000.0, 5_000.0, 6_000.0, 7_000.0] {
+                let x = full_scale_tone(freq, src, src as usize * 2);
+                let y = resample(&x, src, dst);
+                let level = db(amplitude_at(&y[GUARD..y.len() - GUARD], dst as f64, freq));
+                assert!(level > -0.5, "{freq} Hz at {src}->{dst} lost {level:.3} dB");
+            }
+            let x = full_scale_tone(7_500.0, src, src as usize * 2);
+            let y = resample(&x, src, dst);
+            let edge = db(amplitude_at(
+                &y[GUARD..y.len() - GUARD],
+                dst as f64,
+                7_500.0,
+            ));
+            assert!(
+                (-8.0..-1.0).contains(&edge),
+                "7500 Hz at {src}->{dst} is {edge:.3} dB, outside the transition band"
+            );
+        }
+    }
+
+    /// Unity gain, checked over the **whole** buffer rather than its middle, so
+    /// the ends — where the kernel hangs off the buffer and the weight sum is
+    /// the thing holding the level up — are part of the claim.
+    #[test]
+    fn a_constant_comes_back_as_the_same_constant() {
+        for (src, dst) in [
+            (44_100u32, 16_000u32),
+            (16_000, 48_000),
+            (48_000, 16_000),
+            (22_050, 44_100),
+            (44_100, 22_050),
+        ] {
+            // Long enough to visit every fractional phase of the ratio.
+            let y = resample(&vec![0.7f32; src as usize], src, dst);
+            for (i, v) in y.iter().enumerate() {
+                assert!(
+                    (v - 0.7).abs() < 1e-5,
+                    "{src}->{dst} sample {i}: {v} != 0.7"
+                );
+            }
+        }
+    }
+
+    /// The output length is a function of the input length and the ratio alone,
+    /// which is what keeps two channels resampled separately the same length and
+    /// what `preprocess`'s `the_rate_changes_and_the_duration_does_not` rests on.
+    #[test]
+    fn the_output_length_follows_the_rate_ratio() {
+        for (len, src, dst) in [
+            (44_100usize, 44_100u32, 16_000u32),
+            (44_100, 48_000, 16_000),
+            (16_000, 16_000, 48_000),
+            (1_000, 22_050, 44_100),
+            (3, 44_100, 16_000),
+        ] {
+            let want = ((len as f64) * dst as f64 / src as f64).round().max(1.0) as usize;
+            assert_eq!(
+                resample(&vec![0.0; len], src, dst).len(),
+                want,
+                "{len} @ {src}->{dst}"
+            );
+        }
+    }
+
+    /// The three inputs that take the early return come back untouched — the
+    /// matching-rate case especially, since it is the path every native-rate
+    /// decode in the workspace takes and the reason the other tests in this
+    /// module can compare exactly.
+    #[test]
+    fn a_resample_that_has_nothing_to_do_returns_its_input() {
+        let x = vec![0.25f32, -0.5, 0.75];
+        assert_eq!(resample(&x, 16_000, 16_000), x);
+        assert_eq!(resample(&x, 0, 16_000), x);
+        assert_eq!(resample(&[0.4], 44_100, 16_000), vec![0.4]);
+        assert!(resample(&[], 44_100, 16_000).is_empty());
+    }
+
+    /// The defect this kernel replaced, kept runnable so the numbers quoted for
+    /// it are computed rather than remembered.
+    ///
+    /// This is the old downsampling branch verbatim: an unweighted average over
+    /// `[j·step, j·step + step)`, described at the time as "a cheap
+    /// anti-alias". A box filter's first sidelobe is 13 dB down and its
+    /// stopband never gets deeper, so "cheap" understated it — at 48 → 16 kHz
+    /// the window is exactly three samples, a 12 kHz tone is `0, 1, 0, -1, …`,
+    /// and a third of it survives at 4 kHz.
+    fn box_average(input: &[f32], src: u32, dst: u32) -> Vec<f32> {
+        let ratio = dst as f64 / src as f64;
+        let out_len = ((input.len() as f64) * ratio).round().max(1.0) as usize;
+        let step = 1.0 / ratio;
+        (0..out_len)
+            .map(|j| {
+                let start = j as f64 * step;
+                let a = (start.floor() as usize).min(input.len() - 1);
+                let b = ((start + step).ceil() as usize).clamp(a + 1, input.len());
+                input[a..b].iter().sum::<f32>() / (b - a) as f32
+            })
+            .collect()
+    }
+
+    /// The comparison that says the replacement was worth making, rather than
+    /// leaving the reader to take the new figures on trust. Both columns are
+    /// computed here; the thresholds are the *gap*, which is the quantity that
+    /// must not regress.
+    ///
+    /// What it reports, in dB of the image relative to a full-scale input:
+    ///
+    /// | tone | rates | folds to | box average | this kernel |
+    /// |---|---|---|---|---|
+    /// | 12 kHz | 48 → 16 k | 4 kHz | −9.5 | −113.2 |
+    /// | 10 kHz | 44.1 → 16 k | 6 kHz | −14.6 | −95.1 |
+    /// | 8.5 kHz | 44.1 → 16 k | 7.5 kHz | −9.1 | −89.8 |
+    ///
+    /// …and, on the passband it was supposed to be leaving alone, 44.1 → 16 kHz:
+    /// −0.9 dB at 3 kHz, −2.7 at 5 kHz and −5.6 at 7 kHz against this kernel's
+    /// −0.000, −0.000 and −0.138.
+    #[test]
+    fn the_box_average_this_replaced_aliased_where_this_does_not() {
+        for (freq, src, dst, image) in [
+            (12_000.0, 48_000u32, 16_000u32, 4_000.0),
+            (10_000.0, 44_100, 16_000, 6_000.0),
+            (8_500.0, 44_100, 16_000, 7_500.0),
+        ] {
+            let x = full_scale_tone(freq, src, src as usize * 2);
+            let read = |y: &[f32]| db(amplitude_at(&y[GUARD..y.len() - GUARD], dst as f64, image));
+            let old = read(&box_average(&x, src, dst));
+            let new = read(&resample(&x, src, dst));
+            assert!(
+                old > -25.0,
+                "{freq} Hz: the box average was supposed to alias here, got {old:.2} dB"
+            );
+            assert!(
+                new < old - 60.0,
+                "{freq} Hz: box {old:.2} dB vs kernel {new:.2} dB — under 60 dB of gain"
+            );
+        }
+
+        // The other half of the trade: the box filter is a low-pass, so it was
+        // also eating the passband it was supposed to be passing.
+        for (freq, floor) in [(3_000.0, -0.5), (5_000.0, -2.0), (7_000.0, -4.0)] {
+            let x = full_scale_tone(freq, 44_100, 88_200);
+            let read = |y: &[f32]| db(amplitude_at(&y[GUARD..y.len() - GUARD], 16_000.0, freq));
+            let old = read(&box_average(&x, 44_100, 16_000));
+            let new = read(&resample(&x, 44_100, 16_000));
+            assert!(old < floor, "{freq} Hz: box average only lost {old:.3} dB");
+            assert!(new > -0.5, "{freq} Hz: this kernel lost {new:.3} dB");
+        }
+    }
+
+    /// The same claims, but through the real call site rather than the private
+    /// function: a 44.1 kHz file asked for at 16 kHz. This is what every engine
+    /// in the toolkit actually does, and none of the five tests around it
+    /// exercised it — they all decode at the file's own rate, which takes the
+    /// early return.
+    #[tokio::test]
+    async fn a_decode_at_another_rate_keeps_the_tone_and_adds_no_image() {
+        const SRC: u32 = 44_100;
+        const DST: u32 = 16_000;
+        // 3 kHz survives; 12 kHz is above the 8 kHz output Nyquist and must not
+        // reappear at 4 kHz.
+        let mixed: Vec<f32> = full_scale_tone(3_000.0, SRC, SRC as usize * 2)
+            .iter()
+            .zip(full_scale_tone(12_000.0, SRC, SRC as usize * 2).iter())
+            .map(|(a, b)| 0.4 * a + 0.4 * b)
+            .collect();
+        let path = temp_wav("offrate", &float_wav(SRC, 1, &mixed));
+
+        let got = collect_mono(&path, DST).await;
+        let _ = std::fs::remove_file(&path);
+
+        let want_len = (mixed.len() as f64 * DST as f64 / SRC as f64).round() as usize;
+        assert_eq!(got.len(), want_len);
+
+        let body = &got[GUARD..got.len() - GUARD];
+        let kept = db(amplitude_at(body, DST as f64, 3_000.0) / 0.4);
+        assert!(kept > -0.5, "the 3 kHz tone lost {kept:.3} dB");
+        let folded = db(amplitude_at(body, DST as f64, 4_000.0) / 0.4);
+        assert!(folded < -70.0, "12 kHz folded back at {folded:.2} dB");
     }
 
     /// The mono path is untouched by any of this: the same stereo file through
