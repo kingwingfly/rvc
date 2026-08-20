@@ -1041,6 +1041,289 @@ mod tests {
         assert_eq!(a.lufs, Some(-23.0));
     }
 
+    // The tests below are the other half of the same worry. Above: a flag that
+    // cannot be typed. Here: a flag that is typed, accepted, and then dropped
+    // on the way into the stage — which `-h` cannot show and a stage cannot
+    // report, because it never learns the value existed. Each one sets every
+    // knob to something that is NOT its default, so a conversion that hard-codes
+    // a field or forgets one fails rather than coincidentally agreeing.
+
+    #[test]
+    fn every_slicer_knob_reaches_the_slicer() {
+        let PreprocessCommand::Clip(a) = parse(&[
+            "preprocess",
+            "clip",
+            "--silence-db",
+            "-50",
+            "--min-silence",
+            "0.7",
+            "--min-clip",
+            "2.5",
+            "--max-clip",
+            "9.0",
+            "--pad",
+            "0.4",
+            "--sr",
+            "44100",
+            "--normalize",
+            "in.wav",
+        ]) else {
+            panic!("expected clip");
+        };
+        let opts = a.options();
+        assert_eq!(opts.sr, 44100);
+        assert!(opts.normalize);
+        assert_eq!(opts.slice.silence_db, -50.0);
+        assert_eq!(opts.slice.min_silence, 0.7);
+        assert_eq!(opts.slice.min_clip, 2.5);
+        assert_eq!(opts.slice.max_clip, 9.0);
+        assert_eq!(opts.slice.pad, 0.4);
+    }
+
+    #[test]
+    fn the_slicer_defaults_are_the_ones_the_shared_slicer_would_have_picked() {
+        // `SliceArgs` restates `audio_kit::SliceOptions::default()` rather than
+        // deferring to it, so the two can drift in silence — and `-h` would go
+        // on printing whichever one clap holds. This is what catches that.
+        let PreprocessCommand::Clip(a) = parse(&["preprocess", "clip", "in.wav"]) else {
+            panic!("expected clip");
+        };
+        // Compared field by field because `SliceOptions` is `audio-kit`'s and
+        // carries no `PartialEq`; naming each field is also what makes a field
+        // added there and forgotten here show up as a compile error rather
+        // than as a silently unchecked knob.
+        let (got, want) = (a.options().slice, audio_kit::SliceOptions::default());
+        assert_eq!(got.silence_db, want.silence_db);
+        assert_eq!(got.min_silence, want.min_silence);
+        assert_eq!(got.min_clip, want.min_clip);
+        assert_eq!(got.max_clip, want.max_clip);
+        assert_eq!(got.pad, want.pad);
+    }
+
+    #[test]
+    fn analyze_reports_against_the_very_settings_clip_would_cut_with() {
+        // The two stages flatten one `SliceArgs` for this reason: the numbers
+        // `analyze` prints are only worth acting on while they come from the
+        // knobs `clip` will act on.
+        let PreprocessCommand::Analyze(an) = parse(&[
+            "preprocess",
+            "analyze",
+            "--silence-db",
+            "-50",
+            "--min-silence",
+            "0.7",
+            "in.wav",
+        ]) else {
+            panic!("expected analyze");
+        };
+        let PreprocessCommand::Clip(cl) = parse(&[
+            "preprocess",
+            "clip",
+            "--silence-db",
+            "-50",
+            "--min-silence",
+            "0.7",
+            "in.wav",
+        ]) else {
+            panic!("expected clip");
+        };
+        let (got, want) = (an.options().slice, cl.options().slice);
+        assert_eq!(got.silence_db, want.silence_db);
+        assert_eq!(got.min_silence, want.min_silence);
+        assert_eq!(got.min_clip, want.min_clip);
+        assert_eq!(got.max_clip, want.max_clip);
+        assert_eq!(got.pad, want.pad);
+    }
+
+    #[test]
+    fn every_diarize_knob_reaches_the_stage() {
+        let PreprocessCommand::Diarize(a) = parse(&[
+            "preprocess",
+            "diarize",
+            "--reference",
+            "me.wav",
+            "--threshold",
+            "-0.2",
+            "--window",
+            "4.5",
+            "--hop",
+            "0.25",
+            "--min-segment",
+            "2.0",
+            "--sr",
+            "16000",
+            "in.wav",
+        ]) else {
+            panic!("expected diarize");
+        };
+        let opts = a.options();
+        assert_eq!(opts.sr, 16000);
+        assert_eq!(opts.threshold, -0.2);
+        assert_eq!(opts.window, 4.5);
+        assert_eq!(opts.hop, 0.25);
+        assert_eq!(opts.min_segment, 2.0);
+    }
+
+    #[test]
+    fn every_trim_knob_reaches_the_stage() {
+        let PreprocessCommand::Trim(a) = parse(&[
+            "preprocess",
+            "trim",
+            "--silence-db",
+            "-55",
+            "--pad",
+            "0.4",
+            "--measure-floor",
+            "--sr",
+            "22050",
+            "in.wav",
+        ]) else {
+            panic!("expected trim");
+        };
+        let opts = a.options();
+        assert_eq!(opts.sr, 22050);
+        assert_eq!(opts.silence_db, -55.0);
+        assert_eq!(opts.pad, 0.4);
+        assert!(opts.measure_floor);
+    }
+
+    #[test]
+    fn every_denoise_knob_reaches_the_filter() {
+        let PreprocessCommand::Denoise(a) = parse(&[
+            "preprocess",
+            "denoise",
+            "--denoise-strength",
+            "0.02",
+            "--denoise-patch",
+            "0.003",
+            "--denoise-research",
+            "0.01",
+            "--sr",
+            "44100",
+            "in.wav",
+        ]) else {
+            panic!("expected denoise");
+        };
+        let opts = a.options();
+        assert_eq!(opts.sr, 44100);
+        assert_eq!(opts.params.strength, 0.02);
+        assert_eq!(opts.params.patch_secs, 0.003);
+        assert_eq!(opts.params.research_secs, 0.01);
+    }
+
+    #[test]
+    fn resample_carries_both_the_rate_and_the_channel_count() {
+        let PreprocessCommand::Resample(a) = parse(&[
+            "preprocess",
+            "resample",
+            "--sr",
+            "16000",
+            "--channels",
+            "stereo",
+            "in.wav",
+        ]) else {
+            panic!("expected resample");
+        };
+        let opts = a.options();
+        assert_eq!(opts.sr, 16000);
+        assert_eq!(opts.channels, preprocess_core::resample::Channels::Stereo);
+    }
+
+    #[test]
+    fn resample_writes_mono_unless_asked_otherwise() {
+        // The default that costs a `separate` stem its second channel, so it
+        // is the one worth stating in a test as well as in the long help.
+        let PreprocessCommand::Resample(a) = parse(&["preprocess", "resample", "in.wav"]) else {
+            panic!("expected resample");
+        };
+        assert_eq!(
+            a.options().channels,
+            preprocess_core::resample::Channels::Mono
+        );
+    }
+
+    #[test]
+    fn each_stem_choice_reaches_the_separator() {
+        for (flag, want) in [
+            ("vocals", preprocess_core::separate::Stems::Vocals),
+            (
+                "instrumental",
+                preprocess_core::separate::Stems::Instrumental,
+            ),
+            ("both", preprocess_core::separate::Stems::Both),
+        ] {
+            let PreprocessCommand::Separate(a) =
+                parse(&["preprocess", "separate", "--stem", flag, "in.wav"])
+            else {
+                panic!("expected separate");
+            };
+            assert_eq!(a.options().stems, want);
+        }
+        let PreprocessCommand::Separate(a) = parse(&["preprocess", "separate", "in.wav"]) else {
+            panic!("expected separate");
+        };
+        assert_eq!(
+            a.options().stems,
+            preprocess_core::separate::Stems::Vocals,
+            "the default stem is the one a corpus wants"
+        );
+    }
+
+    #[test]
+    fn normalizes_default_target_is_the_peak_its_help_prints() {
+        // The one default in this file that clap does not own: `--peak` is an
+        // `Option`, so its `[default: 0.95]` is written by hand into the help
+        // text and the value actually used lives in `preprocess-core`. Nothing
+        // but this test connects the two, and a drift between them would print
+        // one number and apply another.
+        let PreprocessCommand::Normalize(a) = parse(&["preprocess", "normalize", "in.wav"]) else {
+            panic!("expected normalize");
+        };
+        assert_eq!(
+            a.options().target,
+            preprocess_core::normalize::Target::Peak(preprocess_core::normalize::DEFAULT_PEAK)
+        );
+        assert_eq!(preprocess_core::normalize::DEFAULT_PEAK, 0.95);
+    }
+
+    #[test]
+    fn each_normalize_target_reaches_the_stage_and_the_pair_is_refused() {
+        let PreprocessCommand::Normalize(a) =
+            parse(&["preprocess", "normalize", "--peak", "0.7", "in.wav"])
+        else {
+            panic!("expected normalize");
+        };
+        assert_eq!(
+            a.options().target,
+            preprocess_core::normalize::Target::Peak(0.7)
+        );
+
+        let PreprocessCommand::Normalize(a) =
+            parse(&["preprocess", "normalize", "--lufs", "-16", "in.wav"])
+        else {
+            panic!("expected normalize");
+        };
+        assert_eq!(
+            a.options().target,
+            preprocess_core::normalize::Target::Lufs(-16.0)
+        );
+
+        // Asking for both is refused by clap, by name, before a file is opened
+        // — which is why `options()` may treat the pair as unreachable.
+        assert!(
+            Bin::try_parse_from([
+                "preprocess",
+                "normalize",
+                "--peak",
+                "0.7",
+                "--lufs",
+                "-16",
+                "in.wav"
+            ])
+            .is_err()
+        );
+    }
+
     #[test]
     fn a_flag_whose_values_are_all_positive_still_refuses_a_negative_one() {
         // The annotation widens what a value may look like, so it is scoped to
