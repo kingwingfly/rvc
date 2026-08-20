@@ -434,7 +434,15 @@ pub struct DiarizeArgs {
     /// Cosine similarity to the reference a window must reach to be kept.
     /// Raise it to drop anything doubtful, lower it to keep more of the target
     /// voice at the cost of admitting other speakers.
-    #[arg(long, default_value_t = 0.55)]
+    // `allow_negative_numbers` because a cosine similarity starts at -1 and
+    // `verify` accepts the whole of that range, so `--threshold -0.2` is a
+    // legal invocation — and without this clap reads `-0.2` as a cluster of
+    // short flags and answers `unexpected argument '-0'`, which reads as a
+    // shell-quoting problem and is not one. A negative threshold is what
+    // somebody reaches for when a reference keeps nothing and they want the
+    // whole distribution written out before re-picking one. See `cli_kit`'s
+    // module docs.
+    #[arg(long, allow_negative_numbers = true, default_value_t = 0.55)]
     pub threshold: f32,
     /// Analysis window in seconds. Shorter follows a speaker change more
     /// closely and gives a noisier embedding; the speaker model pools its
@@ -885,6 +893,176 @@ impl ResampleArgs {
                 ChannelCount::Mono => preprocess_core::resample::Channels::Mono,
                 ChannelCount::Stereo => preprocess_core::resample::Channels::Stereo,
             },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    /// The `preprocess` binary's tree, minus `completions` — which belongs to
+    /// the binary rather than to the stages, so it is not part of what is
+    /// being tested here.
+    #[derive(Debug, Parser)]
+    #[command(name = "preprocess")]
+    struct Bin {
+        #[command(subcommand)]
+        command: PreprocessCommand,
+    }
+
+    /// `voice`'s tree, so a flag is exercised in the *nested* position too.
+    ///
+    /// This is the whole reason `allow_negative_numbers` goes on the argument
+    /// and not on the command: a `*-cli` crate exports an `Args` type that
+    /// somebody else's `Command` hosts, and a `Command`-level annotation is
+    /// left behind when that happens.
+    #[derive(Debug, Parser)]
+    #[command(name = "voice")]
+    struct Nested {
+        #[command(subcommand)]
+        command: NestedCommand,
+    }
+
+    #[derive(Debug, Subcommand)]
+    enum NestedCommand {
+        Preprocess(PreprocessCli),
+    }
+
+    fn parse(argv: &[&str]) -> PreprocessCommand {
+        Bin::parse_from(argv).command
+    }
+
+    // Every test below passes the value SPLIT from its flag (`--flag -1`
+    // rather than `--flag=-1`). That is the only form that reproduces the
+    // defect: clap reads a leading `-` as the start of a short-flag cluster
+    // unless the argument opted out, and the `=` form is never ambiguous. A
+    // test written the natural way — the way anybody writes one for a flag
+    // they have just added — passes against a broken flag.
+
+    #[test]
+    fn a_negative_diarize_threshold_parses_when_split_from_its_flag() {
+        let PreprocessCommand::Diarize(a) = parse(&[
+            "preprocess",
+            "diarize",
+            "--threshold",
+            "-0.2",
+            "--reference",
+            "me.wav",
+            "in.wav",
+        ]) else {
+            panic!("expected diarize");
+        };
+        assert_eq!(a.threshold, -0.2);
+    }
+
+    #[test]
+    fn the_whole_documented_threshold_range_is_reachable_and_accepted() {
+        // `verify` accepts -1..=1, so the bottom of that range has to survive
+        // the parser as well: a validator guarding values the parser refuses
+        // is a promise the command line cannot keep.
+        let PreprocessCommand::Diarize(a) = parse(&[
+            "preprocess",
+            "diarize",
+            "--threshold",
+            "-1",
+            "--reference",
+            "me.wav",
+            "in.wav",
+        ]) else {
+            panic!("expected diarize");
+        };
+        assert_eq!(a.threshold, -1.0);
+    }
+
+    #[test]
+    fn a_negative_threshold_parses_nested_under_voice_too() {
+        let NestedCommand::Preprocess(cli) = Nested::parse_from([
+            "voice",
+            "preprocess",
+            "diarize",
+            "--threshold",
+            "-0.2",
+            "--reference",
+            "me.wav",
+            "in.wav",
+        ])
+        .command;
+        let PreprocessCommand::Diarize(a) = cli.command else {
+            panic!("expected diarize");
+        };
+        assert_eq!(a.threshold, -0.2);
+    }
+
+    #[test]
+    fn the_silence_floor_clips_help_recommends_parses_when_split_from_its_flag() {
+        // `--silence-db`'s own help says "e.g. -50", and this is the form that
+        // advice is written in.
+        let PreprocessCommand::Clip(a) =
+            parse(&["preprocess", "clip", "--silence-db", "-50", "in.wav"])
+        else {
+            panic!("expected clip");
+        };
+        assert_eq!(a.slice.silence_db, -50.0);
+    }
+
+    #[test]
+    fn the_silence_floor_trims_help_recommends_parses_when_split_from_its_flag() {
+        let PreprocessCommand::Trim(a) =
+            parse(&["preprocess", "trim", "--silence-db", "-50", "in.wav"])
+        else {
+            panic!("expected trim");
+        };
+        assert_eq!(a.silence_db, -50.0);
+    }
+
+    #[test]
+    fn the_slice_floor_analyze_reports_against_parses_when_split_from_its_flag() {
+        // `analyze` flattens the very same `SliceArgs`, so the annotation has
+        // to reach it through the flatten as well.
+        let PreprocessCommand::Analyze(a) =
+            parse(&["preprocess", "analyze", "--silence-db", "-50", "in.wav"])
+        else {
+            panic!("expected analyze");
+        };
+        assert_eq!(a.slice.silence_db, -50.0);
+    }
+
+    #[test]
+    fn the_broadcast_loudness_target_parses_when_split_from_its_flag() {
+        // Every usable LUFS value is negative — full scale is 0 — so this flag
+        // is unreachable in its documented form without the annotation.
+        let PreprocessCommand::Normalize(a) =
+            parse(&["preprocess", "normalize", "--lufs", "-23", "in.wav"])
+        else {
+            panic!("expected normalize");
+        };
+        assert_eq!(a.lufs, Some(-23.0));
+    }
+
+    #[test]
+    fn a_flag_whose_values_are_all_positive_still_refuses_a_negative_one() {
+        // The annotation widens what a value may look like, so it is scoped to
+        // the arguments that need it rather than applied to the command. These
+        // are the flags that must keep rejecting a negative, and the check is
+        // that they fail at the *parser* rather than reaching `verify`.
+        for (stage, flag) in [
+            ("clip", "--sr"),
+            ("clip", "--pad"),
+            ("clip", "--min-silence"),
+            ("diarize", "--window"),
+            ("normalize", "--peak"),
+        ] {
+            let mut argv = vec!["preprocess", stage, flag, "-1"];
+            if stage == "diarize" {
+                argv.extend(["--reference", "me.wav"]);
+            }
+            argv.push("in.wav");
+            assert!(
+                Bin::try_parse_from(&argv).is_err(),
+                "{stage} {flag} accepted a negative value"
+            );
         }
     }
 }
