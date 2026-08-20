@@ -112,7 +112,11 @@ pub struct Histogram {
 }
 
 impl Histogram {
-    fn add(&mut self, secs: f64) {
+    /// Public because a caller that renders a report has to be able to build
+    /// one to test against: `counts` is already `pub`, so the alternative is
+    /// every such caller indexing the buckets by hand and re-deriving the
+    /// bucketing rule this method owns.
+    pub fn add(&mut self, secs: f64) {
         let i = DURATION_BUCKETS
             .iter()
             .position(|&b| secs < b)
