@@ -145,6 +145,21 @@ impl AudioFilter {
     }
 }
 
+/// Building a graph is where a missing filter is discovered, and the tests
+/// below `expect()` that rather than stepping around it.
+///
+/// They used to match [`AudioError::FilterUnavailable`] and `return`, which was
+/// wrong in two directions at once. A skip that cannot be told apart from a
+/// pass is the worse half — these are the only tests in the crate with an
+/// *external* oracle, `-21.1 LUFS` being what `ffmpeg -af ebur128` reports for
+/// the same waveform, so silently not running them costs more than any of the
+/// rest. But the arm never fired either: `FilterUnavailable` is only ever
+/// constructed for the graph's two **endpoints**, `abuffer` and `abuffersink`,
+/// while a missing *chain* filter fails inside [`filter::Graph::parse`] and
+/// arrives as [`AudioError::Ffmpeg`]. So the skip was unreachable and a real
+/// absence already panicked, just with a message that named no filter.
+///
+/// Measured on ffmpeg 9.0.1: both filters are present, and both assertions run.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,12 +197,8 @@ mod tests {
     #[test]
     fn afftdn_reduces_hiss() {
         let sr = 48_000u32;
-        let mut f = match AudioFilter::new(sr, "afftdn=nf=-20") {
-            Ok(f) => f,
-            // afftdn missing from this ffmpeg build → nothing to test.
-            Err(AudioError::FilterUnavailable(_)) => return,
-            Err(e) => panic!("build graph: {e}"),
-        };
+        let mut f = AudioFilter::new(sr, "afftdn=nf=-20")
+            .expect("this ffmpeg build must provide `afftdn`");
         // Deterministic white-ish noise (no rand dep).
         let mut s: u64 = 0x1234_5678;
         let input: Vec<f32> = (0..sr as usize * 2)
@@ -213,12 +224,8 @@ mod tests {
     #[test]
     fn a_measuring_filter_reports_through_metadata() {
         let sr = 48_000u32;
-        let mut f = match AudioFilter::new(sr, "ebur128=metadata=1:peak=none:framelog=quiet") {
-            Ok(f) => f,
-            // ebur128 missing from this ffmpeg build → nothing to test.
-            Err(AudioError::FilterUnavailable(_)) => return,
-            Err(e) => panic!("build graph: {e}"),
-        };
+        let mut f = AudioFilter::new(sr, "ebur128=metadata=1:peak=none:framelog=quiet")
+            .expect("this ffmpeg build must provide `ebur128`");
         assert_eq!(f.metadata("lavfi.r128.I"), None, "nothing measured yet");
 
         // ffmpeg's own `sine` source at its default amplitude of 0.125, which

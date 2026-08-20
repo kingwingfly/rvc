@@ -19,6 +19,14 @@ pub enum AudioError {
     #[error("unsupported sample format: {0:?}")]
     UnsupportedFormat(ffmpeg_next::format::Sample),
     /// A required libavfilter filter is missing from this ffmpeg build.
+    ///
+    /// Only ever the graph's **endpoints** — `abuffer` and `abuffersink` —
+    /// because those are found by name before the graph is built. A filter
+    /// named inside a chain description is resolved by libavfilter's own
+    /// parser, so its absence arrives as [`AudioError::Ffmpeg`] instead. Do
+    /// not match on this variant to detect a missing chain filter: it will not
+    /// fire, which is a test that steps around nothing while looking like it
+    /// steps around something.
     #[error("ffmpeg filter unavailable: {0}")]
     FilterUnavailable(&'static str),
     /// A [`StereoSamples`](crate::StereoSamples) arrived with its two channels

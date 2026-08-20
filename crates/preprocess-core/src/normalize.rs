@@ -225,6 +225,17 @@ pub fn integrated_lufs(samples: &[f32], sr: u32) -> Result<Option<f32>> {
     Ok((value.is_finite() && value > ABSOLUTE_GATE_LUFS).then_some(value))
 }
 
+/// Every measurement below `expect()`s its meter rather than stepping around a
+/// missing one.
+///
+/// Four of these tests used to open with `let Ok(..) = integrated_lufs(..)
+/// else { return }`, which swallowed *any* error — and two of them, spelled
+/// `Ok(Some(..))`, swallowed a `None` reading as well. A build where
+/// `lavfi.r128.I` stopped appearing would have taken the whole set green while
+/// they asserted nothing, and these are the tests holding this crate's only
+/// external oracle: `-21.1 LUFS` is what `ffmpeg -af ebur128` independently
+/// reports for the same waveform. A skip indistinguishable from a pass is worse
+/// than an absent test, so if the meter is gone these now say so.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,10 +284,9 @@ mod tests {
     /// waveform an independent tool has already put a number on.
     #[test]
     fn a_known_tone_measures_what_ffmpeg_says_it_does() {
-        let Ok(measured) = integrated_lufs(&tone(3.0, 0.125), SR) else {
-            return; // no ebur128 in this ffmpeg build
-        };
-        let measured = measured.expect("3 s of tone has an integrated loudness");
+        let measured = integrated_lufs(&tone(3.0, 0.125), SR)
+            .expect("measure")
+            .expect("3 s of tone has an integrated loudness");
         assert!(
             (measured - -21.1).abs() < 0.2,
             "expected ~-21.1 LUFS, got {measured}"
@@ -288,9 +298,9 @@ mod tests {
     /// nothing converges to.
     #[test]
     fn the_reading_tracks_the_gain_exactly() {
-        let Ok(Some(loud)) = integrated_lufs(&tone(3.0, 0.5), SR) else {
-            return;
-        };
+        let loud = integrated_lufs(&tone(3.0, 0.5), SR)
+            .expect("measure")
+            .expect("3 s of tone has an integrated loudness");
         let quiet = integrated_lufs(&tone(3.0, 0.25), SR)
             .expect("measure")
             .expect("3 s of tone has an integrated loudness");
@@ -304,9 +314,9 @@ mod tests {
     #[test]
     fn normalizing_to_a_lufs_target_lands_on_it() {
         let mut s = tone(3.0, 0.125);
-        let Ok(Some(before)) = integrated_lufs(&s, SR) else {
-            return;
-        };
+        let before = integrated_lufs(&s, SR)
+            .expect("measure")
+            .expect("3 s of tone has an integrated loudness");
         let gain_db = -23.0 - before;
         let gain = 10f32.powf(gain_db / 20.0);
         for x in s.iter_mut() {
@@ -650,9 +660,10 @@ mod tests {
             None,
             "100 ms is under one 400 ms gating block"
         );
-        let Ok(silent) = integrated_lufs(&vec![0.0; SR as usize * 2], SR) else {
-            return;
-        };
-        assert_eq!(silent, None, "silence has no loudness, not a very low one");
+        assert_eq!(
+            integrated_lufs(&vec![0.0; SR as usize * 2], SR).expect("measure"),
+            None,
+            "silence has no loudness, not a very low one"
+        );
     }
 }
