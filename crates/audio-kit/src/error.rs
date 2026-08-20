@@ -29,6 +29,26 @@ pub enum AudioError {
     /// steps around something.
     #[error("ffmpeg filter unavailable: {0}")]
     FilterUnavailable(&'static str),
+    /// A filter chain negotiated an output sample rate other than the one the
+    /// graph was declared at.
+    ///
+    /// [`AudioFilter`](crate::AudioFilter) pins its sink's *format* and
+    /// *channel layout* but cannot pin its rate, so a chain holding a
+    /// resampler — `aresample`, or `loudnorm`, which negotiates 192 kHz of its
+    /// own accord — hands back samples at a rate the caller has no way to
+    /// learn. Counting those as if they were the declared rate is silent and
+    /// total: the audio is right and every duration computed from it is wrong
+    /// by the ratio.
+    #[error(
+        "filter chain renegotiated the sample rate to {got} Hz, but the graph is declared at \
+         {declared} Hz; a chain that resamples cannot be driven through this type"
+    )]
+    RateRenegotiated {
+        /// The rate the graph was built for.
+        declared: u32,
+        /// The rate a frame actually came out at.
+        got: u32,
+    },
     /// A [`StereoSamples`](crate::StereoSamples) arrived with its two channels
     /// at different lengths, which its own invariant forbids.
     #[error("stereo chunk channels differ in length: left {left}, right {right}")]

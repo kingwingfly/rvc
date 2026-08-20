@@ -190,8 +190,10 @@ fn db(gain: f32) -> f32 {
 /// limits, which is precisely the processing a breathy corpus must not get —
 /// and its linear mode needs measured values it will only ever print to a log,
 /// where an in-process filter graph cannot read them. It also negotiates its
-/// output to 192 kHz, which [`audio_kit::AudioFilter`] would hand back as if it
-/// were `sr`.
+/// output to 192 kHz, which [`audio_kit::AudioFilter`] used to hand back as if
+/// it were `sr` — that one is now refused rather than miscounted
+/// ([`audio_kit::AudioError::RateRenegotiated`]), but a chain that has to be
+/// refused is still the wrong chain.
 ///
 /// `ebur128` has none of those problems: it passes the audio through untouched
 /// and injects the running measurement as frame metadata, so ffmpeg does the
@@ -341,7 +343,9 @@ mod tests {
     async fn input_file(dir: &Path, base: &str, samples: Vec<f32>) -> InputFile {
         let path = dir.join(format!("{base}.wav"));
         let stream = stream::iter([Ok::<_, audio_kit::AudioError>(samples)]);
-        write_wav_file(&path, SR, stream).await.expect("write input");
+        write_wav_file(&path, SR, stream)
+            .await
+            .expect("write input");
         InputFile {
             path,
             base: base.to_string(),
