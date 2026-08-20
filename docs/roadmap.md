@@ -21,7 +21,7 @@ there; a choice still open belongs here.
 - [Exporting a fine-tuned ContentVec or RMVPE](#exporting-a-fine-tuned-contentvec-or-rmvpe)
 - [The duplicated `session()` builder](#the-duplicated-session-builder)
 - [The RVC 2.3 mel floor](#the-rvc-23-mel-floor)
-- [Separation is stereo-native and speech is not](#separation-is-stereo-native-and-speech-is-not)
+- [Separation attenuates a bed, it does not remove it](#separation-attenuates-a-bed-it-does-not-remove-it)
 - [`preprocess diarize` without a reference](#preprocess-diarize-without-a-reference)
 
 ## `translate` — the missing pipeline stage
@@ -233,41 +233,46 @@ is the other engine's regression risk.
 *Note the linear side is already finer than either release.* This repo uses 1e-9
 where 2.2 used 1e-6 and 2.3 uses 2e-7, so only the mel floor is actually in
 question.
+## Separation attenuates a bed, it does not remove it
 
-## Separation is stereo-native and speech is not
+`preprocess separate` runs MDX23C, which takes **10–12 dB** of a continuous
+music bed out of the vocals stem on the material this toolkit is actually for —
+a person talking over somebody else's music — and about **4 dB** where the bed
+is intermittent, since there is less of it in the speech gaps to take out. The
+stems buy far more than those numbers suggest: a mixture with a continuous bed
+has no silence to cut on, so the difference between "five clips holding a
+minute" and "fourteen holding sentences" is the difference between a corpus and
+a file. But the bed is attenuated rather than gone, and any consumer should
+expect that.
 
-`preprocess separate` runs MDX23C, which reaches 15–20 dB of bed removal on a
-song and **5–6.5 dB** on the material this toolkit is actually for: a person
-talking over somebody else's music. The stems still buy far more than that
-number suggests — a mixture with a continuous bed has no silence to cut on, so
-the difference between "one clip holding a minute" and "twelve holding
-sentences" is the difference between a corpus and a file. But the bed is
-attenuated, not gone, and any consumer should expect that.
+*This entry used to read "5–6.5 dB", and used to argue that the shortfall was
+the training distribution — MDX23C learned* sung *vocals and a speaking voice is
+not one. That is retracted.* Every figure behind it was measured on LibTorch
+while `burn_mdx::TfcTdfNet::forward` was letting the encoder overwrite the
+network's head in place; the model separates speech from music about as well as
+it separates singing. See CLAUDE.md's **`swap_dims` on LibTorch returns a view
+burn-tch forgets the provenance of**.
 
-*Why the obvious explanation is the wrong one.* The model eats a stereo complex
-STFT and finds a centre-panned vocal by where it sits in the field, so the first
-guess is that a near-mono stream starves it of its cue. That guess was measured
-and is mostly wrong: on the 19.8-minute stream this was read on, the side
-channel sits 14–19 dB under the mid — so the cue really is mostly absent — but
-folding to true mono and re-running costs only **1.4 dB** (6.5 → 5.1). What is
-left is the training distribution: it learned *sung* vocals inside real
-productions, and a speaking voice is not one. The practical corollary is worth
-having: **a mono corpus loses almost nothing here.**
+*The stereo cue is real but small.* The model eats a stereo complex STFT and
+finds a centre-panned vocal partly by where it sits in the field, so the obvious
+worry is that a near-mono stream starves it. Measured: the side channel sits
+16–19 dB under the mid on every excerpt, and folding to true mono and re-running
+costs **2.9 dB** (10.4 → 7.5). Real, worth knowing before recording a corpus in
+one channel, and not the difference between working and not.
 
-*So what would actually move it* is a separator trained on speech-over-music
-rather than a better use of the stereo field — which means a different
-checkpoint, and possibly a different architecture, not a change to `burn-mdx`.
-Nothing in this repo blocks that: `burn_mdx::MdxConfig` already describes the
-family by shape, and `examples/keys` reads a new checkpoint's architecture off
-its tensors. What blocks it is that no such published checkpoint has been
-identified.
+*What would move it further* is a separator trained on speech-over-music rather
+than on productions — a different checkpoint, and possibly a different
+architecture, not a change to `burn-mdx`. Nothing here blocks that:
+`burn_mdx::MdxConfig` already describes the family by shape, and `examples/keys`
+reads a new checkpoint's architecture off its tensors. What blocks it is that no
+such published checkpoint has been identified — and with 10–12 dB in hand the
+case for looking is weaker than it was.
 
 *And the measurement is content-sensitive*, which is the thing not to
-re-derive: the same stems read at a 250 ms gap window give 6.5 dB and at a
-one-second window give 2.1 dB and a verdict that **inverts**, because a
-between-sentence gap is a few hundred milliseconds and at one second no "quiet"
-frame is speech-free. Any future comparison has to pin the window or it is not
-comparing anything.
+re-derive: read at a 250 ms gap window the removal is 10.4 dB, and at a
+one-second window the verdict can **invert**, because a between-sentence gap is
+a few hundred milliseconds and at one second no "quiet" frame is speech-free.
+Any future comparison has to pin the window or it is not comparing anything.
 
 ## `preprocess diarize` without a reference
 

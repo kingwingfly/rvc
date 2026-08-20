@@ -937,12 +937,11 @@ matches the checkpoint, and both would be *unchanged* by the U-net running with
 frequency as the image height, by a batch norm where an instance norm belongs,
 or by a filterbank missing its mean subtraction. So each network needs a second
 check that exercises arithmetic on real audio.
-
 == Separation, synthetically: the check that proves the port
 
 Mix a known voice with a known bed and every reading has a reference.
-Measured on LibTorch/CUDA over six clips of this repository's own corpus against
-a synthesised organ chord at a 0 dB mix:
+Measured on LibTorch/CUDA against a synthesised organ chord at a 0 dB mix, with
+a clean dry speech recording as the known voice:
 
 #panel(caption: [The synthetic mode. *Read the first row first.*])[
   #set text(size: 9.3pt)
@@ -952,43 +951,50 @@ a synthesised organ chord at a 0 dB mix:
     inset: 6pt,
     align: (left, center),
     table.header([*reading*], [*value*]),
-    [*partition* — the two stems summed, against the mixture], [*41.5 dB* SI-SDR],
-    [solo voice in — vocals / instrumental rms], [0.0516 / 0.0299 (*4.7 dB*)],
-    [solo bed in — vocals / instrumental rms], [0.0226 / 0.0526 (*7.3 dB*)],
-    [SI-SDR of the vocals stem against voice / against bed], [−0.25 / −0.54 dB],
-    [envelope corr, vocals stem against voice / bed], [0.678 / 0.645],
-    [envelope corr, instrumental stem against voice / bed], [0.508 / 0.583],
+    [*partition* — the two stems summed, against the mixture], [*58.5 dB* SI-SDR],
+    [solo voice in — vocals / instrumental rms], [0.1013 / 0.0051 (*26.0 dB*)],
+    [solo bed in — vocals / instrumental rms], [0.0080 / 0.1006 (*22.0 dB*)],
+    [SI-SDR of the vocals stem against voice / against bed], [*+11.91* / −18.68 dB],
+    [envelope corr, vocals stem against voice / bed], [0.989 / −0.088],
+    [envelope corr, instrumental stem against voice / bed], [−0.135 / 0.966],
   )
 ]
 
-The two stems reconstruct their input to 41.5 dB, and the solo probes split *in
-opposite directions* depending on which source went in. Together those say the
-forward pass is coherent and content-dependent — a transposed U-net, a batch
-norm where an instance norm belongs, a mis-scaled block or a scrambled stem axis
-destroys one or both, because nothing downstream re-imposes either property.
+The two stems reconstruct their input to 58.5 dB, and the solo probes split *in
+opposite directions* by more than 20 dB each. Together those say the forward
+pass is coherent and content-dependent — a transposed U-net, a batch norm where
+an instance norm belongs, a mis-scaled block or a scrambled stem axis destroys
+one or both, because nothing downstream re-imposes either property.
 
-*What it does not establish is separation quality*, and the numbers are honest
-about that: 4.7 dB of rejection is far below the 20 dB-plus a vocal separator
-manages on the material it was trained for, and every mixture-level SI-SDR row
-sits within a decibel of doing nothing. The reason is the input rather than the
-port — MDX23C was trained on *sung* vocals inside real productions, and this
-feeds it dry close-mic speech over a synthesised chord, out of distribution on
-both sides.
+The SI-SDR row is the one to read second, because it is the one a broken pass
+flattens. The unprocessed mixture scores 0.04 dB against either source; the
+vocals stem scores +11.91 against the voice. A stem sitting within a decibel of
+the do-nothing baseline is not a hard input, it is a defect.
 
-Note what the do-nothing baseline has to be. Correlating an output against its
-*input* is right for a round trip and wrong here, because a network that returned
-its input unchanged would score beautifully. For separation the meaningful
-baseline is the unprocessed mixture, measured the same way.
+Note what that baseline has to be. Correlating an output against its *input* is
+right for a round trip and wrong here, because a network that returned its input
+unchanged would score beautifully. For separation the meaningful baseline is the
+unprocessed mixture, measured the same way.
+
+*This table is a correction rather than an update.* It used to read 41.5 dB of
+partition and 4.7 dB of solo-voice rejection, with a paragraph explaining that
+MDX23C was trained on *sung* vocals inside real productions and that dry speech
+is out of distribution on both sides. Every figure behind it was measured while
+LibTorch — the backend `--backend auto` picks — was overwriting the network's
+head in place, and the explanation was a story fitted to those numbers. It is
+wrong: this model separates a speaking voice about as well as a singing one. The
+mechanism, and the reason weight coverage and an STFT round trip both passed
+throughout, is in CLAUDE.md.
 
 == Separation, really: the check that measures usefulness
 
 On a real recording no stems exist, so no SI-SDR against a source is available
-and every reading is a *contrast* the mixture is measured under identically. One
-19.8-minute stereo stream at 44.1 kHz — a streamer talking over somebody else's
-music — at 50% overlap-add. `contrast` is the loudest tenth of 250 ms frames
-against the quietest tenth, with the frames chosen by the *mixture* so all three
-columns read the same instants; `bed out` is how far the vocals stem sits under
-the mixture in those quiet frames, which is the music that came out of it.
+and every reading is a *contrast* the mixture is measured under identically.
+Excerpts of one stereo stream at 44.1 kHz — a streamer talking over somebody
+else's music — at 50% overlap-add. `contrast` is the loudest tenth of 250 ms
+frames against the quietest tenth, with the frames chosen by the *mixture* so all
+three columns read the same instants; `bed out` is how far the vocals stem sits
+under the mixture in those quiet frames, which is the music that came out of it.
 
 #panel(caption: [The real-recording mode. *These numbers and the synthetic ones
 answer different questions and must not be merged.*])[
@@ -999,79 +1005,72 @@ answer different questions and must not be merged.*])[
     inset: 5pt,
     align: (left, center, center, center, center, center, center),
     table.header([*excerpt*], [side\ below mid], [partition], [vocals\ rms], [instr\ rms], [contrast mix / voc / instr], [bed\ out]),
-    [900–960 s], [18.6 dB], [34.9 dB], [−2.5 dB], [−5.1 dB], [19.9 / *24.4* / 10.5 dB], [*−6.5 dB*],
-    [900–930 s], [17.1 dB], [36.3 dB], [−3.0 dB], [−5.2 dB], [22.1 / *25.7* / 11.6 dB], [−6.0 dB],
-    [180–210 s], [14.3 dB], [34.2 dB], [−2.6 dB], [−3.5 dB], [12.9 / *16.8* / 7.7 dB], [−5.5 dB],
-    [480–510 s], [16.2 dB], [34.6 dB], [−0.7 dB], [−7.3 dB], [22.5 / 23.5 / 16.7 dB], [−2.0 dB],
-    [900–960 s, mono fold], [—], [37.5 dB], [−2.6 dB], [−5.4 dB], [19.9 / 22.9 / 10.7 dB], [−5.1 dB],
+    [900–960 s], [18.6 dB], [62.2 dB], [−2.2 dB], [−4.0 dB], [19.9 / *29.2* / 14.1 dB], [*−10.4 dB*],
+    [900–930 s], [17.0 dB], [62.8 dB], [−2.5 dB], [−3.6 dB], [22.1 / *32.8* / 15.9 dB], [*−11.8 dB*],
+    [480–510 s], [16.2 dB], [60.8 dB], [−0.9 dB], [−7.9 dB], [22.5 / 25.5 / 17.7 dB], [−4.0 dB],
+    [900–960 s, mono fold], [—], [63.1 dB], [−2.2 dB], [−4.1 dB], [19.9 / 26.3 / 14.6 dB], [−7.5 dB],
   )
 ]
 
-*It separates, and the amount is modest.* The three contrast columns move
-together in the way a working separation has to: the vocals stem's contrast comes
-out *above* the mixture's and the instrumental stem's *below* it, which is one
-stem following the intermittent speech and the other the continuous bed. But
-5–6.5 dB of bed removal is a long way from the 15–20 dB this model reaches on a
-song, so the music is attenuated rather than gone.
+*It separates.* The three contrast columns move together in the way a working
+separation has to: the vocals stem's contrast comes out *above* the mixture's
+and the instrumental stem's *below* it, which is one stem following the
+intermittent speech and the other the continuous bed. 10–12 dB of a continuous
+bed is what this model gets on this material; the music is strongly attenuated
+rather than gone, which is what a complex-spectrum estimate does with content
+overlapping the voice in band.
 
 Four things about that table that are easy to get wrong:
 
 - *The 480 s row is a control, not an outlier.* That region's bed stops between
   phrases instead of running under them, so there is little bed in the quiet
-  frames to remove — and the instrumental stem's contrast rises to 16.7 dB,
+  frames to remove — and the instrumental stem's contrast rises to 17.7 dB,
   tracking a bed that is itself intermittent. Less removal where there is less to
   remove is the model behaving.
 - *Read the gaps at 250 ms, not at one second.* A between-sentence gap is a few
   hundred milliseconds, so at a one-second window no "quiet" frame is speech-free
-  and the verdict *inverts*: the same stems on the same 60 s give 2.1 dB of
-  removal and a vocals contrast *below* the mixture's, which reads as a model
-  that separated nothing.
-- *Near-mono is not the explanation.* The side channel sits 14–19 dB under the
-  mid on every excerpt, which removes most of the spatial cue a stereo-native
-  separator would use. Folding to true mono and re-running takes the removal from
-  6.5 dB to 5.1 dB — real, and far too small to be the gap. What is left is the
-  material: a speaking voice is not a sung one. Which also means a *mono corpus
-  loses almost nothing* by going through this stage.
-- *The partition is 34–37 dB here against 41.5 dB on one chunk.* Overlap-add
-  seams are part of that — the synthetic mode runs a single chunk with no seam
-  at all — but demonstrably not all of it: the mono fold has the same file, the
-  same hop and therefore the same seams, and reads 37.5 dB against the stereo
-  run's 34.9. The partition reading is content-sensitive, which is worth knowing
-  before treating a change in it as a regression.
+  and the verdict can *invert* — a vocals contrast *below* the mixture's, which
+  reads as a model that separated nothing. Pin the window or the comparison
+  means nothing.
+- *Near-mono costs about 2.9 dB.* The side channel sits 16–19 dB under the mid
+  on every excerpt, which removes most of the spatial cue a stereo-native
+  separator would use. Folding to true mono and re-running takes the removal
+  from 10.4 dB to 7.5 dB — real, worth knowing before recording a corpus in one
+  channel, and not the difference between working and not.
+- *The partition is 61–63 dB here against 58.5 dB on one chunk*, so the
+  overlap-add seams cost nothing measurable, even at 50% where upstream's config
+  asks for eight-fold overlap. Both readings sit far enough above anything
+  audible that a change in either is a signal — which is exactly what they were
+  not before the fix above, when the pair read 34–37 against 41.5 and the gap
+  invited an explanation.
 
-*Every figure above reads the mono downmix, and the stems are stereo.* Folding
-both mixture and stem to mid puts the bed 4.1 dB down in that excerpt's speech
-gaps; reading the same two files as written gives 1.0 dB, because what the stem
-keeps of the bed is largely out of phase between the channels and cancels in the
-fold, where the mixture's own level barely moves. Neither reading is wrong and
-they are not interchangeable — the mono one is what everything downstream will
-decode.
+*Every figure above reads the mono downmix, and the stems are stereo.* That is
+the reading that matters, because everything downstream decodes mono.
 
 == The finding that is not in decibels
 
 Transcribe the same 60 s of mixture and of vocals stem with the same settings,
-and the decibels turn out to undersell the stage badly:
+and the decibels still undersell the stage:
 
-- *The words are the same* — same content, same order, differing in one
-  character across the minute.
-- *The segmentation is not, and that is the finding.* The mixture yields *5*
-  segments, one of them a single merged run of most of a
-  phrase#footnote[Recorded as 18.8 s by one harness and 16.9 s by another; the
-  disagreement is unresolved and is left stated rather than averaged. The
-  segment counts and the words agree everywhere.]; the stem yields *14*, one per
-  utterance. Segmentation cuts on silence (#ref(<sec-slice>)), and a continuous
-  bed means the recording *has* no silence — so a corpus behind music cannot be
-  cut into sentences at all until the bed comes off.
-- Sliced at the default parameters, the same 60 s gives *5* clips holding 58 of
-  its 60 seconds before separation, and *12* holding 39 after. The mixture has no
-  sentence boundaries to find, so it "keeps" almost everything as one lump.
-- *Emptying the gaps has a cost.* One of the 14 was a clear recogniser
-  hallucination — English in a Chinese-pinned run — and one was a 0.37 s
-  fragment, both in near-silent frames the mixture's longer segments had
-  swallowed. Anything consuming these stems wants a duration floor. And pin the
-  language: left to detect, the two files disagree about which language they are
-  and the comparison stops meaning anything.
-
+- *The segmentation is the finding.* The mixture yields *5* segments, one of
+  them a single merged run of most of a phrase#footnote[Recorded as 18.8 s by
+  one harness and 16.9 s by another; the disagreement is unresolved and is left
+  stated rather than averaged. The segment counts and the words agree
+  everywhere.]; the stem yields *17*, roughly one per utterance. Segmentation
+  cuts on silence (#ref(<sec-slice>)), and a continuous bed means the recording
+  *has* no silence — so a corpus behind music cannot be cut into sentences at
+  all until the bed comes off.
+- Sliced at the default parameters, the same 60 s gives *5* clips holding 58.2
+  of its 60 seconds before separation, and *14* holding 35.9 after. The mixture
+  has no sentence boundaries to find, so it "keeps" almost everything as one
+  lump; the 22 seconds that stop being kept are the bed.
+- The same thing read by `analyze`: the noise floor falls from
+  −40.3 dBFS to −76.7, and the SNR goes 15.1 → 49.3 dB.
+- *Emptying the gaps has a cost.* Extra segments appear in near-silent frames
+  the mixture's longer ones had swallowed, and a recogniser has more room to
+  invent there. Anything consuming these stems wants a duration floor. And pin
+  the language: left to detect, the two files disagree about which language they
+  are and the comparison stops meaning anything.
 // =========================================================================
 = The order the decisions come in
 

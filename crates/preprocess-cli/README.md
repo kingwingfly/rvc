@@ -195,20 +195,25 @@ folding the field away would throw out one of the two cues it separates on.
 Writing them at anything else would be a resample stacked on a separation, and
 the next stage's decode performs one anyway.
 
-**Run it before `clip`, and expect the music attenuated rather than gone.** The
-network reaches 15–20 dB of bed removal on a song and **5–6.5 dB** on a person
-talking over one, because it was trained on *sung* vocals and a speaking voice is
-not one. Those two figures are `burn-mdx`'s own harness (`cargo run -p burn-mdx
---example separate --features tch -- --mixture <file>`) and were **not re-run for
-this page**; the example's module doc is where they stay current.
+**Run it before `clip`, and expect the music strongly attenuated rather than
+gone.** Measured on excerpts of a real stream, **10–12 dB** of a continuous bed
+comes out of the vocals stem, and **4 dB** where the bed is intermittent — there
+is less of it in the speech gaps to take out. Those figures are `burn-mdx`'s own
+harness (`cargo run -p burn-mdx --example separate --features tch -- --mixture
+<file>`), whose module doc is where they stay current.
 
-What was re-run here is the consequence, which is out of proportion to the
-decibels: slicing cuts on silence, and a continuous bed means the recording has
-none, so a corpus recorded behind music cannot be cut into sentences *at all*
-until the bed comes off. On 60 s of a real stream, `clip` gave **3** clips
-holding 59.9 of the 60 seconds before this stage and **13** holding 41.4 after —
-and the noise floor `analyze` reads fell from −38.7 to −51.0 dBFS with the SNR
-going 11.4 → 22.3 dB.
+**They replace a much smaller set of numbers, and the difference was a bug, not
+a re-measurement.** Until it was fixed, `--backend auto` — which resolves to
+LibTorch — ran the network with its head being overwritten mid-pass, and this
+page reported 5–6.5 dB with an explanation about MDX23C being trained on *sung*
+vocals. If you have stems produced before that fix, they are worth regenerating.
+
+The consequence is out of proportion to the decibels: slicing cuts on silence,
+and a continuous bed means the recording has none, so a corpus recorded behind
+music cannot be cut into sentences *at all* until the bed comes off. On 60 s of
+a real stream, `clip` gave **5** clips holding 58.2 of the 60 seconds before this
+stage and **14** holding 35.9 after — and the noise floor `analyze` reads fell
+from **−40.3 to −76.7 dBFS**, with the SNR going **15.1 → 49.3 dB**.
 
 Two consequences of emptying those gaps, both worth expecting downstream: a
 recogniser has more room to invent in a newly-silent gap, and very short

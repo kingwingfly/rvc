@@ -452,11 +452,17 @@ cargo run -p burn-seedvc --example speaker    # pairwise cosine: same speaker vs
 cargo run -p burn-seedvc --example vocode     # BigVGAN: does the waveform track the mel
 cargo run -p burn-seedvc --example content    # whisper-small + the length regulator
 cargo run -p burn-rvc    --example infer      # one generator forward pass
-cargo run -p burn-mdx --example separate --features tch  # stems partition the mix, 41.5 dB
+cargo run -p burn-mdx --example separate --features tch  # stems partition the mix, 58.5 dB
 cargo run -p burn-mdx --example separate --features tch -- --mixture <song.wav> <ckpt>
 # ...the second form is the *real*-recording mode: no stems exist, so it reports
-# no SI-SDR against a source and every reading is a contrast. 5-6.5 dB of bed
-# removal, and the reason that is not a hedge is in the example's module doc.
+# no SI-SDR against a source and every reading is a contrast. 10-12 dB of bed
+# removal on a continuous bed, and 4 dB on an intermittent one for the reason
+# the example's module doc gives. Both figures replace a smaller set measured
+# through a LibTorch aliasing bug; do not merge them.
+cargo test -p burn-mdx --features tch   # the aliasing hazard, which needs the
+# ...backend that has it — `cargo test --workspace` runs burn-mdx on default
+# features and cannot reach it. See **`swap_dims` on LibTorch returns a view
+# burn-tch forgets the provenance of**.
 cargo run -p preprocess-core --features tch --example timbre -- --campplus … \
     --reference <clip> <same speaker> <a different one>   # where `diarize`'s 0.55 came from
 cargo run -p seedvc-core --features tch --example convert  # the engine, end to end
@@ -583,6 +589,70 @@ finite output, and predicts the wrong pitch confidently. A scalar reference
 written straight from PyTorch's documented equations pins both, and a second test
 pins that the reverse direction actually travels backwards — running it forwards
 and storing it at the same index passes every shape and finiteness check there is.
+
+**`swap_dims` on LibTorch returns a view burn-tch forgets the provenance of, so
+a live handle to the source gets overwritten in place.** `burn-tch`'s
+`swap_dims` and `permute` build their result with `TchTensor::new`, which stamps
+a **fresh** `Storage::Owned` on a tensor that is still torch's view of somebody
+else's buffer. `can_mut()` then says yes — the strong count of that new `Arc` is
+1 — and the next in-place-capable op writes straight through the view into the
+tensor the caller is still holding. `slice`, `narrow`, `reshape` and `gather` go
+through `from_existing`, which compares data pointers and shares the parent's
+storage, so they are safe. `flip` also uses `TchTensor::new` and is **also
+safe**, because `torch.flip` copies rather than viewing, so its data pointer
+differs — worth stating, because `burn-vits`'s `spectral.rs` and `burn-seedvc`'s
+`wavenet.rs` both flip a slice of a live tensor and would otherwise read as two
+hits.
+
+`burn-mdx`'s `TfcTdfNet::forward` had exactly this shape, and the cost of it is
+the reason this entry exists. `first_conv_out.clone().swap_dims(2, 3)` handed
+the U-net a transposed alias of the head's gate, and the encoder's first
+`InstanceNorm` subtracted a mean into it. **Nothing in this repository's normal
+gate can see that**: weight coverage read 319/0/0, the STFT round trip passed,
+the output was finite, the two stems still summed to the mixture — and the
+separation was gone. Clean dry speech came out **7.7 dB** toward the vocals stem
+where CubeCL gave **26.0 dB** on the same weights, which was read for weeks as
+MDX23C being a sung-vocal model fed the wrong material.
+
+Three things to take from it rather than re-derive:
+
+- **The audit is `grep -rn "swap_dims\|permute" crates/`**, the same shape as
+  `grep check_coverage`, and the question to ask of each hit is *is the source
+  still live while something downstream may mutate the view?* A bare
+  `expr.swap_dims(..)` on a moved temporary — which is most of them — is always
+  fine. **Do not narrow the pattern to `clone()\.swap_dims`**: that spelling is
+  only one of the two ways to hold the source, and the other is worse.
+  `burn-whisper`'s `decoder.rs` has
+  `self.embed_tokens.weight.val().swap_dims(0, 1)`, where `val()` hands out a
+  clone while the *parameter* stays live in the module — a model weight, one
+  in-place op away from being scribbled on. It is safe today only because
+  `matmul` consumes it and does not mutate, which is a property of the caller
+  rather than of the code, so it is the site to re-check first.
+  `burn-hubert`'s `x.clone().swap_dims(1, 2)` into `PosConv` is the same shape
+  and safe for the same reason — `conv1d` does not mutate its input — and the
+  ContentVec Burn-against-ORT cosine of 1.000000 recorded below is the evidence
+  that it does not. Two sites, both safe by their consumer's good manners:
+  that is the state to keep, not a clean grep.
+- **Two backends disagreeing is the cheapest possible check**, and it is what
+  found this. Any Burn port here can be run on `tch` and on `cuda` over one
+  input; they now agree to five figures on MDX23C. A per-model unit test that
+  pins LibTorch against `ndarray` on a toy configuration costs nothing and needs
+  no checkpoint — `burn-mdx`'s `tch_aliasing` module is the pattern, and it is
+  gated on `--features tch` because the default test run cannot reach the
+  backend that has the defect.
+- **Prefer an invariant that is exactly zero.** `burn-mdx`'s is that a silent
+  chunk must separate into silence, because every path to the output passes
+  through a product with a bias-free convolution's output. An exact invariant
+  fails loudly on corruption where a tolerance on real audio does not.
+
+**The measurements this bug produced are retracted throughout, not superseded**
+— `burn-mdx`'s crate and example docs, `preprocess-core`'s `separate` module,
+`crates/preprocess-cli`'s README and help, `docs/roadmap.md` and
+`docs/preprocess-architecture.typ`. The story attached to them is the part worth
+naming: a plausible explanation ("it was trained on sung vocals and a speaking
+voice is not one") was fitted to numbers nobody suspected, and it survived
+because it explained them well. **A number that needs an excuse is a number to
+re-measure**, which is the same lesson as the retracted `s2` correlation.
 
 **tokio's `BufWriter` bypasses its own buffer for any single write at or above
 capacity (8 KiB)**, so a filter that writes large chunks and forgets to flush
@@ -717,7 +787,7 @@ Unix filter (raw f32le PCM stdin→stdout) and batch `convert` is a thin wrapper
 | `burn-hubert` | the HuBERT SSL encoder, its own crate because **two engines read it**: GPT-SoVITS calls it cnhubert, and RVC's ContentVec is the same architecture with other weights. `hidden_states` returns every layer rather than only the last, which is what makes a variant that reads a different layer a choice of index instead of a second port. Lifted out of `burn-gptsovits` with no field renamed, and that extraction is the cleanest proof on record of **Moving a module between crates is free** — the load example still reports 210/0 afterwards. It carries no `cuda`/`tch` features, because those exist to give a crate's *examples* a backend and this network's coverage harness stays `burn-gptsovits`'s |
 | `burn-campplus` | CAM++, a speaker embedding: a clip in, one 192-dim timbre vector out. Its own crate because **a second reader arrived** — the same move, for the same reason, that lifted `burn-hubert` out of `burn-gptsovits`: Seed-VC conditions its transformer on this vector, and `preprocess diarize` compares two of them by cosine. `burn-seedvc` re-exports it, so `burn_seedvc::campplus` and `burn_seedvc::fbank` still resolve and no call site changed. `campplus_cn_common.bin` (`funasr/campplus`) loads at **815/0/122**, the 122 being one `num_batches_tracked` per norm — a **raw** count, not a net one. **The weights are Apache-2.0 and this port is not**: it was written by reading Seed-VC's vendored copy, so it is GPL-3.0 like everything else, and a crate that must stay permissive cannot depend on it however permissive the checkpoint is. Its front end is a **Kaldi filterbank at 16 kHz, mean-normalised over time**, and the normalisation lives inside `fbank` rather than in the model because upstream does it at the *call site* — see the Seed-VC section |
 | `burn-rmvpe` | the RMVPE pitch network, upstream's `E2E(4, 1, (2, 2))`: a five-level U-net, a `Conv2d(16 → 3, 3×3)` head, one bidirectional GRU (384 → 256 each way) and `Linear(512, 360)`. `[batch, 128, T]` log-mel in, `[batch, T, 360]` cents salience out — the mel front end (`rvc-core`'s `mel.rs`) and the salience→Hz decode (`dsp::rmvpe_decode`) stay in `rvc-core` so both runtimes share them, rather than giving the two backends a chance to disagree about something neither computes. `rmvpe.pt` loads at **623/0/118**, the unused being one `num_batches_tracked` per `BatchNorm`. Aligning the frame count to a multiple of 32 is `forward`'s job, not the caller's |
-| `burn-mdx` | MDX23C (TFC-TDF-UNet v3), the source-separation network UVR ships: a complex STFT front end, five TFC-TDF U-net levels over a subband-folded spectrum, and one waveform per stem. What lets a corpus recorded over music be cleaned before anything else touches it, and what `preprocess separate` runs. **Stereo-native**, which is why `audio-kit` has a stereo path at all. `MDX23C-8KFFT-InstVoc_HQ.ckpt` loads at **319/0/0** — no unused at all, because the norms are `InstanceNorm2d` and so carry no running statistics and no `num_batches_tracked`. The **older MDX-Net v2 models are ONNX-only and deliberately not ported**; see the crate docs for why a Burn port of them cannot be verified |
+| `burn-mdx` | MDX23C (TFC-TDF-UNet v3), the source-separation network UVR ships: a complex STFT front end, five TFC-TDF U-net levels over a subband-folded spectrum, and one waveform per stem. What lets a corpus recorded over music be cleaned before anything else touches it, and what `preprocess separate` runs. **Stereo-native**, which is why `audio-kit` has a stereo path at all. `MDX23C-8KFFT-InstVoc_HQ.ckpt` loads at **319/0/0** — no unused at all, because the norms are `InstanceNorm2d` and so carry no running statistics and no `num_batches_tracked`. **Coverage passed throughout the months it separated almost nothing** — see **`swap_dims` on LibTorch returns a view burn-tch forgets the provenance of**, and run `cargo test -p burn-mdx --features tch`, which is what pins that. The **older MDX-Net v2 models are ONNX-only and deliberately not ported**; see the crate docs for why a Burn port of them cannot be verified |
 | `burn-whisper` | the Whisper network (standalone Burn port); mirrors HF's `state_dict` layout so `openai/whisper-large-v3-turbo` loads unchanged |
 | `burn-gptsovits` | the GPT-SoVITS network. `hubert` at 210/0, `quantizer` at 3/0, and `s2` complete at 773/0 (the 3 unused are the codebook's EMA training statistics). **`s2` is verified numerically, not just structurally**: `examples/reconstruct` round-trips real audio through cnhubert, the quantiser and the synthesizer, and the output tracks the source's energy envelope at r=0.86 against a chance baseline of -0.06 on a 10 s clip — **read the frame count**, because 1.75 s of one phrase gives 0.47 on the same weights and is not a worse port. `t2s` (`s1`) is at 295/0. Every network of GPT-SoVITS is now ported; `tts-core`/`tts-cli` wire them into a working `tts`, and `tts-train` fine-tunes **both** stages — `s1` for delivery, `s2` for timbre. `SovitsPartial::forward_train` composes `enc_q` → `flow.forward` → random segment → `dec` and returns the five tensors the VITS losses need; the matching `s2D2333k.pth` discriminator loads at 111/0/0. `examples/keys` lists any checkpoint's tensors, which is the first thing to run against a new one |
 | `rvc-train` | native Rust/Burn adversarial training loop (see `docs/training.md`) |
@@ -1066,51 +1136,58 @@ Each model therefore needs a second check that exercises arithmetic:
   a harness that can be re-run when the model changes.
 - `burn-mdx` — `examples/separate` mixes a known voice with a known
   instrumental bed and reads three things, of which **the first is the one that
-  proves the port**: the two stems sum back to the mixture at **41.5 dB**
+  proves the port**: the two stems sum back to the mixture at **58.5 dB**
   SI-SDR, and a solo source splits in *opposite directions* depending on which
-  one went in (4.7 dB and 7.3 dB rejection). Neither survives a transposed
-  U-net, a batch norm where an instance norm belongs or a scrambled stem axis,
-  because nothing downstream re-imposes them. That synthetic mixture says
-  nothing about **quality**, because it is out of distribution on both sides —
-  every mixture-level SI-SDR in it sits within a decibel of doing nothing.
+  one went in (**26.0 dB** and **22.0 dB** rejection). Neither survives a
+  transposed U-net, a batch norm where an instance norm belongs or a scrambled
+  stem axis, because nothing downstream re-imposes them. The quality reading is
+  the SI-SDR of the vocals stem against the voice: **+11.91 dB** where the
+  unprocessed mixture scores 0.04.
 
-  **The quality question has since been measured on a real mixture, and the two
-  answers must not be merged.** The user supplied a 19.8-minute stream — a
-  streamer talking over somebody else's music — and `--mixture <file>` is the
-  reference-free mode that reads it: no source exists, so no SI-SDR against one
-  is reported, and every number is a contrast the mixture is measured under the
-  same way. **It separates, modestly.** Across four excerpts the vocals stem's
-  loud/quiet contrast comes out *above* the mixture's (16.8–25.7 against
-  12.9–22.5 dB) while the instrumental stem's comes out *below* it (7.7–16.7),
-  which is one stem following the intermittent speech and the other the
-  continuous bed; the music removed from the vocals stem is **5–6.5 dB** where
-  the bed is continuous, against the 15–20 dB this model reaches on a song. The
-  partition holds at 34–37 dB across a whole file. Overlap-add seams are part of
-  the drop from 41.5 and **not all of it** — the mono fold below has the same
-  file and the same seams and reads 37.5 — so that reading is content-sensitive
-  and a change in it is not on its own a regression.
+  **Read that last number first when something changes.** Its pre-fix value was
+  −0.25 dB — measurably *worse* than returning the input — and that was written
+  up as the synthetic mixture being out of distribution rather than as a defect.
+  A separation sitting within a decibel of do-nothing is a defect; see
+  **`swap_dims` on LibTorch returns a view burn-tch forgets the provenance of**.
+
+  **Do not feed it `dataset/*.wav` as the known voice.** Those clips are a
+  stream's vocals stem, so they carry the music the harness is trying to add,
+  and they report a *negative* voice-only rejection — which reads as a broken
+  port and is a contaminated input.
+
+  **The usefulness question is measured separately on a real mixture, and the
+  two answers must not be merged.** `--mixture <file>` is the reference-free
+  mode: no source exists, so no SI-SDR against one is reported, and every number
+  is a contrast the mixture is measured under the same way. Across excerpts of
+  one stream the vocals stem's loud/quiet contrast comes out *above* the
+  mixture's (25.5–32.8 against 19.9–22.5 dB) while the instrumental stem's comes
+  out *below* it (14.1–17.7), which is one stem following the intermittent
+  speech and the other the continuous bed; the music removed from the vocals
+  stem is **10–12 dB** where the bed is continuous and **4 dB** where it is
+  intermittent, since there is less of it in the gaps to take out. The partition
+  holds at **61–63 dB** across a whole file against 58.5 on one chunk, so the
+  overlap-add seams cost nothing measurable.
 
   Three things about that measurement not to re-derive:
 
   - **Read the gaps at 250 ms, not at one second.** A between-sentence gap is a
     few hundred milliseconds, so at a one-second window no "quiet" frame is
-    speech-free and the verdict *inverts*: the same stems on the same 60 s gave
-    2.1 dB of removal and a vocals contrast below the mixture's, which reads as
-    a model that separated nothing, where 250 ms gives 6.5 dB and a contrast
-    above it.
-  - **The input is near-mono, and it is not the explanation.** The side channel
-    sits 14–19 dB under the mid, so the stereo cue a stereo-native separator
-    wants is mostly absent — but folding to true mono and re-running costs only
-    1.4 dB (6.5 → 5.1). What is left is the material: a *speaking* voice is not
-    a sung one. Which also means a mono corpus loses almost nothing.
+    speech-free and the verdict can *invert* — a vocals contrast below the
+    mixture's, which reads as a model that separated nothing. Pin the window.
+  - **The input is near-mono, and it costs about 2.9 dB.** The side channel sits
+    16–19 dB under the mid, so the stereo cue a stereo-native separator wants is
+    mostly absent; folding to true mono and re-running takes the removal from
+    10.4 to 7.5 dB. Worth knowing before recording a corpus in one channel, and
+    not the difference between working and not.
   - **The practical gain is bigger than the decibels.** Transcribing the same
     60 s with `stt convert -l zh`, the mixture yields **5** segments — one of
-    them 18.8 s of merged speech — and the vocals stem **14**, one per
-    utterance, with the same words. `audio_kit`'s slicer cuts on silence and a
-    continuous bed leaves none, so a corpus recorded behind music cannot be
-    sliced into sentences at all until the bed comes off. One of the 14 is a
-    clear Whisper hallucination in a newly-emptied gap and one is a 0.37 s
-    fragment, so a consumer wants a duration floor. **Pin `--language`**: left to
+    them 18.8 s of merged speech — and the vocals stem **17**, roughly one per
+    utterance. `audio_kit`'s slicer cuts on silence and a continuous bed leaves
+    none, so a corpus recorded behind music cannot be sliced into sentences at
+    all until the bed comes off: `preprocess clip` gives 5 clips holding 58.2 of
+    the 60 s before and 14 holding 35.9 after, and `analyze`'s noise floor falls
+    from −40.3 to −76.7 dBFS. Emptied gaps give a recogniser more room to
+    invent, so a consumer wants a duration floor. **Pin `--language`**: left to
     detect, the two files disagree and the comparison stops meaning anything.
 
 ### The semantic-token boundary (`burn-gptsovits::quantizer`)

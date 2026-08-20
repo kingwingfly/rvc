@@ -50,114 +50,131 @@
 //! invent phase; this model predicts the complex spectrum. The phase-free
 //! energy-envelope correlation is reported beside it so neither stands alone.
 //!
-//! # What this actually established, and what it did not
+//! # What this establishes
 //!
-//! Measured on `MDX23C-8KFFT-InstVoc_HQ.ckpt`, LibTorch/CUDA, six clips of this
-//! repository's own corpus against the bed below at a 0 dB mix:
+//! **Every number below was re-measured after the aliasing fix in
+//! `TfcTdfNet::forward`, and the ones this file used to carry are retracted
+//! rather than superseded** — they were taken on LibTorch while the head's gate
+//! was being overwritten in place, and the story written around them ("MDX23C
+//! was trained on sung vocals and a speaking voice is not one") was a
+//! rationalisation fitted to a broken pass. It is wrong: this model separates
+//! speech from music perfectly well. See `burn_mdx::TfcTdfNet::forward` and
+//! CLAUDE.md's **`swap_dims` on LibTorch returns a view burn-tch forgets the
+//! provenance of**.
+//!
+//! Measured on `MDX23C-8KFFT-InstVoc_HQ.ckpt`, LibTorch/CUDA, against the bed
+//! below at a 0 dB mix, with `.reference/whisper/tests/jfk.flac` as the known
+//! voice:
 //!
 //! | reading | value |
 //! |---|---|
-//! | **partition** — `est_vocals + est_instrumental` vs the mixture | **41.5 dB** SI-SDR |
-//! | solo voice in — vocals / instrumental rms | 0.0516 / 0.0299 (**4.7 dB** rejection) |
-//! | solo bed in — vocals / instrumental rms | 0.0226 / 0.0526 (**7.3 dB** rejection) |
-//! | SI-SDR of `est_vocals` vs voice / vs bed | −0.25 / −0.54 dB |
-//! | envelope corr, `est_vocals` vs voice / vs bed | 0.678 / 0.645 |
-//! | envelope corr, `est_instrumental` vs voice / vs bed | 0.508 / 0.583 |
+//! | **partition** — `est_vocals + est_instrumental` vs the mixture | **58.5 dB** SI-SDR |
+//! | solo voice in — vocals / instrumental rms | 0.1013 / 0.0051 (**26.0 dB** rejection) |
+//! | solo bed in — vocals / instrumental rms | 0.0080 / 0.1006 (**22.0 dB** rejection) |
+//! | SI-SDR of `est_vocals` vs voice / vs bed | **+11.91** / −18.68 dB |
+//! | weighted spectrogram corr, `est_vocals` vs voice / vs bed | 0.996 / 0.165 |
+//! | envelope corr, `est_vocals` vs voice / vs bed | 0.989 / −0.088 |
+//! | envelope corr, `est_instrumental` vs voice / vs bed | −0.135 / 0.966 |
 //!
 //! **Read the first row first.** The two stems reconstruct their input to
-//! 41.5 dB, and the solo probes split *in opposite directions* depending on
-//! which source went in. Together those say the forward pass is coherent and
+//! 58.5 dB, and the solo probes split *in opposite directions* by more than
+//! 20 dB each. Together those say the forward pass is coherent and
 //! content-dependent: a transposed U-net, a batch norm where an instance norm
 //! belongs, a mis-scaled block or a scrambled stem axis destroys one or both,
 //! because nothing downstream re-imposes either property.
 //!
-//! **What it does not establish is separation quality**, and the numbers are
-//! honest about that: 4.7 dB of rejection on a solo source is far below the
-//! 20 dB-plus a vocal separator manages on the material it was trained for, and
-//! every mixture row sits within a decibel of doing nothing. The reason is the
-//! input rather than the port — MDX23C was trained on *sung* vocals inside real
-//! productions, and this feeds it dry, close-mic Chinese speech over a
-//! synthesised organ chord, which is out of distribution on both sides. That
-//! was an open question until a real mixture was measured; the next section is
-//! the answer, and it is the input. The unit tests are what pin the two
-//! components this example cannot isolate: `net::tests` compares the norm
-//! against Burn's own `InstanceNorm` and GELU against hand-computed erf values.
+//! **Read the SI-SDR row second, because it is the one that moved.** The
+//! mixture row is the do-nothing baseline at 0.04 dB and `est_vocals` is
+//! +11.91 dB against the voice and −18.68 against the bed — 12 dB of
+//! improvement over doing nothing, where the pre-fix reading was **−0.25 dB**,
+//! i.e. measurably *worse* than returning the input. A single number sitting
+//! within a decibel of the baseline is what a broken separator looks like from
+//! here, and it is the row to check first when something changes.
 //!
-//! # What `--mixture` established on real material
+//! **Do not pass this repository's `dataset/*.wav` as the known voice.** Those
+//! clips are the *vocals stem* of a stream, produced by the broken pass, so
+//! they carry the music this example is trying to add: fed through here they
+//! report a *negative* voice-only rejection (0.0086 / 0.0685, −18.0 dB), which
+//! reads as a broken port and is a contaminated input. Any clean, dry speech
+//! recording works; the numbers above use `jfk.flac` from the gitignored
+//! `.reference/whisper` clone because it is dry, and because nothing in this
+//! repository currently is.
 //!
-//! One 19.8-minute stereo stream at 44.1 kHz — a streamer talking over
-//! somebody else's music — on LibTorch/CUDA at 50% overlap-add. `contrast` is
-//! the loudest against the quietest tenth of 250 ms frames, chosen by the
-//! *mixture* so all three rows are read over the same instants; `bed out` is
-//! how far `est_vocals` sits under the mixture in the quiet frames, which is
-//! the music that came out of it.
+//! The unit tests are what pin the components this example cannot isolate:
+//! `net::tests` compares the norm against Burn's own `InstanceNorm` and GELU
+//! against hand-computed erf values, and `tch_aliasing` (`--features tch`) pins
+//! the backend hazard that produced every retracted number here.
+//!
+//! # What `--mixture` establishes on real material
+//!
+//! Excerpts of one stereo stream at 44.1 kHz — a streamer talking over somebody
+//! else's music — on LibTorch/CUDA at 50% overlap-add. `contrast` is the
+//! loudest against the quietest tenth of 250 ms frames, chosen by the *mixture*
+//! so all three rows are read over the same instants; `bed out` is how far
+//! `est_vocals` sits under the mixture in the quiet frames, which is the music
+//! that came out of it.
 //!
 //! | excerpt | side below mid | partition | vocals rms | instr rms | contrast mix/voc/instr | bed out |
 //! |---|---|---|---|---|---|---|
-//! | 900–960 s | 18.6 dB | 34.9 dB | −2.5 dB | −5.1 dB | 19.9 / **24.4** / 10.5 dB | **−6.5 dB** |
-//! | 900–930 s | 17.1 dB | 36.3 dB | −3.0 dB | −5.2 dB | 22.1 / **25.7** / 11.6 dB | −6.0 dB |
-//! | 180–210 s | 14.3 dB | 34.2 dB | −2.6 dB | −3.5 dB | 12.9 / **16.8** / 7.7 dB | −5.5 dB |
-//! | 480–510 s | 16.2 dB | 34.6 dB | −0.7 dB | −7.3 dB | 22.5 / 23.5 / 16.7 dB | −2.0 dB |
-//! | 900–960 s folded to mono | — | 37.5 dB | −2.6 dB | −5.4 dB | 19.9 / 22.9 / 10.7 dB | −5.1 dB |
+//! | 900–960 s | 18.6 dB | 62.2 dB | −2.2 dB | −4.0 dB | 19.9 / **29.2** / 14.1 dB | **−10.4 dB** |
+//! | 900–930 s | 17.0 dB | 62.8 dB | −2.5 dB | −3.6 dB | 22.1 / **32.8** / 15.9 dB | **−11.8 dB** |
+//! | 480–510 s | 16.2 dB | 60.8 dB | −0.9 dB | −7.9 dB | 22.5 / 25.5 / 17.7 dB | −4.0 dB |
+//! | 900–960 s folded to mono | — | 63.1 dB | −2.2 dB | −4.1 dB | 19.9 / 26.3 / 14.6 dB | −7.5 dB |
 //!
-//! **It separates, and the amount is modest.** The three rows move together in
-//! the way a working separation has to: the vocals stem's contrast comes out
-//! *above* the mixture's and the instrumental stem's *below* it, which is one
-//! stem following the intermittent speech and the other following the
-//! continuous bed. Neither stem is near-silent. But 5–6.5 dB of bed removal is
-//! a long way from the 15–20 dB this model reaches on a song, so the music is
-//! attenuated rather than gone.
+//! **It separates.** The three rows move together in the way a working
+//! separation has to: the vocals stem's contrast comes out *above* the
+//! mixture's and the instrumental stem's *below* it, which is one stem
+//! following the intermittent speech and the other the continuous bed. 10–12 dB
+//! of bed removal on a speaking voice over a stream's backing track is in the
+//! range this model is expected to reach; the music is attenuated rather than
+//! gone, which is what a mask-free complex-spectrum estimate does with content
+//! that overlaps the voice in band.
 //!
 //! **The 480 s row is the control, not an outlier.** That region's bed stops
 //! between phrases instead of running under them, so there is little bed in the
 //! quiet frames to remove — and the instrumental stem's contrast rises to
-//! 16.7 dB, tracking a bed that is itself intermittent. Less removal where
+//! 17.7 dB, tracking a bed that is itself intermittent. Less removal where
 //! there is less to remove is the model behaving, and it is why one excerpt is
 //! not a measurement.
 //!
-//! **Near-mono costs about 1.4 dB, so it is not the explanation.** The side
-//! channel sits 14–19 dB under the mid on every excerpt, which removes most of
-//! the spatial cue a stereo-native separator would use. Folding the mixture to
-//! true mono and re-running takes the removal from 6.5 dB to 5.1 dB — real, and
-//! far too small to be the gap. What is left is the material: a speaking voice
-//! is not a sung one, and a stream's backing track is not a mastered production.
+//! **Near-mono costs about 2.9 dB.** The side channel sits 16–19 dB under the
+//! mid on every excerpt, which removes most of the spatial cue a stereo-native
+//! separator would use. Folding the mixture to true mono and re-running takes
+//! the removal from 10.4 dB to 7.5 dB — real, worth knowing before recording a
+//! corpus in mono, and not the difference between working and not.
 //!
-//! **The partition is 34–37 dB here against 41.5 dB on one chunk.** Overlap-add
-//! seams are part of that — this runs 50% where upstream's config asks for
-//! `num_overlap: 8`, and the synthetic mode runs a single chunk with no seam at
-//! all — but they are demonstrably **not all of it**: the mono fold above has
-//! the same file, the same hop and therefore the same seams, and reads 37.5 dB
-//! against the stereo run's 34.9. So the partition reading is content-sensitive,
-//! which is worth knowing before treating a change in it as a regression.
+//! **The partition is 61–63 dB here against 58.5 dB on one chunk**, so the
+//! overlap-add seams cost nothing measurable: this runs 50% where upstream's
+//! config asks for `num_overlap: 8`, and it does not show. Both readings are
+//! far enough above anything audible that a change in either is a signal, which
+//! is exactly what they were not before the fix — the pre-fix pair was 34–37
+//! against 41.5 dB, a gap that invited an explanation and got a wrong one.
 //!
 //! ## What `stt` says, which is the closest thing to listening
 //!
 //! Transcribing the mixture and the vocals stem of the same 60 s with the same
-//! flags (`stt convert -l zh --backend tch`; **pin the language**, since letting
-//! it detect gives the two files different ones and the comparison stops
-//! meaning anything):
+//! flags (`stt convert -l zh`; **pin the language**, since letting it detect
+//! gives the two files different ones and the comparison stops meaning
+//! anything):
 //!
-//! - **The words are the same.** Same content, same order, differing in one
-//!   character across 60 s.
-//! - **The segmentation is not, and that is the finding.** The mixture yields
-//!   **5** segments, one of them 18.8 s of merged speech; the stem yields
-//!   **14**, one per utterance. `audio_kit`'s slicer cuts on silence, and a
-//!   continuous bed means the recording *has* no silence — so a corpus behind
-//!   music cannot be sliced into sentences at all until the bed comes off. That
-//!   is a larger practical gain than the 6.5 dB suggests.
-//! - **The stem also invents.** One segment is a clear hallucination
-//!   (`Pelsa made a bangle`, English in a Chinese-pinned run) and one is a
-//!   0.37 s fragment too short to judge from a transcript — both in near-silent
-//!   frames the mixture's longer segments had swallowed. Emptier gaps give
-//!   Whisper more room to invent, so anything consuming the stems wants a
-//!   duration or confidence floor.
+//! - **The segmentation is the finding.** The mixture yields **5** segments,
+//!   one of them 18.8 s of merged speech; the stem yields **17**, roughly one
+//!   per utterance. `audio_kit`'s slicer cuts on silence, and a continuous bed
+//!   means the recording *has* no silence — so a corpus behind music cannot be
+//!   sliced into sentences at all until the bed comes off. `preprocess clip`
+//!   over the same 60 s says the same thing in its own units: **5** clips
+//!   holding 58.2 of the 60 s before separation, **14** holding 35.9 s after.
+//!   The 22 s that stop being kept are the bed.
+//! - **The stem also invents.** Emptier gaps give Whisper more room, and one of
+//!   the extra segments hit the 224-token cap — so anything consuming these
+//!   stems wants a duration and a length sanity check, not only a transcript.
 //!
 //! # Cost
 //!
 //! One chunk: 261,120 samples, 5.92 s, one forward pass over `[1, 16, 1024,
 //! 256]` — around 1 TFLOP and 134 MB per activation at the widest. That is why
 //! this example carries `required-features = ["tch"]` and why `--backend
-//! tch-gpu` is the sensible way to run it. Measured there: **0.83 s per chunk**,
+//! tch-gpu` is the sensible way to run it. Measured there: **0.82 s per chunk**,
 //! so `--mixture` runs at roughly 3.5x realtime at 50% overlap.
 //!
 //! Usage:

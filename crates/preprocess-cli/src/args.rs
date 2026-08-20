@@ -273,17 +273,16 @@ off it.
 
 Run this BEFORE `clip`. Slicing cuts on silence, and a continuous music bed \
 means the recording has none: on a 60 s excerpt of a stream, slicing the \
-mixture gave 5 clips holding 58 of its 60 seconds, and slicing the vocals stem \
-gave 12 holding 39 — sentences rather than minutes. Recognition tells the same \
-story, 5 segments against 14 with the same words. That is the gain, and it is \
-larger than the decibels suggest.
+mixture gave 5 clips holding 58.2 of its 60 seconds, and slicing the vocals \
+stem gave 14 holding 35.9 — sentences rather than minutes. Recognition tells \
+the same story, 5 segments against 17. That is the gain, and it is larger than \
+the decibels suggest.
 
-The separation itself is modest and measured: 5-6.5 dB of a continuous bed \
-comes out of the vocals stem across the excerpts the model was measured on, and \
-4.1 dB through this stage — read on the mono downmix, which is what everything \
-downstream decodes — against the 15-20 dB this model reaches on a song, because \
-it was trained on sung vocals and a speaking voice is not one. Expect the music \
-attenuated, not gone.
+The separation itself is measured rather than promised: 10-12 dB of a \
+continuous bed comes out of the vocals stem, and 4 dB where the bed is \
+intermittent because there is less of it in the gaps to take out — read on the \
+mono downmix, which is what everything downstream decodes. Expect the music \
+strongly attenuated, not gone.
 
 It separates voice from music, NOT one speaker from another. Every voice lands \
 in the vocals stem, including a singer on the backing track — so somebody \

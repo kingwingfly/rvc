@@ -68,8 +68,21 @@
 //! *time* as the image height and *frequency* as its width, and a port that
 //! keeps the natural orientation loads perfectly and separates nothing. So
 //! `examples/separate` mixes a known voice with a known bed and reports the
-//! recovery gap, and [`stft`]'s round-trip tests pin the transform with no
+//! recovery gap — **26.0 dB solo-voice rejection, 22.0 dB solo-bed, 58.5 dB
+//! partition** — and [`stft`]'s round-trip tests pin the transform with no
 //! weights at all.
+//!
+//! **Coverage and a round trip both passed while this crate separated almost
+//! nothing**, and the reason is in [`TfcTdfNet::forward`]: on LibTorch a
+//! `swap_dims` view carries a storage handle burn-tch no longer connects to its
+//! source, so the head's gate was being overwritten in place inside the
+//! encoder. `cargo test -p burn-mdx --features tch` is the check for it, and it
+//! is a separate invocation because the default-feature test run cannot reach
+//! the backend that has the defect. The numbers this crate used to record —
+//! 4.7 dB of rejection, explained away as MDX23C being a *sung*-vocal model fed
+//! speech — came from that pass and are retracted; the explanation was wrong
+//! twice over, since a speaking voice separates from music about as well as a
+//! sung one does.
 //!
 //! # Memory, and the unit of work
 //!
@@ -322,11 +335,28 @@ impl<B: Backend> TfcTdfNet<B> {
         );
 
         let mix = self.fold_subbands(spec);
-        let first_conv_out = self.first_conv.forward(mix.clone());
+        // Time becomes the height and frequency the width — which is what puts
+        // the frequency axis last for every `Tdf`'s `Linear` — and the whole
+        // rest of the pass stays in that orientation, including the head's gate
+        // below. Upstream transposes here and transposes *back* before the
+        // gate; that reads more faithfully and is the one thing in this
+        // function that must not be restored. See `tch_aliasing`'s
+        // `silence_in_is_silence_out` and CLAUDE.md's **`swap_dims` on LibTorch
+        // returns a view burn-tch forgets the provenance of**: transposing back
+        // would leave `first_conv_out` and the encoder's input as two live
+        // handles on one buffer with a `swap_dims` between them, and on
+        // LibTorch the first instance normalisation inside the encoder then
+        // overwrites the gate in place. The result loads at 319/0/0, is finite,
+        // reconstructs the mixture, and separates almost nothing.
+        //
+        // It is the same two transposes either way — this one and the one after
+        // the product — so nothing here is bought with arithmetic. What changes
+        // is *which* tensor carries a view: `first_conv_out.clone()` is an
+        // ordinary Burn clone, which every backend refcounts correctly, and no
+        // alias of it survives into the encoder.
+        let first_conv_out = self.first_conv.forward(mix.clone()).swap_dims(2, 3);
 
-        // Time becomes the height and frequency the width, which is what puts
-        // the frequency axis last for every `Tdf`'s `Linear`.
-        let mut x = first_conv_out.clone().swap_dims(2, 3);
+        let mut x = first_conv_out.clone();
         let mut skips = Vec::with_capacity(self.encoder_blocks.len());
         for block in &self.encoder_blocks {
             let (skip, down) = block.forward(x);
@@ -338,12 +368,13 @@ impl<B: Backend> TfcTdfNet<B> {
             let skip = skips.pop().expect("one skip per decoder level");
             x = block.forward(x, skip);
         }
-        let x = x.swap_dims(2, 3);
 
         // Upstream's comment is "reduce artifacts": the head sees the network's
         // output gated by the first convolution's, rather than the output
-        // alone.
+        // alone. An elementwise product commutes with the transpose, so doing
+        // it here rather than after is the same arithmetic.
         let x = x * first_conv_out;
+        let x = x.swap_dims(2, 3);
         let x = self.final_conv.forward(Tensor::cat(vec![mix, x], 1));
 
         let x = self.unfold_subbands(x);
@@ -495,5 +526,149 @@ mod tests {
         assert_eq!(cfg.chunk_size(), 261_120);
         assert_eq!(cfg.stft().frames(cfg.chunk_size()), cfg.dim_t);
         assert_eq!(cfg.dim_c(), 16);
+    }
+}
+
+/// The one hazard that only exists on LibTorch, so it needs LibTorch to see it.
+///
+/// `cargo test -p burn-mdx --features tch` — the same shape as
+/// `rvc-train`'s `convgrad` example: a backend-specific defect, asked for by
+/// name, because the default-feature test run cannot reach the backend that
+/// has it.
+#[cfg(all(test, feature = "tch"))]
+mod tch_aliasing {
+    use super::*;
+    use burn::module::{Module, ModuleMapper, Param};
+    use burn::tensor::TensorData;
+
+    type Tch = burn::backend::LibTorch<f32>;
+    type Nd = burn_ndarray::NdArray;
+
+    /// A configuration small enough for `ndarray` to run the same pass.
+    fn tiny() -> MdxConfig {
+        MdxConfig {
+            n_fft: 128,
+            hop: 16,
+            dim_f: 64,
+            dim_t: 33,
+            audio_channels: 2,
+            sample_rate: 44100,
+            num_subbands: 2,
+            num_scales: 2,
+            scale: [2, 2],
+            num_blocks_per_scale: 1,
+            num_channels: 4,
+            growth: 4,
+            bottleneck_factor: 2,
+            stems: 2,
+        }
+    }
+
+    /// A fixed LCG, so the two backends can be given byte-identical weights and
+    /// a byte-identical input without a record round-trip. `Distribution` is
+    /// not required to draw the same numbers on two backends, and a test that
+    /// assumed it would fail for a reason that is not the one it is for.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn take(&mut self, n: usize) -> Vec<f32> {
+            (0..n)
+                .map(|_| {
+                    self.0 = self
+                        .0
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    ((self.0 >> 40) as f32 / 8388608.0) - 1.0
+                })
+                .collect()
+        }
+    }
+
+    /// Replaces every parameter with that sequence, in module-tree order.
+    ///
+    /// Initialised weights would not do: several are zeros, and a zero gate
+    /// makes the whole head zero, which is the one shape that passes both
+    /// tests below while saying nothing.
+    struct Fill(Lcg);
+
+    impl<B: Backend> ModuleMapper<B> for Fill {
+        fn map_float<const D: usize>(&mut self, param: Param<Tensor<B, D>>) -> Param<Tensor<B, D>> {
+            let (device, shape) = (param.val().device(), param.val().shape());
+            let data = TensorData::new(self.0.take(shape.num_elements()), shape.clone());
+            param.map(move |_| Tensor::from_data(data.clone(), &device))
+        }
+    }
+
+    fn input<B: Backend>(cfg: &MdxConfig, device: &B::Device) -> Tensor<B, 4> {
+        let frames = cfg.dim_t - 1;
+        let shape = [1, 2 * cfg.audio_channels, cfg.dim_f, frames];
+        let data = Lcg(0x2545_F491_4F6C_DD1D).take(shape.iter().product());
+        Tensor::from_data(TensorData::new(data, shape), device)
+    }
+
+    /// Every path from the input to the output passes through the head's gate,
+    /// and that gate is a product with `first_conv`'s output — which is bias
+    /// free, as is every convolution below it. So a silent chunk **must**
+    /// separate into silence, whatever the instance norms' betas do in between.
+    ///
+    /// That is the invariant `first_conv_out.clone().swap_dims(2, 3)` broke: on
+    /// LibTorch a transposed view carries a fresh storage handle, so the
+    /// encoder's first normalisation sees a buffer it believes it owns and
+    /// subtracts the mean *in place* — into the gate the head is still holding.
+    /// Measured on the real checkpoint, that put 0.52 of spectrum where zero
+    /// belongs, and on real audio it separated almost nothing while still
+    /// reconstructing the mixture and loading at 319/0/0.
+    #[test]
+    fn silence_in_is_silence_out() {
+        let device = Default::default();
+        let cfg = tiny();
+        let model = TfcTdfNet::<Tch>::new(&cfg, &device).map(&mut Fill(Lcg(1)));
+        let frames = cfg.dim_t - 1;
+        let spec = Tensor::<Tch, 4>::zeros([1, 2 * cfg.audio_channels, cfg.dim_f, frames], &device);
+
+        let out: Vec<f32> = model.forward(spec).into_data().to_vec().unwrap();
+        let worst = out.iter().fold(0.0f32, |a, b| a.max(b.abs()));
+        assert_eq!(
+            worst, 0.0,
+            "a silent chunk separated into {worst} of signal"
+        );
+    }
+
+    /// The stronger reading, and the one that would still fire if a corruption
+    /// *scaled* the gate rather than replacing it: LibTorch and `ndarray` are
+    /// two independent implementations of the same arithmetic, so on one set of
+    /// weights and one input they have to agree.
+    #[test]
+    fn libtorch_agrees_with_ndarray() {
+        let cfg = tiny();
+        let (nd_device, tch_device) = (Default::default(), Default::default());
+        let nd = TfcTdfNet::<Nd>::new(&cfg, &nd_device).map(&mut Fill(Lcg(1)));
+        let tch = TfcTdfNet::<Tch>::new(&cfg, &tch_device).map(&mut Fill(Lcg(1)));
+
+        let want: Vec<f32> = nd
+            .forward(input::<Nd>(&cfg, &nd_device))
+            .into_data()
+            .to_vec()
+            .unwrap();
+        let got: Vec<f32> = tch
+            .forward(input::<Tch>(&cfg, &tch_device))
+            .into_data()
+            .to_vec()
+            .unwrap();
+
+        assert!(
+            got.iter().all(|v| v.is_finite()),
+            "LibTorch output must be finite"
+        );
+        let worst = want
+            .iter()
+            .zip(&got)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        let scale = want.iter().fold(0.0f32, |a, b| a.max(b.abs()));
+        assert!(
+            worst < 1e-4 * scale.max(1.0),
+            "the two backends differ by {worst} on a signal peaking at {scale}"
+        );
     }
 }

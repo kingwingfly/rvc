@@ -3,38 +3,43 @@
 //!
 //! One file in, one `<base>.vocals.wav` and/or `<base>.instrumental.wav` out.
 //!
-//! # Why this runs before slicing, and what it is actually worth
+//! # Why this runs before slicing, and what it is worth
 //!
-//! The decibels undersell it. The network's own measurements put the music
-//! removed from the vocals stem at **5–6.5 dB** across four excerpts of a real
-//! stream where the bed is continuous, against the 15–20 dB it reaches on a
-//! song, because it was trained on *sung* vocals inside real productions and a
-//! speaking voice is not one. Driven through this stage, one of those excerpts
-//! reads **4.1 dB**. So the bed is attenuated rather than gone, and this stage
-//! does not promise otherwise.
+//! Measured over excerpts of a real stream — a streamer talking over somebody
+//! else's music — the music removed from the vocals stem is **10–12 dB** where
+//! the bed is continuous, and **4 dB** where it is intermittent, because there
+//! is less bed in the speech gaps to take out. So the bed is strongly
+//! attenuated rather than gone, and this stage does not promise otherwise.
+//! The measurement lives in `burn-mdx`'s `examples/separate --mixture`, which
+//! drives the same [`Separator`] over the same overlap-add this stage does.
 //!
-//! **Every one of those figures reads the mono downmix, and the stems are
-//! stereo.** Folding both the mixture and the stem to mid puts the bed 4.1 dB
-//! down in that excerpt's speech gaps; reading the same two files as written
-//! gives 1.0 dB, because what the stem keeps of the bed is largely out of phase
-//! between the channels and cancels in the fold, where the mixture's own level
-//! barely moves. Neither reading is wrong and they are not interchangeable —
-//! the mono one is what was recorded, and it is also the one that matters here,
-//! since everything downstream decodes mono.
+//! **Those figures read the mono downmix, and the stems are stereo.** That is
+//! the reading that matters here, since everything downstream decodes mono —
+//! and folding the *input* to mono before separating costs about 2.9 dB, which
+//! is worth knowing before recording a corpus in one channel.
 //!
-//! What that buys is out of proportion to the number: transcribing the same
-//! 60 s, the mixture yields **5** segments (one of them 16.9 s of merged
-//! speech) and the vocals stem **14**, one per utterance, with the same words.
+//! What that buys is out of proportion to the decibels: transcribing the same
+//! 60 s, the mixture yields **5** segments (one of them 18.8 s of merged
+//! speech) and the vocals stem **17**, roughly one per utterance.
 //! [`audio_kit::slice`] cuts on silence and a continuous bed leaves none — so a
 //! corpus recorded behind music cannot be sliced into sentences *at all* until
 //! the bed comes off. Sliced with [`crate::clip`]'s defaults, that same 60 s
-//! gives **5** clips holding 58 of its 60 seconds before separation and **12**
-//! holding 39 after: the mixture has no sentence boundaries to find.
+//! gives **5** clips holding 58.2 of its 60 seconds before separation and
+//! **14** holding 35.9 after: the mixture has no sentence boundaries to find,
+//! and the 22 seconds that stop being kept are the bed.
+//!
+//! **Every number in the two paragraphs above was measured after the fix in
+//! `burn_mdx::TfcTdfNet::forward`, and the ones this file used to carry are
+//! retracted rather than superseded.** They were taken while LibTorch — which
+//! `--backend auto` picks — was overwriting the network's head in place, and
+//! the paragraph explaining them said the model was trained on *sung* vocals
+//! and that a speaking voice is not one. That was a story fitted to a broken
+//! pass; it is not why the numbers were small, and it must not come back.
 //!
 //! Two consequences of emptying those gaps, both worth knowing downstream: a
-//! recogniser has more room to invent in a newly-silent gap (one of the 14 was
-//! a clear hallucination), and one segment came out at 0.37 s. A consumer of
-//! these stems wants a duration floor.
+//! recogniser has more room to invent in a newly-silent gap, and short
+//! fragments appear where the mixture's longer segments had swallowed them. A
+//! consumer of these stems wants a duration floor.
 //!
 //! # What it does not do
 //!
@@ -156,17 +161,25 @@ pub struct SeparateReport {
     /// One entry per stem written, in the model's own order.
     pub stems: Vec<StemReport>,
 }
-
 /// Where the mixture's peak is put before the network sees it.
 ///
-/// **The network is not scale-invariant, and that is the whole reason this
-/// stage normalises at all.** Its instance norms are, but the head multiplies
-/// the U-net's output by the first convolution's and concatenates the raw
-/// mixture beside it, so the two paths scale differently and the model only
-/// behaves at the levels it was trained on. Feeding it +8 dBFS degrades the
-/// separation with no error anywhere, which is the failure this constant
-/// prevents — and the same argument runs downward, so a recording that peaks at
-/// −30 dBFS is scaled *up* to here rather than left alone.
+/// **Re-measured after the fix in `burn_mdx::TfcTdfNet::forward`, and the
+/// claim this comment used to make is retracted.** It said the network "only
+/// behaves at the levels it was trained on" and that +8 dBFS degrades the
+/// separation — measured on the corrupted pass, where every level looked bad
+/// for a reason that had nothing to do with level. Driving the fixed network
+/// over the same 60 s at peaks from **0.05 to 2.5** gives **−10.4 dB** of bed
+/// removed in the speech gaps at every one of them, and −9.0 dB at a peak of 8.
+/// So the model is scale-insensitive across any level a decode can produce, and
+/// normalising is **not** what makes it work.
+///
+/// It is kept because it still buys something cheap: the partition SI-SDR — the
+/// stems summed against their own mixture, which is float precision rather than
+/// separation — climbs from 56.9 dB at a peak of 0.05 to 62.0 at 0.7 and 62.7
+/// at 1.0. A quiet recording is therefore reconstructed a little more exactly
+/// for one decode of cost, and a loud one is left effectively alone. **Do not
+/// re-derive a correctness argument for this constant**; there is not one, and
+/// upstream's own config has no `training.normalize` at all.
 ///
 /// The gain is undone before anything is written. That is load-bearing rather
 /// than tidiness: a stem left at the model's working level is uniformly
