@@ -484,9 +484,27 @@ impl DiarizeArgs {
     /// The backend and download checks are here for `separate`'s reason, and
     /// the window arithmetic joins them because it is equally cheap to notice
     /// now: a `--hop` larger than `--window` skips audio nothing ever scores,
-    /// and it does so silently.
+    /// and it does so silently. `--reference` joins them for the same reason
+    /// and is checked first, being the cheapest of the lot.
     pub fn verify(&self) -> Result<()> {
         self.io.verify()?;
+        // The one check here that touches the filesystem, and it earns that:
+        // the reference is the entire specification of what to keep, and a
+        // mistyped path was being reported *after* the speaker model had been
+        // fetched and loaded — a quarter of a gigabyte and a model load spent
+        // on a run that could not have started. `separate`'s ordering rule
+        // says a refusal that costs nothing belongs before the download, and a
+        // path that is not there is exactly that refusal.
+        //
+        // Existence only, deliberately: whether the file holds decodable audio
+        // is a question for the decoder, whose error names the format problem
+        // far better than a guess from here could.
+        anyhow::ensure!(
+            self.reference.is_file(),
+            "--reference {} is not a readable file; it is the recording of the \
+             voice to keep, so there is nothing to compare against without it",
+            self.reference.display()
+        );
         self.download.verify()?;
         preprocess_core::embed::resolve(self.backend)?;
         anyhow::ensure!(
@@ -1133,6 +1151,34 @@ mod tests {
         assert_eq!(got.min_clip, want.min_clip);
         assert_eq!(got.max_clip, want.max_clip);
         assert_eq!(got.pad, want.pad);
+    }
+
+    #[test]
+    fn a_missing_reference_is_refused_before_anything_is_fetched() {
+        // `--reference` is the whole specification of what to keep, so a
+        // mistyped path cannot produce a run — and it used to be reported only
+        // after the speaker model had been fetched and loaded. The check is
+        // first in `verify` because it is the cheapest one there, and `verify`
+        // is the first thing `commands::diarize::run` does.
+        let PreprocessCommand::Diarize(a) = parse(&[
+            "preprocess",
+            "diarize",
+            "--reference",
+            "no/such/reference.wav",
+            "in.wav",
+        ]) else {
+            panic!("expected diarize");
+        };
+        let err = a.verify().expect_err("a missing reference must be refused");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("--reference"),
+            "the message must name the offending flag, got: {msg}"
+        );
+        assert!(
+            msg.contains("no/such/reference.wav"),
+            "and the path it could not find, got: {msg}"
+        );
     }
 
     #[test]
