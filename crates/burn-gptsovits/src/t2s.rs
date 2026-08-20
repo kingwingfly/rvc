@@ -180,7 +180,22 @@ impl<B: Backend> FusedAttention<B> {
         let heads = |t: Tensor<B, 3>, len: usize| {
             t.reshape([batch, len, self.n_head, d_head]).swap_dims(1, 2)
         };
-        let q = heads(q, seq) / (d_head as f64).sqrt();
+        // The scale goes on `q` while it is still a slice of `qkv`, and that
+        // ordering is the fix rather than a preference. On LibTorch `swap_dims`
+        // returns torch's view of somebody else's buffer stamped with a fresh
+        // `Storage::Owned`, so `can_mut()` says yes and the next in-place
+        // capable op writes *through* the view — while `qkv`, `cache.k` and
+        // `cache.v` are all still live on that buffer. Dividing after `heads`
+        // therefore scaled `qkv`'s first `d_model` columns in place; it was
+        // harmless only because nothing reads that region again, which is a
+        // property of this layout and not of this code. `slice` keeps
+        // `Storage::View`, whose `can_mut()` is false, so the division here is
+        // out of place and the transposed view that follows aliases a tensor
+        // nobody else holds. The arithmetic is untouched: a scalar divide is
+        // elementwise, so it commutes exactly with reshape and transpose. See
+        // CLAUDE.md, **`swap_dims` on LibTorch returns a view burn-tch forgets
+        // the provenance of**, and `tch_aliasing` below.
+        let q = heads(q / (d_head as f64).sqrt(), seq);
         let mut scores = q.matmul(heads(k, n_kv).swap_dims(2, 3));
         if let Some(mask) = mask {
             scores = scores.mask_fill(mask.unsqueeze::<4>(), f32::NEG_INFINITY);
@@ -526,5 +541,164 @@ mod tests {
             Tensor::from_data(TensorData::from([[1i32, 2, 3]]), &device);
         let bert = Tensor::<B, 3>::zeros([1, 3, cfg.bert_dim], &device);
         assert_eq!(model.embed_text(phones, bert).dims(), [1, 3, cfg.model_dim]);
+    }
+}
+
+/// The hazard that only exists on LibTorch, so it takes LibTorch to see it.
+///
+/// `cargo test -p burn-gptsovits --features tch` — a separate invocation on
+/// purpose, the same shape `burn-mdx` uses: the default-feature test run cannot
+/// reach the backend that has the defect, so a test gated any other way would
+/// silently never run.
+#[cfg(all(test, feature = "tch"))]
+mod tch_aliasing {
+    use super::*;
+    use burn::module::{Module, ModuleMapper};
+
+    type Tch = burn::backend::LibTorch<f32>;
+    type Nd = burn_ndarray::NdArray;
+
+    /// Small enough for `ndarray` to run the same pass, and still wide enough
+    /// that `n_head` divides `model_dim` into more than one head — a single
+    /// head makes the transposed view degenerate and proves nothing.
+    fn tiny() -> T2sConfig {
+        T2sConfig {
+            model_dim: 32,
+            n_head: 4,
+            n_layer: 2,
+            ffn_dim: 64,
+            phoneme_vocab_size: 40,
+            vocab_size: 20,
+            bert_dim: 16,
+        }
+    }
+
+    /// A fixed LCG, so the two backends get byte-identical weights without a
+    /// record round-trip. `Distribution` is not required to draw the same
+    /// numbers on two backends, and a test that assumed it would fail for a
+    /// reason that is not the one it is for.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn take(&mut self, n: usize) -> Vec<f32> {
+            (0..n)
+                .map(|_| {
+                    self.0 = self
+                        .0
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    ((self.0 >> 40) as f32 / 8388608.0) - 1.0
+                })
+                .collect()
+        }
+    }
+
+    /// Replaces every parameter with that sequence, in module-tree order.
+    ///
+    /// Initialised weights would not do: `in_proj_weight` and `in_proj_bias`
+    /// are zeros, and a zero projection makes every attention output zero —
+    /// which passes any comparison between two backends while saying nothing.
+    struct Fill(Lcg);
+
+    impl<B: Backend> ModuleMapper<B> for Fill {
+        fn map_float<const D: usize>(&mut self, param: Param<Tensor<B, D>>) -> Param<Tensor<B, D>> {
+            let (device, shape) = (param.val().device(), param.val().shape());
+            let data = TensorData::new(self.0.take(shape.num_elements()), shape.clone());
+            param.map(move |_| Tensor::from_data(data.clone(), &device))
+        }
+    }
+
+    /// Runs a prompt and then two cached steps, and returns the final logits.
+    ///
+    /// The cached path is the one that matters here: `FusedAttention` splits
+    /// one `qkv` into three slices and hands two of them to the cache, so
+    /// every step leaves three live handles on one buffer for the next
+    /// in-place-capable op to find.
+    fn logits<B: Backend>(cfg: &T2sConfig, device: &B::Device) -> Vec<f32> {
+        let model = T2s::<B>::new(cfg, device).map(&mut Fill(Lcg(1)));
+        let mut state = model.state();
+
+        let phones: Tensor<B, 2, Int> =
+            Tensor::from_data(TensorData::from([[5i32, 11, 2, 30]]), device);
+        let bert = Tensor::<B, 3>::from_data(
+            TensorData::new(Lcg(7).take(4 * cfg.bert_dim), [1, 4, cfg.bert_dim]),
+            device,
+        );
+        let prompt: Tensor<B, 2, Int> = Tensor::from_data(TensorData::from([[3i32, 9]]), device);
+
+        let text = model.embed_text(phones, bert);
+        let audio = model.embed_audio(prompt, 0);
+        let mut out = model.forward_prompt(text, audio, &mut state);
+        for (i, id) in [4i32, 12].iter().enumerate() {
+            let token: Tensor<B, 2, Int> = Tensor::from_data(TensorData::from([[*id]]), device);
+            out = model.forward(model.embed_audio(token, 2 + i), &mut state);
+        }
+        out.into_data().to_vec().unwrap()
+    }
+
+    /// LibTorch and `ndarray` are two independent implementations of the same
+    /// arithmetic, so on one set of weights and one input they have to agree.
+    ///
+    /// That is the reading that catches an aliased view whatever it corrupts:
+    /// `ndarray` refcounts its buffers correctly, so it computes what the code
+    /// says while LibTorch computes what the code plus the defect say. The
+    /// scale on `q` used to be applied *after* the transpose, which wrote the
+    /// scaled queries back into `qkv`'s first `d_model` columns — harmless only
+    /// because nothing reads that region again, so this test passed before the
+    /// fix as well and is here to keep it passing when the layout moves.
+    #[test]
+    fn libtorch_agrees_with_ndarray_over_a_growing_cache() {
+        let cfg = tiny();
+        let want = logits::<Nd>(&cfg, &Default::default());
+        let got = logits::<Tch>(&cfg, &Default::default());
+
+        assert!(
+            got.iter().all(|v| v.is_finite()),
+            "LibTorch logits must be finite"
+        );
+        let worst = want
+            .iter()
+            .zip(&got)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        let scale = want.iter().fold(0.0f32, |a, b| a.max(b.abs()));
+        assert!(
+            worst < 1e-4 * scale.max(1.0),
+            "the two backends differ by {worst} on logits peaking at {scale}"
+        );
+    }
+
+    /// The defect itself, in eight lines, because the fix above is otherwise
+    /// indistinguishable from a stylistic preference.
+    ///
+    /// `slice` yields a `Storage::View`, so an in-place-capable op on it is
+    /// forced out of place — that is what makes scaling *before* the transpose
+    /// safe. `swap_dims` stamps a fresh `Storage::Owned` on the same borrowed
+    /// buffer, so the identical op afterwards writes straight through into the
+    /// source. If this test ever fails, burn-tch has fixed the defect and the
+    /// ordering in `FusedAttention::forward` is free again — read it as news,
+    /// not as a regression.
+    #[test]
+    fn a_transposed_slice_writes_through_into_its_source_and_a_plain_slice_does_not() {
+        let device = Default::default();
+        let base = Tensor::<Tch, 3>::ones([1, 2, 4], &device);
+
+        let view = base.clone().slice([0..1, 0..2, 0..2]);
+        let _ = view.reshape([1, 2, 2, 1]).swap_dims(1, 2) * 3.0;
+        let after: Vec<f32> = base.clone().into_data().to_vec().unwrap();
+        assert_eq!(
+            after,
+            vec![3.0, 3.0, 1.0, 1.0, 3.0, 3.0, 1.0, 1.0],
+            "a transposed slice no longer aliases its source"
+        );
+
+        let base = Tensor::<Tch, 3>::ones([1, 2, 4], &device);
+        let _ = base.clone().slice([0..1, 0..2, 0..2]) * 3.0;
+        let after: Vec<f32> = base.into_data().to_vec().unwrap();
+        assert_eq!(
+            after,
+            vec![1.0; 8],
+            "a plain slice must never write through"
+        );
     }
 }
