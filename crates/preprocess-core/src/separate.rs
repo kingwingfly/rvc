@@ -54,14 +54,19 @@
 //! The network's unit of work is one chunk of a few seconds and it knows
 //! nothing about a longer recording, so this stage owns the seams: it decodes a
 //! stream, holds one chunk plus one hop of it, and emits finished audio as it
-//! goes. A twenty-minute song never exists in memory as a decoded whole.
+//! goes.
 //!
-//! The exception is on the way out, and it is [`audio_kit::write_wav_stereo`]'s
-//! rather than this stage's: a RIFF header carries the length of what follows,
-//! so that writer collects the signal before it can write a byte. Feeding it
-//! through a channel rather than a `Vec` is deliberate — the day that writer
-//! patches its header at close instead, this stage becomes fully streaming with
-//! no change here.
+//! **What that buys is bounded by its two neighbours, and today neither is
+//! streaming.** [`audio_kit::write_wav_stereo`] cannot be: a RIFF header
+//! carries the length of what follows, so the writer collects the signal before
+//! it can write a byte. `decode_path_stereo` merely is not — it accumulates
+//! every decoded frame, resamples each channel into a second buffer and only
+//! then emits its first chunk. So a twenty-minute song does exist in memory as
+//! a decoded whole, and this stage's own bound is the truthful half: it holds
+//! one chunk plus one hop *of its own*, whatever the recording's length. Both
+//! neighbours are fed through channels rather than `Vec`s deliberately — the
+//! day either one streams, this stage becomes fully streaming with no change
+//! here.
 
 use std::path::{Path, PathBuf};
 
@@ -206,11 +211,20 @@ pub async fn file(
         names.join(", ")
     );
 
-    // Pass one: the peak, and only the peak. Streamed like the second pass, so
-    // knowing the level costs a decode rather than a copy of the recording —
-    // and it has to be known before the first chunk reaches the model, because
-    // a gain that changed part-way through would be a seam the crossfade cannot
-    // hide.
+    // Pass one: the peak, and only the peak. It has to be known before the
+    // first chunk reaches the model, because a gain that changed part-way
+    // through would be a seam the crossfade cannot hide, and nothing short of
+    // reading the whole recording can know it.
+    //
+    // **This used to claim the scan "costs a decode rather than a copy of the
+    // recording", and that is not true today.** `decode_one_stereo_blocking`
+    // accumulates every frame into one `StereoSamples`, resamples each channel
+    // into a second buffer, and only then sends the first chunk — so a decode
+    // *is* a copy of the recording, twice over, inside `audio-kit`. Holding
+    // nothing here is still the right shape and costs nothing, but it does not
+    // yet buy the bound it was written to buy: the claim below that a
+    // twenty-minute song never exists in memory as a decoded whole is the
+    // decoder's to keep, and this stage cannot make it alone.
     //
     // Over each channel independently and never over the mono fold: out-of-
     // phase content makes `0.5 (L + R)` understate a channel's true peak, and
@@ -690,6 +704,206 @@ mod tests {
             let sum = overlap.window[i] + overlap.window[i + overlap.hop];
             assert!((sum - 1.0).abs() < 1e-6, "window[{i}] pair sums to {sum}");
         }
+    }
+
+    /// Drive [`file`] over a written recording and hand back both the report
+    /// and the stem exactly as it landed on disk.
+    ///
+    /// Reading the *file* rather than the in-memory stream is the point: the
+    /// gain is undone in [`emit`], the WAV writer is 32-bit float and
+    /// [`decode_path_stereo`] short-circuits its resampler at a matching rate,
+    /// so a byte that survives this round trip is the byte the model produced.
+    /// A test that inspected `SeparateReport::rms` instead would agree with a
+    /// stage that never wrote anything.
+    async fn through_the_stage(
+        dir: &Path,
+        name: &str,
+        audio: StereoSamples,
+        chunk: usize,
+    ) -> (SeparateReport, StereoSamples) {
+        let input = dir.join(format!("{name}.wav"));
+        let sr = 44_100;
+        {
+            let audio = audio.clone();
+            audio_kit::write_wav_stereo_file(
+                &input,
+                sr,
+                Box::pin(futures::stream::once(async move { Ok(audio) })),
+            )
+            .await
+            .expect("write the input");
+        }
+        let report = file(
+            &InputFile {
+                path: input,
+                base: name.into(),
+            },
+            &SeparateOptions {
+                stems: Stems::Vocals,
+            },
+            &Passthrough { chunk },
+            dir,
+        )
+        .await
+        .expect("separate");
+
+        let written = report.stems[0].path.clone();
+        let mut stem = StereoSamples::default();
+        {
+            let mut decode = std::pin::pin!(decode_path_stereo(&written, DecodeOptions::new(sr)));
+            while let Some(part) = decode.next().await {
+                let part = part.expect("decode the stem");
+                stem.left.extend(part.left);
+                stem.right.extend(part.right);
+            }
+        }
+        (report, stem)
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("preprocess-separate-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    /// A silent recording must produce a stem that is silent **exactly**, and
+    /// the reason to pin bit-equality rather than a threshold is that every
+    /// path through this stage is multiplicative: a zero can only stop being a
+    /// zero if something added to it.
+    ///
+    /// `burn_mdx`'s `tch_aliasing::silence_in_is_silence_out` pins the same
+    /// invariant one level down, on the network, where it caught a backend
+    /// writing through an aliased view. This asks the other half of the
+    /// question — whether the invariant survives the *stage* wrapped around it:
+    /// the peak scan (which has no peak to find and must take the `gain = 1.0`
+    /// branch rather than dividing by zero), the Hann window, the overlap-add
+    /// normalisation with its `max(1e-6)` denominator, and the gain undone on
+    /// the way out.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn silence_in_is_silence_out_through_the_stage() {
+        let dir = scratch("silence");
+        let frames = 3000;
+        let silent = StereoSamples {
+            left: vec![0.0; frames],
+            right: vec![0.0; frames],
+        };
+        let (report, stem) = through_the_stage(&dir, "silence", silent, 1000).await;
+
+        // A silent file has no peak, so `TARGET_PEAK / peak` would be an
+        // infinity; the guard has to hand the model the recording untouched.
+        assert_eq!(report.gain, 1.0, "silence must take the unity-gain branch");
+        assert_eq!(stem.frames(), frames, "the stem changed length");
+        for (channel, samples) in [("left", &stem.left), ("right", &stem.right)] {
+            for (i, s) in samples.iter().enumerate() {
+                assert_eq!(*s, 0.0, "{channel}[{i}] is {s}, not exactly zero");
+            }
+        }
+        assert_eq!(report.stems[0].rms, 0.0, "a silent stem reported energy");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The normalising gain is undone to within one rounding of the last bit,
+    /// at every level a decode can produce and on both sides of the guard.
+    ///
+    /// This is what makes a level read off a stem mean something. [`TARGET_PEAK`]
+    /// puts the mixture where the model works; if the inverse were skipped, or
+    /// applied to one stem and not the other, every stem would sit uniformly
+    /// above or below its own mixture and the difference would read as a
+    /// separation result — a quieter vocals stem in the speech gaps is exactly
+    /// what this stage is measured by.
+    ///
+    /// It is **not** bit-exact and cannot be: `x * g * (1/g)` rounds twice, and
+    /// `1/g` is itself rounded. What the measurement shows is that the gain is
+    /// not where the rounding comes from — driven over peaks from 9e-7 to 2.5,
+    /// the worst disagreement is **1.4e-7** relative with a gain of exactly 1.0
+    /// and **2.0–2.3e-7** with a gain of anything from 2.3 to 636,363. The
+    /// floor is the overlap-add's Hann normalisation, which every level pays
+    /// alike; scaling adds about one `f32` ulp on top of it, at every level and
+    /// on both sides of the guard.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_normalising_gain_is_undone_to_the_last_bit() {
+        let dir = scratch("gain");
+        let frames = 3000;
+        let base = signal(frames);
+        let base_peak = base
+            .left
+            .iter()
+            .chain(&base.right)
+            .fold(0.0f32, |a, s| a.max(s.abs()));
+
+        // 9e-7 and 1.1e-6 straddle the `peak > 1e-6` guard, which is the one
+        // discontinuity in the mapping: below it the gain is 1.0 and above it
+        // the gain is roughly a million, so the two neighbours exercise the
+        // largest scaling this stage will ever apply and none at all. The first
+        // is also the **control**: with a gain of exactly 1.0 nothing is
+        // scaled, so whatever it reads is the overlap-add's own rounding rather
+        // than the gain's, and every other level is judged against it instead
+        // of against an absolute bound that would absorb the gain silently.
+        let mut control = None;
+        for peak in [9e-7f32, 1.1e-6, 0.05, 0.3, 0.7, 1.0, 2.5] {
+            let scale = peak / base_peak;
+            let want = StereoSamples {
+                left: base.left.iter().map(|s| s * scale).collect(),
+                right: base.right.iter().map(|s| s * scale).collect(),
+            };
+            // The recording's own peak, not the one asked for: scaling every
+            // sample rounds, so a request for 1.0 lands at 1.0000001 and the
+            // gain the stage owes is the one *that* peak deserves.
+            let actual = want
+                .left
+                .iter()
+                .chain(&want.right)
+                .fold(0.0f32, |a, s| a.max(s.abs()));
+            let (report, got) = through_the_stage(&dir, "gain", want.clone(), 1000).await;
+
+            let expected_gain = if actual > 1e-6 {
+                TARGET_PEAK / actual
+            } else {
+                1.0
+            };
+            assert_eq!(
+                report.gain, expected_gain,
+                "peak {actual}: gain {} where {expected_gain} was due",
+                report.gain
+            );
+            assert_eq!(got.frames(), frames, "peak {peak}: the stem changed length");
+
+            let mut worst = 0.0f64;
+            for (channel, (a, b)) in [
+                ("left", (&got.left, &want.left)),
+                ("right", (&got.right, &want.right)),
+            ] {
+                for (i, (x, y)) in a.iter().zip(b).enumerate() {
+                    let rel = ((*x as f64 - *y as f64) / (*y as f64).abs().max(1e-30)).abs();
+                    worst = worst.max(rel);
+                    assert!(
+                        rel < 5e-7,
+                        "peak {peak}: {channel}[{i}] is {x}, not {y} ({rel:e} relative)"
+                    );
+                }
+            }
+            println!(
+                "peak {peak}: gain {}, worst {worst:e} relative",
+                report.gain
+            );
+            match control {
+                None => control = Some(worst),
+                // A factor rather than a threshold, and a generous one: what is
+                // being asked is whether *scaling* costs anything beyond the
+                // rounding that is there without it. An inverse skipped,
+                // applied twice, or taken from the wrong stem misses by the
+                // gain itself — a factor of 14 at a peak of 0.05 and of 600,000
+                // just above the guard — so nothing that fails this is a
+                // rounding.
+                Some(control) => assert!(
+                    worst <= 3.0 * control,
+                    "peak {peak}: {worst:e} relative against {control:e} with no gain at all"
+                ),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A model that fails part-way through a recording, to drive [`file`]'s
