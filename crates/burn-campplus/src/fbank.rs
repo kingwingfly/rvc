@@ -420,4 +420,45 @@ mod tests {
             );
         }
     }
+
+    /// A window's filterbank is **not** a slice of the whole recording's, and
+    /// every stage that scores windows rests on the difference.
+    ///
+    /// The mean taken out above is the *clip's*, so computing one filterbank for
+    /// a file and cutting frames out of it normalises every window against a
+    /// distribution none of them has — a recording of two speakers over a music
+    /// bed has no window whose own mean is the file's. That shortcut is about
+    /// fifty times cheaper and is what an optimiser reaches for, which is why
+    /// `preprocess_core::diarize` names it and why it is pinned here rather than
+    /// only described.
+    ///
+    /// Two tones stand in for two speakers: frames of the first must come out
+    /// differently depending on whether the second was in the mean. The
+    /// assertion is that they differ *by a lot*, because the two spellings agree
+    /// **exactly** when the subtraction is missing — a tolerance would be the
+    /// wrong shape of test.
+    #[test]
+    fn a_windows_own_mean_is_not_the_whole_recordings() {
+        let cfg = FbankConfig::default();
+        let pcm = two_tones(&cfg, 1_000.0, 3_000.0);
+        let whole = features(&cfg, &pcm);
+        // The same samples framed the same way — `snip_edges` starts frame `f`
+        // at `f · shift` whatever follows it — but with only their own mean
+        // taken out.
+        let alone = features(&cfg, &pcm[..cfg.sample_rate]);
+        let frames = alone.len() / cfg.num_mel_bins;
+        assert!(frames * cfg.num_mel_bins <= whole.len());
+
+        let worst = whole[..frames * cfg.num_mel_bins]
+            .iter()
+            .zip(&alone)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            worst > 1.0,
+            "slicing frames out of a whole recording's filterbank gave the same features as \
+             computing the window's own (worst bin differed by {worst}) — so either the \
+             per-clip mean is not subtracted, or it is not per clip"
+        );
+    }
 }
