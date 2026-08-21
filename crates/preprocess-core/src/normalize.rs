@@ -190,8 +190,10 @@ fn db(gain: f32) -> f32 {
 /// limits, which is precisely the processing a breathy corpus must not get —
 /// and its linear mode needs measured values it will only ever print to a log,
 /// where an in-process filter graph cannot read them. It also negotiates its
-/// output to 192 kHz, which [`audio_kit::AudioFilter`] would hand back as if it
-/// were `sr`.
+/// output to 192 kHz, which [`audio_kit::AudioFilter`] used to hand back as if
+/// it were `sr` — that one is now refused rather than miscounted
+/// ([`audio_kit::AudioError::RateRenegotiated`]), but a chain that has to be
+/// refused is still the wrong chain.
 ///
 /// `ebur128` has none of those problems: it passes the audio through untouched
 /// and injects the running measurement as frame metadata, so ffmpeg does the
@@ -225,6 +227,17 @@ pub fn integrated_lufs(samples: &[f32], sr: u32) -> Result<Option<f32>> {
     Ok((value.is_finite() && value > ABSOLUTE_GATE_LUFS).then_some(value))
 }
 
+/// Every measurement below `expect()`s its meter rather than stepping around a
+/// missing one.
+///
+/// Four of these tests used to open with `let Ok(..) = integrated_lufs(..)
+/// else { return }`, which swallowed *any* error — and two of them, spelled
+/// `Ok(Some(..))`, swallowed a `None` reading as well. A build where
+/// `lavfi.r128.I` stopped appearing would have taken the whole set green while
+/// they asserted nothing, and these are the tests holding this crate's only
+/// external oracle: `-21.1 LUFS` is what `ffmpeg -af ebur128` independently
+/// reports for the same waveform. A skip indistinguishable from a pass is worse
+/// than an absent test, so if the meter is gone these now say so.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,10 +286,9 @@ mod tests {
     /// waveform an independent tool has already put a number on.
     #[test]
     fn a_known_tone_measures_what_ffmpeg_says_it_does() {
-        let Ok(measured) = integrated_lufs(&tone(3.0, 0.125), SR) else {
-            return; // no ebur128 in this ffmpeg build
-        };
-        let measured = measured.expect("3 s of tone has an integrated loudness");
+        let measured = integrated_lufs(&tone(3.0, 0.125), SR)
+            .expect("measure")
+            .expect("3 s of tone has an integrated loudness");
         assert!(
             (measured - -21.1).abs() < 0.2,
             "expected ~-21.1 LUFS, got {measured}"
@@ -288,9 +300,9 @@ mod tests {
     /// nothing converges to.
     #[test]
     fn the_reading_tracks_the_gain_exactly() {
-        let Ok(Some(loud)) = integrated_lufs(&tone(3.0, 0.5), SR) else {
-            return;
-        };
+        let loud = integrated_lufs(&tone(3.0, 0.5), SR)
+            .expect("measure")
+            .expect("3 s of tone has an integrated loudness");
         let quiet = integrated_lufs(&tone(3.0, 0.25), SR)
             .expect("measure")
             .expect("3 s of tone has an integrated loudness");
@@ -304,9 +316,9 @@ mod tests {
     #[test]
     fn normalizing_to_a_lufs_target_lands_on_it() {
         let mut s = tone(3.0, 0.125);
-        let Ok(Some(before)) = integrated_lufs(&s, SR) else {
-            return;
-        };
+        let before = integrated_lufs(&s, SR)
+            .expect("measure")
+            .expect("3 s of tone has an integrated loudness");
         let gain_db = -23.0 - before;
         let gain = 10f32.powf(gain_db / 20.0);
         for x in s.iter_mut() {
@@ -314,6 +326,333 @@ mod tests {
         }
         let after = integrated_lufs(&s, SR).expect("measure").expect("finite");
         assert!((after - -23.0).abs() < 0.1, "landed on {after}, not -23");
+    }
+
+    /// A directory of this test's own, named after the process so parallel
+    /// worktrees cannot collide — the same hazard the shared cargo target
+    /// directory has.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("normalize-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    /// Write `samples` as the stage's input file and return what to hand
+    /// [`file`].
+    async fn input_file(dir: &Path, base: &str, samples: Vec<f32>) -> InputFile {
+        let path = dir.join(format!("{base}.wav"));
+        let stream = stream::iter([Ok::<_, audio_kit::AudioError>(samples)]);
+        write_wav_file(&path, SR, stream)
+            .await
+            .expect("write input");
+        InputFile {
+            path,
+            base: base.to_string(),
+        }
+    }
+
+    /// Read a 32-bit-float mono WAV back at the spec's own offsets.
+    ///
+    /// **Not** through [`crate::decode_mono`], and the difference is the whole
+    /// point of these tests. A decoder is a resampler with a format converter
+    /// in front of it, so it is exactly the thing that could clamp an
+    /// overshoot away or round a sample — and an overshoot surviving to disk is
+    /// one of the properties under test. Reading the bytes where the header
+    /// says they are cannot do either.
+    ///
+    /// The declared `data` size is checked against the bytes actually present,
+    /// because a correct header over a truncated body is what "the stage
+    /// dropped the tail" looks like, and only comparing the two sees it.
+    /// `audio-kit`'s own `a_mono_wav_decodes_back_to_the_samples_it_was_written_from`
+    /// pins this reader's other half — that the decoder agrees with the writer
+    /// sample for sample — so the pair covers both directions.
+    fn read_wav_f32(path: &Path, expect_sr: u32) -> Vec<f32> {
+        let bytes = std::fs::read(path).expect("read written wav");
+        assert!(bytes.len() >= 44, "shorter than a WAV header");
+        assert_eq!(&bytes[0..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WAVE");
+        let u16_at = |o: usize| u16::from_le_bytes([bytes[o], bytes[o + 1]]);
+        let u32_at =
+            |o: usize| u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
+        assert_eq!(u16_at(20), 3, "format tag must stay IEEE float");
+        assert_eq!(u16_at(22), 1, "the stage writes mono");
+        assert_eq!(
+            u32_at(24),
+            expect_sr,
+            "written at a different rate than it was decoded at"
+        );
+        assert_eq!(u16_at(34), 32, "bits per sample");
+        assert_eq!(&bytes[36..40], b"data");
+        let declared = u32_at(40) as usize;
+        assert_eq!(
+            declared,
+            bytes.len() - 44,
+            "the header declares a data size the file does not carry"
+        );
+        bytes[44..]
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    }
+
+    /// A peak run, measured on the file it wrote rather than on the vector the
+    /// test still had in hand.
+    ///
+    /// Every other test in this module exercises [`peak_normalize`] or
+    /// [`integrated_lufs`] directly, which leaves the stage itself — decode,
+    /// gain, encode, and the report describing all three — checked by nothing.
+    /// That is the shape this repository has already been bitten by twice: a
+    /// number that was real and a harness that did not compute it.
+    #[tokio::test]
+    async fn a_peak_run_writes_a_file_whose_loudest_sample_is_the_target() {
+        let dir = scratch("peak");
+        let out = dir.join("out");
+        std::fs::create_dir_all(&out).expect("create out");
+        let samples = tone(1.0, 0.3);
+        let expect_peak_before = peak(&samples);
+        let input = input_file(&dir, "take", samples).await;
+
+        let report = file(
+            &input,
+            &NormalizeOptions {
+                sr: SR,
+                target: Target::Peak(0.95),
+            },
+            &out,
+        )
+        .await
+        .expect("normalize");
+
+        let written = read_wav_f32(&out.join("take.wav"), SR);
+        assert_eq!(
+            written.len(),
+            SR as usize,
+            "a gain must not resample or truncate"
+        );
+        let peak_written = peak(&written);
+        assert!(
+            (peak_written - 0.95).abs() < 1e-6,
+            "the loudest written sample is {peak_written}, not the 0.95 asked for"
+        );
+
+        // The report is the user's only window onto the stage, so it is
+        // checked against the file rather than against itself.
+        assert!((report.in_secs - 1.0).abs() < 1e-9, "{}", report.in_secs);
+        assert!(
+            (report.peak_before - expect_peak_before).abs() < 1e-6,
+            "{} vs {expect_peak_before}",
+            report.peak_before
+        );
+        assert!(
+            (report.peak_after - peak_written).abs() < 1e-6,
+            "the report says the file peaks at {} and it peaks at {peak_written}",
+            report.peak_after
+        );
+        let expect_gain = 20.0 * (0.95 / expect_peak_before).log10();
+        assert!(
+            (report.gain_db - expect_gain).abs() < 1e-4,
+            "{} vs {expect_gain}",
+            report.gain_db
+        );
+        assert_eq!(report.lufs, None, "a peak run measures no loudness");
+    }
+
+    /// What the stage promises, asked of the stage: request -23 LUFS and the
+    /// audio **on disk** measures -23.
+    ///
+    /// `normalizing_to_a_lufs_target_lands_on_it` above asserts the same number
+    /// about a vector the test scaled itself, so it would pass unchanged if
+    /// [`file`] applied the gain twice, wrote at the wrong rate or dropped the
+    /// tail. This one re-measures what landed.
+    #[tokio::test]
+    async fn a_lufs_run_writes_a_file_that_measures_the_target() {
+        let dir = scratch("lufs");
+        let out = dir.join("out");
+        std::fs::create_dir_all(&out).expect("create out");
+        let samples = tone(3.0, 0.125);
+        let before = integrated_lufs(&samples, SR)
+            .expect("measure")
+            .expect("3 s of tone has an integrated loudness");
+        let input = input_file(&dir, "take", samples).await;
+
+        let report = file(
+            &input,
+            &NormalizeOptions {
+                sr: SR,
+                target: Target::Lufs(-23.0),
+            },
+            &out,
+        )
+        .await
+        .expect("normalize");
+
+        let written = read_wav_f32(&out.join("take.wav"), SR);
+        assert_eq!(
+            written.len(),
+            SR as usize * 3,
+            "a gain must not resample or truncate"
+        );
+        let measured = integrated_lufs(&written, SR)
+            .expect("re-measure")
+            .expect("the written file has an integrated loudness");
+        assert!(
+            (measured - -23.0).abs() < 0.1,
+            "the written file measures {measured}, not the -23 asked for"
+        );
+
+        let (r_before, r_after) = report.lufs.expect("a lufs run reports both readings");
+        assert!((r_before - before).abs() < 0.05, "{r_before} vs {before}");
+        assert!(
+            (r_after - measured).abs() < 0.05,
+            "the report says the file measures {r_after} and it measures {measured}"
+        );
+        assert!(
+            (report.gain_db - (-23.0 - before)).abs() < 1e-4,
+            "{}",
+            report.gain_db
+        );
+        assert!(
+            (report.peak_after - peak(&written)).abs() < 1e-6,
+            "{} vs {}",
+            report.peak_after,
+            peak(&written)
+        );
+    }
+
+    /// The one promise a limiter would break, checked on the samples that
+    /// reached the file.
+    ///
+    /// [`NormalizeReport::peak_after`]'s doc says an overshoot is *reported
+    /// rather than limited*, because limiting is dynamics processing and this
+    /// stage exists not to do that. A quiet tone with one loud thump in it is
+    /// the case that produces one: R128's gate ignores the thump, so the gain
+    /// is decided by the tone and the thump is carried past full scale.
+    #[tokio::test]
+    async fn a_lufs_gain_that_overshoots_full_scale_is_written_not_limited() {
+        let dir = scratch("overshoot");
+        let out = dir.join("out");
+        std::fs::create_dir_all(&out).expect("create out");
+        let mut samples = tone(3.0, 0.05);
+        // A three-sample thump, far too short to move a gated reading (its
+        // contribution to a 400 ms block is ~0.1 dB) and loud enough to decide
+        // the peak.
+        for s in samples.iter_mut().skip(SR as usize).take(3) {
+            *s = 0.5;
+        }
+        let input = input_file(&dir, "take", samples).await;
+
+        let report = file(
+            &input,
+            &NormalizeOptions {
+                sr: SR,
+                target: Target::Lufs(-12.0),
+            },
+            &out,
+        )
+        .await
+        .expect("normalize");
+
+        let written = read_wav_f32(&out.join("take.wav"), SR);
+        let peak_written = peak(&written);
+        assert!(
+            peak_written > 1.0,
+            "the overshoot was limited away: peak {peak_written}"
+        );
+        assert!(
+            (report.peak_after - peak_written).abs() < 1e-6,
+            "the report says {} and the file says {peak_written}",
+            report.peak_after
+        );
+        // Still on target despite the overshoot, which is the other half of
+        // "reported rather than limited": nothing was traded for it.
+        let measured = integrated_lufs(&written, SR)
+            .expect("re-measure")
+            .expect("the written file has an integrated loudness");
+        assert!(
+            (measured - -12.0).abs() < 0.3,
+            "the written file measures {measured}, not the -12 asked for"
+        );
+    }
+
+    /// Silence is refused rather than handed +47 dB, and nothing is written.
+    ///
+    /// See [`ABSOLUTE_GATE_LUFS`]: the failure this guards is not a crash but a
+    /// plausible number, so the check is that [`file`] returns an error naming
+    /// the reason and leaves no output behind for a later stage to pick up.
+    #[tokio::test]
+    async fn a_file_with_no_gated_loudness_is_refused_rather_than_amplified() {
+        let dir = scratch("silence");
+        let out = dir.join("out");
+        std::fs::create_dir_all(&out).expect("create out");
+        let input = input_file(&dir, "take", vec![0.0; SR as usize * 2]).await;
+
+        let err = file(
+            &input,
+            &NormalizeOptions {
+                sr: SR,
+                target: Target::Lufs(-23.0),
+            },
+            &out,
+        )
+        .await
+        .expect_err("silence has no loudness to normalize to");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("no integrated loudness"),
+            "the error must say why: {msg}"
+        );
+        assert!(
+            !out.join("take.wav").exists(),
+            "a refused file must leave no output for the next stage to read"
+        );
+
+        // A peak run on the same silence is not an error — there is simply no
+        // gain to apply, and silence out is the only sane answer.
+        let report = file(
+            &input,
+            &NormalizeOptions {
+                sr: SR,
+                target: Target::Peak(DEFAULT_PEAK),
+            },
+            &out,
+        )
+        .await
+        .expect("a peak run on silence");
+        assert_eq!(report.gain_db, 0.0);
+        assert_eq!(report.peak_after, 0.0);
+        let written = read_wav_f32(&out.join("take.wav"), SR);
+        assert_eq!(written.len(), SR as usize * 2);
+        assert!(written.iter().all(|s| *s == 0.0), "silence in, silence out");
+    }
+
+    /// [`ABSOLUTE_GATE_LUFS`] is a claim about ffmpeg, so it is checked against
+    /// ffmpeg rather than trusted.
+    ///
+    /// The load-bearing part is that `is_finite()` alone is **not** enough:
+    /// ebur128 reports the gate itself for a signal that clears nothing, so the
+    /// reading for digital silence parses as an ordinary number. Were that ever
+    /// to become `-inf`, this test would fail and the constant could go — which
+    /// is the point of pinning it.
+    #[test]
+    fn ffmpeg_reports_the_gate_itself_for_silence_rather_than_negative_infinity() {
+        let mut meter =
+            audio_kit::AudioFilter::new(SR, "ebur128=metadata=1:peak=none:framelog=quiet")
+                .expect("this ffmpeg build must provide `ebur128`");
+        meter.process(&vec![0.0; SR as usize * 2]).expect("measure");
+        meter.flush().expect("flush");
+        let raw = meter
+            .metadata("lavfi.r128.I")
+            .expect("an integrated reading after the flush");
+        let value: f32 = raw.parse().expect("a number, not `-inf`");
+        assert!(
+            value.is_finite(),
+            "silence read as {raw}, so the finiteness test alone would have caught it"
+        );
+        assert!(
+            (value - ABSOLUTE_GATE_LUFS).abs() < 0.01,
+            "silence measures {value}, but ABSOLUTE_GATE_LUFS is {ABSOLUTE_GATE_LUFS}"
+        );
     }
 
     /// Too short to gate, and digitally silent: two different reasons for the
@@ -325,9 +664,10 @@ mod tests {
             None,
             "100 ms is under one 400 ms gating block"
         );
-        let Ok(silent) = integrated_lufs(&vec![0.0; SR as usize * 2], SR) else {
-            return;
-        };
-        assert_eq!(silent, None, "silence has no loudness, not a very low one");
+        assert_eq!(
+            integrated_lufs(&vec![0.0; SR as usize * 2], SR).expect("measure"),
+            None,
+            "silence has no loudness, not a very low one"
+        );
     }
 }

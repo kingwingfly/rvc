@@ -29,6 +29,10 @@ use crate::error::{AudioError, Result};
 ///
 /// Input and output are both mono packed `f32` at `sample_rate`; the graph in
 /// between is whatever `avfilter` chain description was passed to [`Self::new`].
+/// All three halves of that promise are enforced rather than assumed — format
+/// and layout by the `aformat` [`Self::new`] appends, the rate by a check in
+/// [`Self::drain`] that refuses a chain which resampled behind the caller's
+/// back.
 pub struct AudioFilter {
     graph: filter::Graph,
     sample_rate: u32,
@@ -114,7 +118,7 @@ impl AudioFilter {
             let mut src = self.graph.get("in").expect("abuffer source present");
             src.source().add(&frame)?;
         }
-        Ok(self.drain())
+        self.drain()
     }
 
     /// Signal end-of-input and drain the filter's remaining (tail) samples.
@@ -125,26 +129,56 @@ impl AudioFilter {
             src.source().flush()?;
             self.flushed = true;
         }
-        Ok(self.drain())
+        self.drain()
     }
 
     /// Pull every currently-available output frame into one `Vec`. Any sink
     /// error (`EAGAIN` when empty, `EOF` when finished) simply ends the drain.
-    fn drain(&mut self) -> Samples {
+    ///
+    /// Every frame's rate is checked against the declared one, which is the
+    /// half [`Self::new`]'s `aformat` cannot cover: `sample_fmts` and
+    /// `channel_layouts` are pinned there, but a rate is *negotiated* between
+    /// neighbouring filters, so a chain holding a resampler simply produces
+    /// frames at its own rate. Nothing about them looks wrong — the samples are
+    /// finite, the format is `flt`, the layout is mono — and the caller counts
+    /// them at `self.sample_rate`, so a duration comes out wrong by the ratio
+    /// and nothing says so. Refusing costs one comparison per frame.
+    fn drain(&mut self) -> Result<Samples> {
         let mut out = Vec::new();
         let mut frame = AudioFrame::empty();
         let mut sink = self.graph.get("out").expect("abuffersink present");
         while sink.sink().frame(&mut frame).is_ok() {
+            let n = frame.samples();
+            if n > 0 && frame.rate() != self.sample_rate {
+                return Err(AudioError::RateRenegotiated {
+                    declared: self.sample_rate,
+                    got: frame.rate(),
+                });
+            }
             for (k, v) in frame.metadata().iter() {
                 self.metadata.insert(k.to_string(), v.to_string());
             }
-            let n = frame.samples();
             out.extend_from_slice(&frame.plane::<f32>(0)[..n]);
         }
-        out
+        Ok(out)
     }
 }
 
+/// Building a graph is where a missing filter is discovered, and the tests
+/// below `expect()` that rather than stepping around it.
+///
+/// They used to match [`AudioError::FilterUnavailable`] and `return`, which was
+/// wrong in two directions at once. A skip that cannot be told apart from a
+/// pass is the worse half — these are the only tests in the crate with an
+/// *external* oracle, `-21.1 LUFS` being what `ffmpeg -af ebur128` reports for
+/// the same waveform, so silently not running them costs more than any of the
+/// rest. But the arm never fired either: `FilterUnavailable` is only ever
+/// constructed for the graph's two **endpoints**, `abuffer` and `abuffersink`,
+/// while a missing *chain* filter fails inside [`filter::Graph::parse`] and
+/// arrives as [`AudioError::Ffmpeg`]. So the skip was unreachable and a real
+/// absence already panicked, just with a message that named no filter.
+///
+/// Measured on ffmpeg 9.0.1: both filters are present, and both assertions run.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,11 +201,10 @@ mod tests {
             .collect();
         let mut out = f.process(&input).expect("process");
         out.extend(f.flush().expect("flush"));
-        assert!(
-            (out.len() as isize - input.len() as isize).unsigned_abs() < sr as usize / 10,
-            "length drifted: in={} out={}",
+        assert_eq!(
+            out.len(),
             input.len(),
-            out.len()
+            "a gain is sample-for-sample; anything else is a frame lost or a tail dropped"
         );
         let r = rms(&out) / rms(&input);
         assert!((r - 0.5).abs() < 0.02, "expected ~0.5x amplitude, got {r}");
@@ -182,12 +215,8 @@ mod tests {
     #[test]
     fn afftdn_reduces_hiss() {
         let sr = 48_000u32;
-        let mut f = match AudioFilter::new(sr, "afftdn=nf=-20") {
-            Ok(f) => f,
-            // afftdn missing from this ffmpeg build → nothing to test.
-            Err(AudioError::FilterUnavailable(_)) => return,
-            Err(e) => panic!("build graph: {e}"),
-        };
+        let mut f =
+            AudioFilter::new(sr, "afftdn=nf=-20").expect("this ffmpeg build must provide `afftdn`");
         // Deterministic white-ish noise (no rand dep).
         let mut s: u64 = 0x1234_5678;
         let input: Vec<f32> = (0..sr as usize * 2)
@@ -206,6 +235,86 @@ mod tests {
         assert!(b < 0.6 * a, "hiss not reduced: in={a} out={b}");
     }
 
+    /// `aformat` pins the sink's format and channel layout, and there is no
+    /// third field for the rate — it is negotiated between neighbouring
+    /// filters, so a chain holding a resampler simply produces frames at its
+    /// own. The failure is total and silent: measured before this check,
+    /// `aresample=24000` on a graph declared at 48 kHz returned **24 000
+    /// samples for 48 000 pushed**, all finite, all mono `f32`, and a caller
+    /// counting them at 48 kHz reads a one-second clip as half a second.
+    ///
+    /// [`crate::AudioFilter`]'s only in-tree chains are `ebur128` and `afftdn`,
+    /// neither of which resamples, so this refuses nothing anyone runs today.
+    /// It is here because `normalize`'s `integrated_lufs` names precisely this
+    /// hazard as its reason for preferring `ebur128` over `loudnorm` — which
+    /// negotiates 192 kHz of its own accord — and that reasoning was written
+    /// down and checked by nothing.
+    #[test]
+    fn a_chain_that_resamples_is_refused_rather_than_miscounted() {
+        let sr = 48_000u32;
+        let mut f = AudioFilter::new(sr, "aresample=24000").expect("build graph");
+        let err = f
+            .process(&vec![0.1; sr as usize])
+            .expect_err("a chain that changes the rate must not be counted at the declared one");
+        assert!(
+            matches!(
+                err,
+                AudioError::RateRenegotiated {
+                    declared: 48_000,
+                    got: 24_000
+                }
+            ),
+            "{err}"
+        );
+    }
+
+    /// The other half of the metadata contract: a reading taken early is a
+    /// reading of *what has been pushed so far*, and it is a plausible number
+    /// rather than an error.
+    ///
+    /// `a_measuring_filter_reports_through_metadata` pins the two ends — `None`
+    /// before anything, a value after the flush — which a meter would satisfy
+    /// even if the running value never moved. This pins the middle, and it uses
+    /// a signal whose two halves measure ~26 LU apart so that reading at the
+    /// wrong moment cannot come out looking right: a constant tone gives nearly
+    /// the same number early and late, which is exactly why the mistake is easy
+    /// to make and hard to see.
+    ///
+    /// `integrated_lufs` depends on this, and `preprocess normalize` depends on
+    /// `integrated_lufs`: were the value read before the flush, a corpus would
+    /// be normalized against a prefix of each recording.
+    #[test]
+    fn a_reading_taken_before_the_flush_covers_only_what_has_been_pushed() {
+        let sr = 48_000u32;
+        let mut f = AudioFilter::new(sr, "ebur128=metadata=1:peak=none:framelog=quiet")
+            .expect("this ffmpeg build must provide `ebur128`");
+        let tone = |secs: usize, amplitude: f32| -> Vec<f32> {
+            (0..secs * sr as usize)
+                .map(|i| amplitude * (std::f32::consts::TAU * 1000.0 * i as f32 / sr as f32).sin())
+                .collect()
+        };
+
+        f.process(&tone(2, 0.02)).expect("process the quiet half");
+        let mid: f32 = f
+            .metadata("lavfi.r128.I")
+            .expect("a running reading once a gating block has passed")
+            .parse()
+            .expect("a number");
+
+        f.process(&tone(2, 0.4)).expect("process the loud half");
+        f.flush().expect("flush");
+        let final_reading: f32 = f
+            .metadata("lavfi.r128.I")
+            .expect("an integrated reading after the flush")
+            .parse()
+            .expect("a number");
+
+        assert!(
+            final_reading > mid + 3.0,
+            "the reading did not move once the loud half arrived: {mid} then {final_reading}"
+        );
+    }
+
     /// A measuring filter reports through frame metadata, and the reading that
     /// covers the whole signal is only there once the graph has been flushed.
     /// Both halves are pinned here, because reading the value too early gives a
@@ -213,12 +322,8 @@ mod tests {
     #[test]
     fn a_measuring_filter_reports_through_metadata() {
         let sr = 48_000u32;
-        let mut f = match AudioFilter::new(sr, "ebur128=metadata=1:peak=none:framelog=quiet") {
-            Ok(f) => f,
-            // ebur128 missing from this ffmpeg build → nothing to test.
-            Err(AudioError::FilterUnavailable(_)) => return,
-            Err(e) => panic!("build graph: {e}"),
-        };
+        let mut f = AudioFilter::new(sr, "ebur128=metadata=1:peak=none:framelog=quiet")
+            .expect("this ffmpeg build must provide `ebur128`");
         assert_eq!(f.metadata("lavfi.r128.I"), None, "nothing measured yet");
 
         // ffmpeg's own `sine` source at its default amplitude of 0.125, which
@@ -229,11 +334,10 @@ mod tests {
         let mut out = f.process(&input).expect("process");
         out.extend(f.flush().expect("flush"));
         // ebur128 is a pass-through: the audio is the measurement's by-product.
-        assert!(
-            (out.len() as isize - input.len() as isize).unsigned_abs() < sr as usize / 10,
-            "ebur128 changed the length: in={} out={}",
+        assert_eq!(
+            out.len(),
             input.len(),
-            out.len()
+            "ebur128 is a pass-through, so it must return every sample it was given"
         );
 
         let measured: f32 = f

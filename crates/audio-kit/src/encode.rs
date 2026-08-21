@@ -221,6 +221,116 @@ mod tests {
         );
     }
 
+    /// A directory of this test's own, named after the process so parallel
+    /// worktrees cannot collide — the same hazard the shared cargo target
+    /// directory has.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("audio-kit-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    /// The header tests above read the bytes where the spec says they are, and
+    /// that is deliberately *independent* of [`crate::decode`]. This is the
+    /// other half: writer and reader pinned **against each other** on the one
+    /// path where they meet, which is what a stage like `preprocess normalize`
+    /// actually does — write a file, and be read back by the next stage.
+    ///
+    /// Sample-**exact** rather than approximate, and the exactness is the
+    /// point: at a decode rate equal to the file's own there is no resampler
+    /// in the way, so anything but equality is a lost frame, a dropped tail or
+    /// a format conversion nobody asked for. It is checked rather than assumed
+    /// because "decoding at the same rate is a no-op" is a claim about
+    /// swresample, not about this crate.
+    #[tokio::test]
+    async fn a_mono_wav_decodes_back_to_the_samples_it_was_written_from() {
+        const SR: u32 = 48_000;
+        let dir = scratch("mono-round-trip");
+        let path = dir.join("round-trip.wav");
+
+        // Values a float WAV stores exactly, plus two that only survive if
+        // nothing quantises to 16-bit on the way through.
+        let written: Vec<f32> = (0..SR as usize)
+            .map(|i| {
+                0.37 * (std::f32::consts::TAU * 440.0 * i as f32 / SR as f32).sin()
+                    + 1e-6 * (i % 7) as f32
+            })
+            .collect();
+        // Three chunks, so the joints are inside the file rather than at its ends.
+        let chunks: Vec<Result<Samples>> = written
+            .chunks(SR as usize / 3 + 1)
+            .map(|c| Ok(c.to_vec()))
+            .collect();
+        write_wav_file(&path, SR, futures::stream::iter(chunks))
+            .await
+            .expect("write mono wav");
+
+        let read = decode_all(&path, SR).await;
+        assert_eq!(read.len(), written.len(), "sample count changed");
+        assert_eq!(read, written, "samples changed");
+    }
+
+    /// The stereo counterpart, which also pins the one thing the mono path
+    /// cannot: that the interleave written here and the de-interleave
+    /// [`crate::decode::decode_path_stereo`] performs are inverses. Two
+    /// functions that swap left for right in the same direction round-trip
+    /// perfectly against *each other* — so this test is only worth anything
+    /// beside `stereo_wav_declares_two_channels_and_interleaves_left_first`,
+    /// which settles which channel is which against the spec.
+    #[tokio::test]
+    async fn a_stereo_wav_decodes_back_to_the_channels_it_was_written_from() {
+        const SR: u32 = 48_000;
+        let dir = scratch("stereo-round-trip");
+        let path = dir.join("round-trip.wav");
+
+        let frames = SR as usize / 2;
+        // Deliberately dissimilar channels: two identical ones would survive a
+        // swap, which is exactly the mistake worth catching.
+        let left: Vec<f32> = (0..frames)
+            .map(|i| 0.6 * (std::f32::consts::TAU * 220.0 * i as f32 / SR as f32).sin())
+            .collect();
+        let right: Vec<f32> = (0..frames)
+            .map(|i| -0.3 * (std::f32::consts::TAU * 997.0 * i as f32 / SR as f32).sin())
+            .collect();
+        let chunks: Vec<Result<StereoSamples>> = left
+            .chunks(frames / 3 + 1)
+            .zip(right.chunks(frames / 3 + 1))
+            .map(|(l, r)| {
+                Ok(StereoSamples {
+                    left: l.to_vec(),
+                    right: r.to_vec(),
+                })
+            })
+            .collect();
+        write_wav_stereo_file(&path, SR, futures::stream::iter(chunks))
+            .await
+            .expect("write stereo wav");
+
+        let mut read = StereoSamples::default();
+        let stream = crate::decode::decode_path_stereo(&path, crate::DecodeOptions::new(SR));
+        let mut stream = std::pin::pin!(stream);
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.expect("decode stereo");
+            read.left.extend_from_slice(&chunk.left);
+            read.right.extend_from_slice(&chunk.right);
+        }
+        assert_eq!(read.left.len(), left.len(), "left sample count changed");
+        assert_eq!(read.left, left, "left channel changed");
+        assert_eq!(read.right, right, "right channel changed");
+    }
+
+    /// Decode `path` to mono `f32` at `sr`, draining the whole stream.
+    async fn decode_all(path: &std::path::Path, sr: u32) -> Samples {
+        let stream = crate::decode::decode_path(path, crate::DecodeOptions::new(sr));
+        let mut stream = std::pin::pin!(stream);
+        let mut out = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            out.extend(chunk.expect("decode"));
+        }
+        out
+    }
+
     /// The mono writer is unchanged by sharing a header writer with the stereo
     /// one — the risk in factoring it out is that `channels` silently becomes 2
     /// for everybody.
