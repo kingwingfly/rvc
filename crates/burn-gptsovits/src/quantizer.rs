@@ -62,6 +62,15 @@ impl<B: Backend> Codebook<B> {
     /// every candidate for a given frame, so it cannot change which one wins and
     /// is dropped — leaving one matmul.
     fn encode(&self, x: Tensor<B, 3>) -> Tensor<B, 2, Int> {
+        // Two orderings here are load bearing on LibTorch, where `transpose`
+        // hands back a view that has forgotten whose buffer it is (CLAUDE.md's
+        // **`swap_dims` on LibTorch returns a view burn-tch forgets the
+        // provenance of**). `powi_scalar` is in-place capable, and it is safe
+        // only because the `clone()` in front of it still counts the codebook's
+        // storage — a `.transpose()` slipped between the two would reset that
+        // count and square the codebook itself, once, permanently. The
+        // `embed.transpose()` on the next line *is* such a view of a live
+        // `Param`, and `matmul` is the only thing that touches it.
         let embed = self.embed.val();
         let sq = embed.clone().powi_scalar(2).sum_dim(1).transpose();
         let scores = x.matmul(embed.transpose().unsqueeze()) * 2.0 - sq.unsqueeze();
