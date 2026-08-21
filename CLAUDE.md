@@ -166,6 +166,24 @@ by invoking the parser with the argument *split*, which is not how anyone writes
 a test for a flag they just added. So: **if a flag's documented value can begin
 with `-`, it carries the annotation.**
 
+**"Documented value" is the wrong test, and `diarize --threshold` is how that
+was found out.** A cosine similarity starts at −1 and `verify()` accepts the
+whole of −1..=1 by name, so a negative threshold is documented, validated and
+legal — but every *example* of one is positive, so nobody reading the help
+would think to try `--threshold -0.2`, and it failed to parse for as long as
+the flag existed. The mechanical, greppable question is therefore not what the
+help text shows but **does `verify` accept a value below zero?** That one is
+answerable without judgement, which is what a rule needs to be.
+
+The tests that pin this class live in `crates/preprocess-cli/src/args.rs`, and
+two properties of them are load-bearing: they invoke clap with the value
+**split** from its flag, which is the only form that reproduces the defect, and
+one of them parses in the **nested-under-`voice`** position, which is why the
+annotation goes on the argument rather than the command. A negative-control
+test beside them pins that `--sr -1`, `--pad -1` and friends still *fail* —
+`allow_negative_numbers` widens what a value may look like, and a rate of −1
+should still be refused.
+
 It goes on the argument rather than the command, and not by preference — clap's
 `Command`-level version exists, but a `*-cli` crate exports an `Args` type that
 somebody else's `Command` hosts, so per-argument is the only placement that
@@ -460,9 +478,12 @@ cargo run -p burn-mdx --example separate --features tch -- --mixture <song.wav> 
 # the example's module doc gives. Both figures replace a smaller set measured
 # through a LibTorch aliasing bug; do not merge them.
 cargo test -p burn-mdx --features tch   # the aliasing hazard, which needs the
-# ...backend that has it — `cargo test --workspace` runs burn-mdx on default
-# features and cannot reach it. See **`swap_dims` on LibTorch returns a view
-# burn-tch forgets the provenance of**.
+cargo test -p burn-gptsovits --features tch   # ...backend that has it, in both
+# ...crates that carry a `tch_aliasing` module — `cargo test --workspace` runs
+# them on default features and cannot reach it. See **`swap_dims` on LibTorch
+# returns a view burn-tch forgets the provenance of**. `burn-gptsovits`'s second
+# test exhibits the backend defect directly, so if *that* one fails it is news
+# (burn-tch fixed it) rather than a regression.
 cargo run -p preprocess-core --features tch --example timbre -- --campplus … \
     --reference <clip> <same speaker> <a different one>   # where `diarize`'s 0.55 came from
 cargo run -p seedvc-core --features tch --example convert  # the engine, end to end
@@ -616,23 +637,55 @@ MDX23C being a sung-vocal model fed the wrong material.
 
 Three things to take from it rather than re-derive:
 
-- **The audit is `grep -rn "swap_dims\|permute" crates/`**, the same shape as
-  `grep check_coverage`, and the question to ask of each hit is *is the source
-  still live while something downstream may mutate the view?* A bare
-  `expr.swap_dims(..)` on a moved temporary — which is most of them — is always
-  fine. **Do not narrow the pattern to `clone()\.swap_dims`**: that spelling is
-  only one of the two ways to hold the source, and the other is worse.
-  `burn-whisper`'s `decoder.rs` has
-  `self.embed_tokens.weight.val().swap_dims(0, 1)`, where `val()` hands out a
-  clone while the *parameter* stays live in the module — a model weight, one
-  in-place op away from being scribbled on. It is safe today only because
-  `matmul` consumes it and does not mutate, which is a property of the caller
-  rather than of the code, so it is the site to re-check first.
-  `burn-hubert`'s `x.clone().swap_dims(1, 2)` into `PosConv` is the same shape
-  and safe for the same reason — `conv1d` does not mutate its input — and the
-  ContentVec Burn-against-ORT cosine of 1.000000 recorded below is the evidence
-  that it does not. Two sites, both safe by their consumer's good manners:
-  that is the state to keep, not a clean grep.
+- **The audit is
+  `grep -rnE "swap_dims|permute|\.transpose\(\)|\.movedim\(|\.t\(\)" crates/`**,
+  the same shape as `grep check_coverage`, and the question to ask of each hit
+  is *is the source still live while something downstream may mutate the view?*
+  A bare `expr.swap_dims(..)` on a moved temporary — which is most of them — is
+  always fine.
+
+  **The pattern used to be `grep -rn "swap_dims\|permute"`, and that missed
+  three sites**: `.transpose()`, `.t()` and `.movedim()` all lower to the same
+  two backend ops, and `burn-gptsovits`'s `quantizer.rs` and `t2s.rs` and
+  `burn-rmvpe`'s `gru.rs` hold a live `Param` under that spelling alone.
+  Narrowing it further to `clone()\.swap_dims` misses more still: that is only
+  one of the ways to hold the source, and `val()` — which hands out a clone
+  while the *parameter* stays live in the module — is worse.
+
+  **Ten sites hold a live source, not the two an earlier revision named**, and
+  they are three shapes rather than a list of line numbers, which is what makes
+  them cheap to re-check:
+
+  - **`Param::val()` + transpose + matmul** — a model weight one in-place op
+    from being scribbled on, safe only because `matmul` consumes without
+    mutating. `burn-whisper`'s `decoder.rs`, `burn-vits`'s `attention.rs`
+    (`emb_rel_k`, whose `get_relative_embeddings` returns a bare `slice` of the
+    live `Param` on the common `pad == 0` path), `burn-gptsovits`'s
+    `quantizer.rs` and `t2s.rs`, `burn-rmvpe`'s `gru.rs` (where `w_hh` is held
+    across the whole timestep loop).
+  - **KV-cache-aliasing attention heads** — `*cache = Some(...)` runs *before*
+    the attention, so the cache is a live second handle for the whole call and
+    the head views alias it. `burn-whisper`'s `attention.rs`,
+    `burn-gptsovits`'s `t2s.rs`.
+  - **Fused-`qkv` split views** — `burn-seedvc`'s `dit.rs`, and `t2s.rs`, which
+    is the one that reached a mutating consumer: see below.
+
+  `burn-hubert`'s `x.clone().swap_dims(1, 2)` into `PosConv` is safe because
+  `conv1d` does not mutate its input, and the ContentVec Burn-against-ORT
+  cosine of 1.000000 recorded below is the evidence that it does not.
+
+  **One of the ten was live and is fixed**, and it is the reason this list is
+  worth keeping rather than a curiosity: `burn-gptsovits`'s `FusedAttention`
+  scaled `q` *after* transposing it, which divided `qkv`'s first `d_model`
+  columns in place while `qkv`, `cache.k` and `cache.v` were all still holding
+  that buffer. It corrupted nothing only because the live handles read the
+  other two thirds — a property of that layout, not of the code. Scaling before
+  the transpose fixes it, because `slice` keeps `Storage::View` whose
+  `can_mut()` is false; the arithmetic is untouched, since a scalar divide
+  commutes with reshape and transpose. `t2s.rs`'s `tch_aliasing` pins it, and
+  its second test exhibits the backend defect in eight lines — **if that one
+  ever fails, burn-tch has fixed the defect upstream and the ordering is free
+  again: read it as news, not as a regression.**
 - **Two backends disagreeing is the cheapest possible check**, and it is what
   found this. Any Burn port here can be run on `tch` and on `cuda` over one
   input; they now agree to five figures on MDX23C. A per-model unit test that
@@ -689,6 +742,45 @@ its pkg-config failure never mentions the directory sitting in front of you.
 ContentVec + RMVPE auto-download from Hugging Face in whichever of the two
 weight formats the chosen backend reads (the `download` subcommand prefetches
 them, and takes `--backend` so it knows which). Only 48 kHz is supported today.
+
+### The resampler nothing tested
+`audio_kit::decode::resample` is on **every decode path in the toolkit** — both
+directions, at ratios that are rarely integers — and for as long as it existed
+no test touched it. All five `decode.rs` tests decode at the file's own rate,
+which takes the `src == dst` early return, and the well-tested
+`pcm::resample_linear` is a *different* function that `preprocess` never calls.
+
+It was a box average downsampling and linear interpolation upsampling, described
+in its own comment as "a cheap anti-alias". A box filter's stopband starts at
+−13 dB and never gets deeper, so "cheap" understated it: a 12 kHz tone from
+48 kHz to 16 kHz came back as 4 kHz at **−9.5 dB**, which is arithmetically
+exact rather than empirical — the window is exactly three samples at that ratio
+and the tone is `0, 1, 0, -1`, so a third of it survives at the fold. The same
+filter ate the passband it was meant to pass, **5.6 dB down at 7 kHz** through
+44.1 → 16 kHz, on every corpus ever decoded off-rate and on the 16 kHz CAM++ and
+Whisper both eat. Replaced with a Kaiser-windowed sinc; the alias is now
+−113 dB and the passband flat to 7 kHz.
+
+**libswresample is still not the answer**, and `decode.rs`'s comment about why
+stands: its stereo→mono and rate conversion is unreliable in this ffmpeg build.
+The fix was to write a correct kernel, not to reach back for the library that
+was already rejected.
+
+Two things to take from it:
+
+- **The old arithmetic is kept runnable inside the tests**, so every figure
+  above is computed by `the_box_average_this_replaced_aliased_where_this_does_not`
+  rather than remembered. That is the shape to copy when replacing arithmetic:
+  a before/after table whose "before" column is a live function is a table that
+  cannot go stale.
+- **A Goertzel is the wrong way to measure a resampler's envelope**, and it cost
+  a worker an afternoon. It assumes its two basis vectors are orthogonal over
+  the window, which holds only at a whole number of periods; 3 kHz at a 16 kHz
+  output is 5.33 samples per period, so the leakage reads as *amplitude
+  modulation that is not in the signal* — 2.1 dB of "ripple" for the box filter
+  **and the same 2.1 dB for a 200-tap sinc**, which is the metric talking rather
+  than the code. `amplitude_at` uses least squares, which is exact for a pure
+  tone at any window length. Real ripple is under 0.05 dB.
 
 ### De-hiss is ours, because ffmpeg 9.0 broke `anlmdn`
 `rvc --denoise` and `preprocess denoise` no longer touch libavfilter.
@@ -1006,6 +1098,16 @@ SpecAugment's mask token.) RMVPE, network against network on one shared mel:
 **0.70 Hz** mean absolute F0 difference over 406 jointly voiced frames at
 correlation **0.9932–0.9996**.
 
+**Every figure in this section was measured through the old resampler, and none
+of them has been re-run since.** `audio_kit::decode::resample` aliased at
+**−9.5 dB** and lost 5.6 dB at 7 kHz until it was replaced with a
+Kaiser-windowed sinc (see **The resampler nothing tested**), and both models
+here eat 16 kHz that it produced. The numbers are not *wrong* — Burn and ORT
+were fed the same decoded samples either way, so a comparison *between the two
+runtimes* is unaffected — but they describe a signal the toolkit no longer
+produces, so a re-run will not reproduce them exactly and a discrepancy is not
+a regression. Re-baseline before quoting any of them as current.
+
 **Driven through `FeatureExtractor`, read the median and not the mean** — this is
 the one number here that a favourable sample can flatter, and it did.
 `f0_runtimes` over eight clips of this repository's own breathy close-mic
@@ -1134,6 +1236,22 @@ Each model therefore needs a second check that exercises arithmetic:
   picking one. It is also where `diarize --threshold`'s default came from, which
   is the shape to copy: a default that is a measurement rather than a guess has
   a harness that can be re-run when the model changes.
+
+  **And it has not been re-run, which is the open half of that bargain.**
+  `--threshold 0.55`, `--window 3.0` and the percentile table in `diarize.rs`'s
+  module docs were all measured over vocals and instrumental stems produced by
+  the separator **before** `147f274` fixed it — so the target material and the
+  material to reject are both wrong, and the "80% kept / 86% rejected" figure
+  describes a recording nothing now produces. The defaults may well survive
+  re-measurement; nobody knows yet. Treat the numbers as void and the flags as
+  unvalidated until `examples/timbre` has been run over stems from the fixed
+  separator. The same applies to `analyze`'s `CONTINUOUS_SECS` /
+  `CONTINUOUS_SILENCE_RATIO`, half-calibrated against a `dataset/` of those same
+  stems.
+
+  A harness that *can* be re-run is not the same as one that *has* been, and the
+  distinction is the whole reason a fabricated calibration table was possible
+  here once already.
 - `burn-mdx` — `examples/separate` mixes a known voice with a known
   instrumental bed and reads three things, of which **the first is the one that
   proves the port**: the two stems sum back to the mixture at **58.5 dB**
