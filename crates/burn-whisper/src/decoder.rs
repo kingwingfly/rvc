@@ -150,6 +150,13 @@ impl<B: Backend> TextDecoder<B> {
         // The output projection is the token embedding transposed — tied, and so
         // absent from the checkpoint.
         let x = self.layer_norm.forward(x);
+        // `val()` hands out a clone while the parameter stays live in the
+        // module, and on LibTorch a `swap_dims` view claims a storage handle
+        // burn-tch believes is exclusive — so this is one in-place op away from
+        // scribbling on the embedding table. Its only consumer is `matmul`,
+        // which allocates its output and mutates neither operand; `tch_aliasing`
+        // in `burn-rmvpe` pins that, and CLAUDE.md's **`swap_dims` on LibTorch
+        // returns a view burn-tch forgets the provenance of** is the entry.
         let vocab = self.embed_tokens.weight.val().swap_dims(0, 1);
         x.matmul(vocab.unsqueeze::<3>())
     }

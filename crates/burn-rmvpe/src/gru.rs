@@ -118,6 +118,17 @@ impl<B: Backend> BiGru<B> {
 
         // `[batch, time, 3 * hidden]`: `W_ih` is stored `[3 * hidden, input]`,
         // PyTorch's layout, hence the transpose here rather than at load time.
+        //
+        // Both transposes below are of a `Param::val()` clone taken in
+        // `forward`, so the parameter itself stays live in the module for the
+        // whole call — and `w_hh`'s view is then held across every timestep of
+        // the loop, which is the longest such window in this workspace. On
+        // LibTorch a transposed view carries a storage handle burn-tch believes
+        // is exclusive (CLAUDE.md, **`swap_dims` on LibTorch returns a view
+        // burn-tch forgets the provenance of**), so the only thing standing
+        // between these two lines and a scribbled-on weight is that `matmul` —
+        // their sole consumer — allocates its output and mutates neither
+        // operand. `tch_aliasing` below pins exactly that.
         let gates_x =
             x.matmul(w_ih.transpose().unsqueeze::<3>()) + b_ih.reshape([1, 1, 3 * h_size]);
         let w_hh = w_hh.transpose();
@@ -323,5 +334,241 @@ mod tests {
             fwd.iter().zip(&bwd).any(|(a, b)| (a - b).abs() > 1e-4),
             "the reverse direction produced the forward one"
         );
+    }
+}
+
+/// What `direction`'s two transposes rest on, pinned against the backend that
+/// can break them.
+///
+/// `burn-tch`'s `swap_dims`/`permute` build their result with `TchTensor::new`,
+/// which stamps a fresh `Storage::Owned` on what is still torch's view of
+/// somebody else's buffer. `can_mut()` then answers true and the next
+/// in-place-capable op writes straight through the view into the tensor the
+/// caller is still holding — CLAUDE.md's **`swap_dims` on LibTorch returns a
+/// view burn-tch forgets the provenance of**, which cost `burn-mdx` its
+/// separation for weeks while every structural check stayed green.
+///
+/// This file is the workspace's longest exposure to that: `w_hh.transpose()` is
+/// a view of a `Param::val()` clone held across *every timestep* of the loop,
+/// and `w_ih.transpose()` is the same shape. Nothing about the module tree, the
+/// coverage report or the scalar reference above can see a scribbled-on weight
+/// — the reference runs on `ndarray`, which has no such defect. So the two
+/// facts that make these lines safe are asserted here directly, on LibTorch,
+/// where they are neither obvious nor free.
+///
+/// Gated on `--features tch` because a default `cargo test` cannot reach the
+/// backend the whole module exists to exercise.
+#[cfg(all(test, feature = "tch"))]
+mod tch_aliasing {
+    use super::*;
+    use burn::tensor::{Int, TensorData};
+
+    type Nd = burn_ndarray::NdArray;
+    type Tch = burn::backend::LibTorch<f32>;
+
+    /// Subtracting a broadcast one is in-place-capable in burn-tch whenever
+    /// `can_mut()` says the buffer is exclusively owned. Returns how far the
+    /// still-live `keep` moved, which is `0.0` exactly when the view respected
+    /// its parent's storage.
+    fn wrote_through(view: Tensor<Tch, 3>, keep: Tensor<Tch, 3>) -> f32 {
+        let device = view.device();
+        let _ = view - Tensor::<Tch, 3>::ones([1, 1, 1], &device);
+        keep.into_data()
+            .to_vec::<f32>()
+            .unwrap()
+            .iter()
+            .map(|v| (v - 1.0).abs())
+            .fold(0.0f32, f32::max)
+    }
+
+    fn live() -> (Tensor<Tch, 3>, Tensor<Tch, 3>) {
+        let device = Default::default();
+        let src = Tensor::<Tch, 3>::ones([1, 4, 6], &device);
+        let keep = src.clone();
+        (src, keep)
+    }
+
+    /// The line between the safe view ops and the dangerous ones, in one place.
+    ///
+    /// `slice`, `narrow`, `reshape` and `gather` go through `from_existing`,
+    /// which compares data pointers and shares the parent's storage, so
+    /// `can_mut()` stays false while the parent lives. `swap_dims` does not.
+    /// The contrast is the whole audit rule, and it is easy to doubt from the
+    /// outside — a `swap_dims` *followed by* a `reshape` writes through, which
+    /// invites the reading that `reshape` is unsafe too. It is not: the second
+    /// case below shows the same `reshape` is harmless on its own, so what
+    /// survives the pair is the `swap_dims`'s broken provenance rather than
+    /// anything the `reshape` did.
+    ///
+    /// **If a `wrote_through` assertion of 0.0 ever fails, that is a new
+    /// unsafe op** and every audit that leaned on it is void. **If the
+    /// `swap_dims` assertion fails, read it as news rather than as a
+    /// regression**: burn-tch has fixed the defect upstream and this whole
+    /// module has become free.
+    #[test]
+    fn only_the_transpose_family_loses_provenance() {
+        let (src, keep) = live();
+        assert_eq!(wrote_through(src.reshape([1, 6, 4]), keep), 0.0, "reshape");
+
+        let (src, keep) = live();
+        let sliced = src.slice([0..1, 0..2, 0..6]);
+        assert_eq!(wrote_through(sliced, keep), 0.0, "slice");
+
+        let (src, keep) = live();
+        assert_eq!(wrote_through(src.narrow(1, 0, 2), keep), 0.0, "narrow");
+
+        let (src, keep) = live();
+        let idx = Tensor::<Tch, 3, Int>::zeros([1, 4, 6], &keep.device());
+        assert_eq!(wrote_through(src.gather(1, idx), keep), 0.0, "gather");
+
+        // And the one that does. Asserted as *not* zero, so the day burn-tch
+        // fixes it this test says so out loud.
+        let (src, keep) = live();
+        let moved = wrote_through(src.swap_dims(1, 2), keep);
+        assert!(
+            moved > 0.0,
+            "burn-tch's swap_dims no longer loses its parent's storage — \
+             this is news, not a regression: re-read CLAUDE.md's entry and \
+             the comments in this crate, `burn-whisper` and `burn-mdx` that \
+             cite it"
+        );
+    }
+
+    /// The property both transposes in [`BiGru::direction`] are safe *by*, and
+    /// the one three further sites across the workspace rest on:
+    /// `burn-whisper`'s tied vocabulary projection and its KV-cache-aliasing
+    /// head views. `matmul` allocates its output and mutates neither operand,
+    /// so a view with a bogus `Storage::Owned` is inert there.
+    #[test]
+    fn matmul_mutates_neither_operand_through_a_transposed_view() {
+        let device = Default::default();
+
+        // Right-hand side: `w_ih.transpose()`, `w_hh.transpose()`, and
+        // `burn-whisper`'s `embed_tokens.weight.val().swap_dims(0, 1)`.
+        let param = Tensor::<Tch, 2>::ones([6, 4], &device);
+        let keep = param.clone();
+        let _ = Tensor::<Tch, 2>::ones([3, 4], &device).matmul(param.transpose());
+        let moved = keep
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap()
+            .iter()
+            .map(|v| (v - 1.0).abs())
+            .fold(0.0f32, f32::max);
+        assert_eq!(moved, 0.0, "matmul mutated its right-hand operand");
+
+        // Left-hand side: `burn-whisper`'s `q`/`k`/`v` head views, which are
+        // views of tensors its caller's `KvCache` is still holding.
+        let (src, keep) = live();
+        let _ = src
+            .swap_dims(1, 2)
+            .matmul(Tensor::<Tch, 3>::ones([1, 4, 2], &device));
+        let moved = keep
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap()
+            .iter()
+            .map(|v| (v - 1.0).abs())
+            .fold(0.0f32, f32::max);
+        assert_eq!(moved, 0.0, "matmul mutated its left-hand operand");
+    }
+
+    /// The end-to-end reading, and the cheapest check this repository has: two
+    /// independent implementations of the same arithmetic over one set of
+    /// weights have to agree. The scalar reference above runs on `ndarray`
+    /// alone, so it cannot see a weight LibTorch scribbled on; this can, and it
+    /// exercises the transposes through the real forward pass rather than
+    /// through a stand-in tensor.
+    #[test]
+    fn libtorch_agrees_with_ndarray_over_the_whole_layer() {
+        let (input, hidden, time) = (5usize, 4usize, 7usize);
+        let (nd_device, tch_device) = (Default::default(), Default::default());
+
+        // A deterministic fill rather than `random`: the two backends do not
+        // share an RNG, and the comparison is only worth anything on identical
+        // weights. Zeros would not do — a zero `w_hh` makes the recurrence
+        // vanish, which is the one fill that passes while saying nothing.
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut fill = |n: usize| -> Vec<f32> {
+            (0..n)
+                .map(|_| {
+                    state = state
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    ((state >> 40) as f32 / 8388608.0) - 1.0
+                })
+                .collect()
+        };
+
+        let mut nd = BiGru::<Nd>::new(input, hidden, &nd_device);
+        let mut tch = BiGru::<Tch>::new(input, hidden, &tch_device);
+
+        let pair2 = |rows: usize, cols: usize, f: &mut dyn FnMut(usize) -> Vec<f32>| {
+            let data = TensorData::new(f(rows * cols), [rows, cols]);
+            (
+                Tensor::<Nd, 2>::from_data(data.clone(), &nd_device),
+                Tensor::<Tch, 2>::from_data(data, &tch_device),
+            )
+        };
+        let (w_ih_f_n, w_ih_f_t) = pair2(3 * hidden, input, &mut fill);
+        let (w_hh_f_n, w_hh_f_t) = pair2(3 * hidden, hidden, &mut fill);
+        let (w_ih_b_n, w_ih_b_t) = pair2(3 * hidden, input, &mut fill);
+        let (w_hh_b_n, w_hh_b_t) = pair2(3 * hidden, hidden, &mut fill);
+
+        let pair1 = |f: &mut dyn FnMut(usize) -> Vec<f32>| {
+            let data = TensorData::new(f(3 * hidden), [3 * hidden]);
+            (
+                Tensor::<Nd, 1>::from_data(data.clone(), &nd_device),
+                Tensor::<Tch, 1>::from_data(data, &tch_device),
+            )
+        };
+        let (b_ih_f_n, b_ih_f_t) = pair1(&mut fill);
+        let (b_hh_f_n, b_hh_f_t) = pair1(&mut fill);
+        let (b_ih_b_n, b_ih_b_t) = pair1(&mut fill);
+        let (b_hh_b_n, b_hh_b_t) = pair1(&mut fill);
+
+        nd.weight_ih_l0 = Param::from_tensor(w_ih_f_n);
+        nd.weight_hh_l0 = Param::from_tensor(w_hh_f_n);
+        nd.bias_ih_l0 = Param::from_tensor(b_ih_f_n);
+        nd.bias_hh_l0 = Param::from_tensor(b_hh_f_n);
+        nd.weight_ih_l0_reverse = Param::from_tensor(w_ih_b_n);
+        nd.weight_hh_l0_reverse = Param::from_tensor(w_hh_b_n);
+        nd.bias_ih_l0_reverse = Param::from_tensor(b_ih_b_n);
+        nd.bias_hh_l0_reverse = Param::from_tensor(b_hh_b_n);
+
+        tch.weight_ih_l0 = Param::from_tensor(w_ih_f_t);
+        tch.weight_hh_l0 = Param::from_tensor(w_hh_f_t);
+        tch.bias_ih_l0 = Param::from_tensor(b_ih_f_t);
+        tch.bias_hh_l0 = Param::from_tensor(b_hh_f_t);
+        tch.weight_ih_l0_reverse = Param::from_tensor(w_ih_b_t);
+        tch.weight_hh_l0_reverse = Param::from_tensor(w_hh_b_t);
+        tch.bias_ih_l0_reverse = Param::from_tensor(b_ih_b_t);
+        tch.bias_hh_l0_reverse = Param::from_tensor(b_hh_b_t);
+
+        let x = TensorData::new(fill(time * input), [1, time, input]);
+        let want: Vec<f32> = nd
+            .forward(Tensor::<Nd, 3>::from_data(x.clone(), &nd_device))
+            .into_data()
+            .to_vec()
+            .unwrap();
+        let got: Vec<f32> = tch
+            .forward(Tensor::<Tch, 3>::from_data(x, &tch_device))
+            .into_data()
+            .to_vec()
+            .unwrap();
+
+        // Finiteness separately: Burn's `assert_approx_eq` compares NaN to NaN
+        // without complaint, so a NaN would sail through the difference below.
+        assert!(
+            got.iter().all(|v| v.is_finite()),
+            "LibTorch output must be finite"
+        );
+        assert_eq!(got.len(), want.len());
+        let worst = want
+            .iter()
+            .zip(&got)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(worst < 1e-5, "the two backends differ by {worst}");
     }
 }
