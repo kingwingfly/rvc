@@ -126,3 +126,259 @@ impl Vocabulary {
             .map_err(|e| SttError::Config(format!("failed to decode tokens: {e}")))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A scratch directory, removed when the guard drops.
+    ///
+    /// Both types here load from a *path*, because both files ship beside the
+    /// weights — so a test that bypassed the filesystem would not exercise the
+    /// half of these functions that can actually fail.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static N: AtomicUsize = AtomicUsize::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "stt-core-tokenizer-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&dir).expect("scratch dir");
+            Self(dir)
+        }
+
+        fn write(&self, name: &str, body: &str) -> std::path::PathBuf {
+            let path = self.0.join(name);
+            std::fs::write(&path, body).expect("write fixture");
+            path
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// `expect_err` wants `Debug` on the success type, which neither of these
+    /// two has and neither needs.
+    fn failure<T>(result: Result<T>, why: &str) -> String {
+        match result {
+            Ok(_) => panic!("{why}"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    /// Whisper-shaped but with **synthetic** ids: every one is distinct, so a
+    /// field read from the wrong key cannot coincidentally match. Real ids are
+    /// deliberately not used — they move between releases, which is the whole
+    /// reason this file reads them rather than writing them down.
+    const CONFIG: &str = r#"{
+      "decoder_start_token_id": 50,
+      "eos_token_id": 51,
+      "no_timestamps_token_id": 60,
+      "task_to_id": { "transcribe": 55, "translate": 56 },
+      "lang_to_id": { "<|en|>": 40, "<|zh|>": 41, "<|ja|>": 42 },
+      "suppress_tokens": [1, 2, 7],
+      "begin_suppress_tokens": [3, 51]
+    }"#;
+
+    #[test]
+    fn every_control_token_comes_from_its_own_key() {
+        let dir = Scratch::new();
+        let tokens = Tokens::load(&dir.write("generation_config.json", CONFIG)).expect("load");
+
+        assert_eq!(tokens.sot, 50, "sot is `decoder_start_token_id`");
+        assert_eq!(tokens.eot, 51, "eot is `eos_token_id`");
+        assert_eq!(tokens.transcribe, 55, "from task_to_id, not a scalar key");
+        assert_eq!(tokens.translate, 56);
+        assert_eq!(tokens.no_timestamps, 60);
+        assert_eq!(tokens.suppress, vec![1, 2, 7]);
+        assert_eq!(
+            tokens.suppress_at_start,
+            vec![3, 51],
+            "`begin_suppress_tokens`"
+        );
+    }
+
+    #[test]
+    fn language_tags_lose_their_angle_brackets() {
+        let dir = Scratch::new();
+        let tokens = Tokens::load(&dir.write("generation_config.json", CONFIG)).expect("load");
+
+        // The config spells them `<|en|>`; every caller spells them `en`.
+        assert_eq!(tokens.language("en").expect("en"), 40);
+        assert_eq!(tokens.language("zh").expect("zh"), 41);
+        assert_eq!(tokens.language("ja").expect("ja"), 42);
+        assert_eq!(tokens.languages.len(), 3);
+        assert!(
+            !tokens.languages.contains_key("<|en|>"),
+            "brackets are stripped"
+        );
+    }
+
+    #[test]
+    fn an_unknown_language_says_how_many_this_model_knows() {
+        let dir = Scratch::new();
+        let tokens = Tokens::load(&dir.write("generation_config.json", CONFIG)).expect("load");
+
+        let message = tokens.language("xx").expect_err("no such code").to_string();
+        assert!(message.contains("`xx`"), "{message}");
+        assert!(
+            message.contains("3 codes"),
+            "the count is the model's: {message}"
+        );
+    }
+
+    #[test]
+    fn a_missing_required_key_names_the_key() {
+        let dir = Scratch::new();
+        let without_eos = CONFIG.replace("\"eos_token_id\": 51,", "");
+        let message = failure(
+            Tokens::load(&dir.write("generation_config.json", &without_eos)),
+            "eos_token_id is required",
+        );
+        assert!(message.contains("eos_token_id"), "{message}");
+
+        let without_task = CONFIG.replace("\"transcribe\": 55, ", "");
+        let message = failure(
+            Tokens::load(&dir.write("no-task.json", &without_task)),
+            "transcribe is required",
+        );
+        assert!(message.contains("transcribe"), "{message}");
+        assert!(message.contains("task_to_id"), "{message}");
+    }
+
+    #[test]
+    fn absent_suppression_lists_are_empty_rather_than_an_error() {
+        let dir = Scratch::new();
+        const BARE: &str = r#"{
+          "decoder_start_token_id": 50,
+          "eos_token_id": 51,
+          "no_timestamps_token_id": 60,
+          "task_to_id": { "transcribe": 55, "translate": 56 },
+          "lang_to_id": { "<|en|>": 40 }
+        }"#;
+        let tokens = Tokens::load(&dir.write("generation_config.json", BARE)).expect("load");
+
+        assert!(tokens.suppress.is_empty());
+        assert!(tokens.suppress_at_start.is_empty());
+    }
+
+    /// The asymmetry `decode.rs`'s `detect_language` has to cope with: every
+    /// scalar id is required, but `lang_to_id` is optional and defaults to an
+    /// empty map. See `a_model_with_no_language_tokens_is_refused_rather_than`
+    /// … in `decode.rs` for what that costs downstream.
+    #[test]
+    fn a_config_with_no_lang_to_id_still_loads_with_no_languages() {
+        let dir = Scratch::new();
+        let no_languages = CONFIG.replace(
+            "\"lang_to_id\": { \"<|en|>\": 40, \"<|zh|>\": 41, \"<|ja|>\": 42 },",
+            "",
+        );
+        let tokens =
+            Tokens::load(&dir.write("generation_config.json", &no_languages)).expect("load");
+
+        assert!(tokens.languages.is_empty(), "silently empty, not an error");
+        assert!(tokens.language("en").is_err());
+    }
+
+    /// A miniature Whisper-shaped vocabulary: three ordinary tokens, then a run
+    /// of control tokens with **one non-special token interleaved among them**.
+    ///
+    /// That interleaving is the point. It makes the fixture distinguish the
+    /// implementation from the plausible wrong one — "skip every id at or above
+    /// the first control token" — which no contiguous fixture can do.
+    const VOCAB: &str = r#"{
+      "version": "1.0",
+      "truncation": null,
+      "padding": null,
+      "added_tokens": [
+        {"id": 3, "content": "<|startoftranscript|>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
+        {"id": 4, "content": "<|en|>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
+        {"id": 5, "content": "<|nonspecial|>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": false},
+        {"id": 6, "content": "<|notimestamps|>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
+        {"id": 7, "content": "<|endoftext|>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true}
+      ],
+      "normalizer": null,
+      "pre_tokenizer": null,
+      "post_processor": null,
+      "decoder": null,
+      "model": {
+        "type": "BPE",
+        "dropout": null,
+        "unk_token": null,
+        "continuing_subword_prefix": null,
+        "end_of_word_suffix": null,
+        "fuse_unk": false,
+        "byte_fallback": false,
+        "vocab": {"hello": 0, "world": 1, "boundary": 2},
+        "merges": []
+      }
+    }"#;
+
+    #[test]
+    fn ordinary_tokens_decode_to_their_text() {
+        let dir = Scratch::new();
+        let vocab = Vocabulary::load(&dir.write("tokenizer.json", VOCAB)).expect("load");
+
+        assert_eq!(vocab.decode(&[0, 1]).expect("decode"), "hello world");
+    }
+
+    /// The whole of what `Vocabulary` adds over the `tokenizers` crate is the
+    /// `true` in `decode(ids, true)`. This is that argument, stated as a test:
+    /// a prompt's worth of control tokens must contribute **nothing** to the
+    /// transcript.
+    #[test]
+    fn control_tokens_contribute_no_text() {
+        let dir = Scratch::new();
+        let vocab = Vocabulary::load(&dir.write("tokenizer.json", VOCAB)).expect("load");
+
+        // Exactly the shape `decode.rs` builds: start, language, notimestamps,
+        // content, end.
+        let text = vocab.decode(&[3, 4, 6, 2, 7]).expect("decode");
+        assert_eq!(text, "boundary");
+        assert!(!text.contains("<|"), "no control token leaked: {text:?}");
+    }
+
+    /// The off-by-one this whole fixture exists for.
+    ///
+    /// Id 2 is the last ordinary token and id 3 the first control token, so a
+    /// threshold that is off by one in either direction changes the answer:
+    /// too low swallows `boundary`, too high leaks `<|startoftranscript|>`.
+    /// Id 5 then pins that the rule is the `special` flag rather than any
+    /// threshold at all — it *looks* like a control token, sits between two
+    /// real ones, and must survive.
+    #[test]
+    fn the_special_flag_decides_and_not_an_id_threshold() {
+        let dir = Scratch::new();
+        let vocab = Vocabulary::load(&dir.write("tokenizer.json", VOCAB)).expect("load");
+
+        assert_eq!(
+            vocab.decode(&[2]).expect("decode"),
+            "boundary",
+            "id 2 is kept"
+        );
+        assert_eq!(vocab.decode(&[3]).expect("decode"), "", "id 3 is dropped");
+        assert_eq!(
+            vocab.decode(&[5]).expect("decode"),
+            "<|nonspecial|>",
+            "an id above the first control token, but not flagged special"
+        );
+        assert_eq!(
+            vocab.decode(&[2, 3, 4, 5, 6, 7]).expect("decode"),
+            "boundary <|nonspecial|>"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_vocabulary_names_the_file() {
+        let dir = Scratch::new();
+        let message = failure(Vocabulary::load(&dir.0.join("absent.json")), "no such file");
+        assert!(message.contains("tokenizer.json"), "{message}");
+    }
+}
