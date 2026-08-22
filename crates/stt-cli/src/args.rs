@@ -171,6 +171,27 @@ pub struct SttArgs {
 impl SttArgs {
     /// Reject values clap's types accept but the decoder cannot use.
     pub fn verify(&self) -> Result<()> {
+        // Finiteness first, because every comparison below it is written as an
+        // inequality and `NaN` fails all of them — so a `NaN` would slip past
+        // each guard in turn and be reported by none of them. `inf` is the
+        // worse half: it *passes* the guards that are phrased as lower bounds,
+        // and `--pad inf` then reaches the slicer, where the padded end is
+        // `raw_end + pad` in samples and panics on "attempt to add with
+        // overflow". `f32::from_str` accepts all three spellings, so the
+        // parser cannot be the thing that refuses them.
+        for (name, v) in [
+            ("--silence-db", self.silence_db),
+            ("--min-silence", self.min_silence),
+            ("--min-clip", self.min_clip),
+            ("--max-clip", self.max_clip),
+            ("--pad", self.pad),
+        ] {
+            anyhow::ensure!(
+                v.is_finite(),
+                "{name} must be a finite number of {}, not {v}",
+                if name == "--silence-db" { "dBFS" } else { "seconds" }
+            );
+        }
         // 30 s is not a tuning choice: it is the width of Whisper's encoder
         // window, and a longer segment simply would not fit one.
         anyhow::ensure!(
@@ -476,6 +497,41 @@ mod tests {
         assert!(filter(&["stt", "--chunk", "0"]).verify().is_err());
         assert!(filter(&["stt", "--max-tokens", "0"]).verify().is_err());
         assert!(filter(&["stt", "--max-clip", "0"]).verify().is_err());
+    }
+
+    #[test]
+    fn a_non_finite_value_is_refused_before_it_reaches_the_slicer() {
+        // The other half of the negative-value class, and the one that bites
+        // harder. `f32::from_str` takes "inf" and "NaN", so the *parser* can
+        // never refuse them — only `verify` can. `--pad inf` panicked the
+        // slicer outright with "attempt to add with overflow" (the padded end
+        // is `raw_end + pad` in samples), and `--min-silence inf` was accepted
+        // in full, making every gap too short to be a boundary so the whole
+        // recording became one segment.
+        //
+        // `NaN` is the reason this check comes FIRST rather than beside the
+        // others: every guard below it is an inequality, and `NaN` fails all
+        // of them — so it would slip past each in turn and be reported by
+        // none.
+        for (flag, value) in [
+            ("--pad", "inf"),
+            ("--pad", "NaN"),
+            ("--min-silence", "inf"),
+            ("--min-silence", "NaN"),
+            ("--min-clip", "inf"),
+            ("--max-clip", "inf"),
+            ("--silence-db", "NaN"),
+        ] {
+            let a = filter(&["stt", flag, value]);
+            let err = a
+                .verify()
+                .expect_err(&format!("`{flag} {value}` must be refused"));
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains(flag),
+                "the message must name the offending flag, got: {msg}"
+            );
+        }
     }
 
     #[test]
