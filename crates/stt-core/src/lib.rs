@@ -875,7 +875,9 @@ mod tests {
         // And the corpus slicer's own default — `max_clip: 0.0`, never split —
         // is what lets a library caller reach it through `transcribe` too.
         let (mut stt, _) = transcriber(1);
-        let segments = stt.transcribe(&clip, &options(SliceOptions::default())).unwrap();
+        let segments = stt
+            .transcribe(&clip, &options(SliceOptions::default()))
+            .unwrap();
         assert_eq!(segments.len(), 1);
         assert!(
             segments[0].end > WINDOW_SECONDS + 10.0,
