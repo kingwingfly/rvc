@@ -146,7 +146,15 @@ pub struct SamplerOpts {
     /// unconditioned prediction. Raise to follow the reference harder, at the
     /// cost of artefacts; zero or below skips the unconditional pass entirely
     /// and halves the work per step.
-    #[arg(long, default_value_t = 0.7)]
+    // `allow_negative_numbers` because "zero or below" is the sentence above,
+    // and a value below zero is what selects that branch: `verify` accepts one,
+    // and `burn_seedvc::flow`'s `if self.guidance > 0.0` is what reads it.
+    // Without the annotation clap takes the leading `-` for a short-flag
+    // cluster, so `--guidance -1` fails with `unexpected argument '-1'` while
+    // `--guidance=-1` works — which reads as a shell quoting problem and is not
+    // one. The other flags on this struct deliberately go without it: a count of
+    // Euler steps, a stretch factor and a seed have no negative value to reach.
+    #[arg(long, allow_negative_numbers = true, default_value_t = 0.7)]
     pub guidance: f64,
     /// Scales the output's duration against the source's. Above 1 is slower,
     /// below is faster; pitch is unchanged.
@@ -166,8 +174,24 @@ impl SamplerOpts {
              that many Euler steps, and zero of them leaves pure noise"
         );
         anyhow::ensure!(
-            self.length_adjust > 0.0,
-            "--length-adjust must be positive (1.0 keeps the source's duration)"
+            self.length_adjust > 0.0 && self.length_adjust.is_finite(),
+            "--length-adjust is {}: it must be a positive, finite factor (1.0 keeps the \
+             source's duration)",
+            self.length_adjust,
+        );
+        // `nan` and `inf` are values `f64::from_str` accepts, so clap does too.
+        // Guidance is the one knob here with no bound in either direction, so
+        // finiteness is the whole of what can be checked — and it is worth
+        // checking, because an infinite scale makes the extrapolation
+        // `(1 + g)*conditioned - g*unconditional` non-finite for every element
+        // of the mel, and a vocoder renders that to silence rather than to an
+        // error. Named here, before the four checkpoints are fetched.
+        anyhow::ensure!(
+            self.guidance.is_finite(),
+            "--guidance is {}: it scales how far each step is pushed away from the \
+             unconditioned prediction, so it has to be a finite number (0 or below skips \
+             that pass entirely)",
+            self.guidance,
         );
         Ok(())
     }
