@@ -78,16 +78,30 @@ impl Clip {
 /// A transcript with no audio, or audio with no transcript, is skipped with a
 /// warning rather than failing the run — a corpus assembled by hand usually has
 /// a few of both, and stopping on the first would be tedious.
+///
+/// **Both halves of that sentence are warnings, and the second one used to be
+/// silent.** The scan walks audio files and looks for the transcript beside
+/// each, so a transcript whose audio it never *saw* fell out of the loop
+/// entirely — and the two ways that happens are the two a real corpus produces:
+/// an extension this list does not carry (`.aac`, `.wma`), and a spelling it
+/// does not match, since the comparison is case-sensitive while the recorder
+/// that wrote `TAKE01.WAV` is not. Either way the run trains on fewer clips
+/// than the corpus holds, which is the failure a count cannot report because
+/// nothing ever counted the missing ones.
 pub fn pairs(dir: &Path) -> Result<Vec<(PathBuf, PathBuf)>> {
     let mut out = Vec::new();
+    let mut transcripts = Vec::new();
     let entries = std::fs::read_dir(dir)
         .map_err(|e| TrainError::Corpus(format!("cannot read {}: {e}", dir.display())))?;
     for entry in entries.flatten() {
         let audio = entry.path();
-        let is_audio = audio
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| matches!(e, "wav" | "mp3" | "flac" | "m4a" | "ogg" | "opus"));
+        let ext = audio.extension().and_then(|e| e.to_str());
+        if ext == Some("txt") {
+            transcripts.push(audio);
+            continue;
+        }
+        let is_audio =
+            ext.is_some_and(|e| matches!(e, "wav" | "mp3" | "flac" | "m4a" | "ogg" | "opus"));
         if !is_audio {
             continue;
         }
@@ -97,6 +111,16 @@ pub fn pairs(dir: &Path) -> Result<Vec<(PathBuf, PathBuf)>> {
         } else {
             tracing::warn!("no transcript beside {}; skipped", audio.display());
         }
+    }
+    // Sorted rather than left in `read_dir` order: which transcripts went
+    // unused is a list a reader compares against their corpus, and a list whose
+    // order changes between runs cannot be compared against anything.
+    let paired: std::collections::HashSet<PathBuf> =
+        out.iter().map(|(_, text)| text.clone()).collect();
+    transcripts.retain(|t| !paired.contains(t));
+    transcripts.sort();
+    for text in &transcripts {
+        tracing::warn!("no audio beside {}; skipped", text.display());
     }
     out.sort();
     if out.is_empty() {
