@@ -220,6 +220,41 @@ impl SttArgs {
             self.min_clip,
             self.max_clip
         );
+        // `--max-clip` alone does not bound a segment, which is the surprise
+        // here. The slicer splits an over-long run only where both halves
+        // clear `min_clip`, so it needs a margin of
+        // `max(min_clip, max_clip / 4)` at each end and gives up on anything
+        // no longer than twice that. With `2 * min_clip > max_clip` the
+        // margins meet in the middle and a run in `(max_clip, 2 * min_clip]`
+        // is emitted whole, past the cap the user asked for. Where that also
+        // clears the encoder window, `mel::compute` truncates it to the first
+        // 30 s and transcribes only that, and nothing downstream says so:
+        // `--format jsonl` reports the segment's full length, so the timings
+        // look right and the words simply stop. The message names that second
+        // consequence only when the arithmetic actually reaches it.
+        //
+        // The bound is sharp. At `--min-clip 15 --max-clip 30` no input
+        // length produces a segment over 30 s; at 15.1 the worst case is a
+        // 30.20 s segment, and at 20 it is 40.00 s.
+        anyhow::ensure!(
+            2.0 * self.min_clip <= self.max_clip,
+            "--min-clip ({}) is more than half of --max-clip ({}), so a run of \
+             unbroken speech between {} and {} s cannot be split and is emitted \
+             whole, past the cap{}",
+            self.min_clip,
+            self.max_clip,
+            self.max_clip,
+            2.0 * self.min_clip,
+            if 2.0 * self.min_clip > stt_core::WINDOW_SECONDS {
+                format!(
+                    " — and past Whisper's {} s window, where it is truncated and \
+                     the rest of the speech silently dropped",
+                    stt_core::WINDOW_SECONDS
+                )
+            } else {
+                String::new()
+            }
+        );
         Ok(())
     }
 
@@ -497,6 +532,39 @@ mod tests {
         assert!(filter(&["stt", "--chunk", "0"]).verify().is_err());
         assert!(filter(&["stt", "--max-tokens", "0"]).verify().is_err());
         assert!(filter(&["stt", "--max-clip", "0"]).verify().is_err());
+    }
+
+    #[test]
+    fn a_minimum_over_half_the_maximum_is_refused_because_it_defeats_splitting() {
+        // `--max-clip` alone does not bound a segment, which is the whole
+        // surprise. The slicer splits an over-long run only where both halves
+        // clear `min_clip`, so it needs `max(min_clip, max_clip / 4)` of
+        // margin at each end and gives up on anything no longer than twice
+        // that. Set `--min-clip` above half of `--max-clip` and the margins
+        // meet: a run in `(max_clip, 2 * min_clip]` is emitted whole, and
+        // `mel::compute` then truncates it to the first 30 s and transcribes
+        // only that — while `--format jsonl` reports the segment's full
+        // length, so the timings look right and the words stop.
+        //
+        // Both numbers below are measured, by slicing 30.05..42.00 s of
+        // unbroken tone in 0.05 s steps: at `--min-clip 15` no input length
+        // produces a segment over 30 s at all, and at 15.1 the worst case is
+        // exactly 30.20 s.
+        let a = filter(&["stt", "--min-clip", "15.1", "--max-clip", "30"]);
+        let msg = format!("{:#}", a.verify().expect_err("15.1 defeats splitting at 30"));
+        assert!(
+            msg.contains("--min-clip") && msg.contains("--max-clip"),
+            "the message must name both flags that interact: {msg}"
+        );
+        // Exactly half is the last safe value, and it must stay reachable.
+        assert!(
+            filter(&["stt", "--min-clip", "15", "--max-clip", "30"])
+                .verify()
+                .is_ok(),
+            "2 * min_clip == max_clip is the boundary and is safe"
+        );
+        // The default pair is well inside it, so nobody meets this by accident.
+        assert!(filter(&["stt"]).verify().is_ok());
     }
 
     #[test]
