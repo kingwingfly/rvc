@@ -1370,27 +1370,87 @@ mod tests {
         );
     }
 
+    /// Every numeric argument in this file whose `verify` accepts nothing below
+    /// zero, one entry per **declaration**.
+    ///
+    /// One per declaration is the unit that matters, and it is why `--sr` and
+    /// `--pad` each appear twice: `IoArgs` and `AnalyzeArgs` declare `--sr`
+    /// separately, and `SliceArgs` and `TrimArgs` declare `--pad` separately,
+    /// so an annotation added to one leaves the other untouched. Covering a
+    /// flag by name rather than by declaration would report a matrix as
+    /// complete while half of a duplicated flag went unchecked.
+    ///
+    /// The last two entries are `cli-kit`'s rather than this crate's, and they
+    /// earn their place by crossing the flatten: `cli_kit`'s own tests pin the
+    /// declarations, and these pin that the property survives being hosted
+    /// here.
+    ///
+    /// The `f32` entries are the ones with teeth — nothing but the absence of
+    /// `allow_negative_numbers` refuses them, so adding the annotation to any
+    /// one of them turns this test red. The `u32`/`u64` entries are refused
+    /// twice over, by the parser and again by a value type with no negative to
+    /// hold, so they cannot fail; they are listed so the enumeration is
+    /// complete and visibly so.
+    const MUST_REFUSE_A_NEGATIVE: &[(&str, &str)] = &[
+        // `IoArgs`, and `AnalyzeArgs`'s separate copy of the same flag.
+        ("clip", "--sr"),
+        ("analyze", "--sr"),
+        // `SliceArgs`, whose remaining knob `--silence-db` is the one that is
+        // always negative and therefore annotated.
+        ("clip", "--min-silence"),
+        ("clip", "--min-clip"),
+        ("clip", "--max-clip"),
+        ("clip", "--pad"),
+        // `TrimArgs`, which declares its own `--pad` rather than flattening
+        // `SliceArgs` — the interior knobs mean nothing to a stage with no
+        // interior.
+        ("trim", "--pad"),
+        // `DiarizeArgs`, whose `--threshold` is the annotated one.
+        ("diarize", "--window"),
+        ("diarize", "--hop"),
+        ("diarize", "--min-segment"),
+        // `NormalizeArgs`, whose `--lufs` is the annotated one.
+        ("normalize", "--peak"),
+        // `cli-kit`'s, through the flatten.
+        ("denoise", "--denoise-strength"),
+        ("separate", "--download-timeout"),
+    ];
+
     #[test]
     fn a_flag_whose_values_are_all_positive_still_refuses_a_negative_one() {
         // The annotation widens what a value may look like, so it is scoped to
         // the arguments that need it rather than applied to the command. These
         // are the flags that must keep rejecting a negative, and the check is
         // that they fail at the *parser* rather than reaching `verify`.
-        for (stage, flag) in [
-            ("clip", "--sr"),
-            ("clip", "--pad"),
-            ("clip", "--min-silence"),
-            ("diarize", "--window"),
-            ("normalize", "--peak"),
-        ] {
+        for (stage, flag) in MUST_REFUSE_A_NEGATIVE {
             let mut argv = vec!["preprocess", stage, flag, "-1"];
-            if stage == "diarize" {
+            if *stage == "diarize" {
                 argv.extend(["--reference", "me.wav"]);
             }
             argv.push("in.wav");
             assert!(
                 Bin::try_parse_from(&argv).is_err(),
                 "{stage} {flag} accepted a negative value"
+            );
+        }
+    }
+
+    #[test]
+    fn a_flag_whose_values_are_all_positive_refuses_a_negative_nested_too() {
+        // Same list in the position that a `Command`-level annotation would
+        // not survive. It is the mirror of
+        // `a_negative_threshold_parses_nested_under_voice_too`: the reason the
+        // annotation is per argument is also the reason its *absence* has to be
+        // checked per argument.
+        for (stage, flag) in MUST_REFUSE_A_NEGATIVE {
+            let mut argv = vec!["voice", "preprocess", stage, flag, "-1"];
+            if *stage == "diarize" {
+                argv.extend(["--reference", "me.wav"]);
+            }
+            argv.push("in.wav");
+            assert!(
+                Nested::try_parse_from(&argv).is_err(),
+                "voice preprocess {stage} {flag} accepted a negative value"
             );
         }
     }
