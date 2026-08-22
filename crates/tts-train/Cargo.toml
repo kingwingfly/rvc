@@ -30,3 +30,6 @@ tracing.workspace = true
 
 [dev-dependencies]
 burn-ndarray = "0.21"
+# Only the corpus tests need it: "skipped with a warning" is a promise a
+# return value cannot carry, so the one test that checks it reads the log.
+tracing-subscriber.workspace = true

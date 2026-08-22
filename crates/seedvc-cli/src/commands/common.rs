@@ -185,3 +185,90 @@ fn load_onnx(_dir: &Path) -> Result<Box<dyn Model>> {
          run the six graphs `export/export_seedvc.py` writes"
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A cache directory nothing can be written into, so a fetch that is
+    /// attempted fails with *its own* message rather than quietly succeeding
+    /// against a warm cache on the machine this happens to run on. That is what
+    /// makes the assertions below about *ordering* rather than about wording: a
+    /// `load_model` that resolved paths first would come back saying it failed
+    /// to fetch a checkpoint, not saying which flag was wrong.
+    const UNUSABLE_CACHE: &str = "/dev/null/seedvc-cli-must-not-fetch";
+
+    fn opts(backend_dir: Option<&str>) -> ModelOpts {
+        ModelOpts {
+            reference: Some(PathBuf::from("me.wav")),
+            reference_secs: seedvc_core::reference::REFERENCE_SECONDS,
+            checkpoint: None,
+            campplus: None,
+            bigvgan: None,
+            content: None,
+            onnx: backend_dir.map(PathBuf::from),
+            cache_dir: PathBuf::from(UNUSABLE_CACHE),
+        }
+    }
+
+    /// The message `load_model` refused with.
+    ///
+    /// Matched rather than `expect_err`ed: `Box<dyn Model>` is not `Debug`, and
+    /// making it one would be a bound on every implementation for the sake of
+    /// three tests.
+    async fn refuse(opts: &ModelOpts, backend: Backend) -> String {
+        match load_model(opts, backend, DeviceSpec::Auto).await {
+            Ok(_) => panic!("`--backend {backend}` was accepted"),
+            Err(e) => format!("{e:#}"),
+        }
+    }
+
+    /// `--backend onnx` with no `--onnx` has to be refused **before** a byte is
+    /// fetched. `seedvc_core::backend::resolve` already pins the wording; what
+    /// this pins is that `load_model` asks it first, which is the whole reason
+    /// `resolve` is split out of `load` at all — a cold cache would otherwise
+    /// spend a gigabyte on four checkpoints in order to reject the backend
+    /// afterwards.
+    #[tokio::test]
+    async fn onnx_without_an_export_dir_is_refused_before_anything_is_fetched() {
+        let err = refuse(&opts(None), Backend::Onnx).await;
+        assert!(err.contains("--onnx"), "{err}");
+        assert!(
+            !err.contains("failed to fetch"),
+            "the refusal arrived after a download was attempted: {err}"
+        );
+    }
+
+    /// The mirror, and the one that used to be silent: `--onnx` beside a Burn
+    /// backend asks for two runtimes at once, and the loader used to take the
+    /// graphs regardless — discarding a backend the user had named out loud.
+    ///
+    /// Nothing is fetched down this branch either way (a graph carries its
+    /// weights), so what this pins is the *asking*: restoring the old shape —
+    /// `if opts.onnx.is_some() { Backend::Onnx } else { resolve(..) }` — makes
+    /// this test fail with `load_onnx`'s message instead of the refusal, which
+    /// is exactly the silent substitution.
+    #[tokio::test]
+    async fn a_burn_backend_beside_an_export_dir_is_refused_before_anything_is_fetched() {
+        for backend in [Backend::Tch, Backend::Cuda, Backend::Wgpu] {
+            let err = refuse(&opts(Some("/nonexistent")), backend).await;
+            assert!(err.contains("--onnx"), "{backend}: {err}");
+            assert!(
+                !err.contains("failed to fetch"),
+                "{backend}: the refusal arrived after a download was attempted: {err}"
+            );
+        }
+    }
+
+    /// The reference is the whole speaker specification, so its absence is
+    /// reported before either of the two above — and before a fetch, which is
+    /// what `ModelOpts::reference` being called at the top of `load_model` buys.
+    #[tokio::test]
+    async fn a_missing_reference_is_reported_before_anything_is_fetched() {
+        let mut opts = opts(None);
+        opts.reference = None;
+        let err = refuse(&opts, Backend::Auto).await;
+        assert!(err.contains("--reference"), "{err}");
+        assert!(!err.contains("failed to fetch"), "{err}");
+    }
+}

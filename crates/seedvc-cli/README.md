@@ -106,7 +106,10 @@ the cost of artefacts. Zero is not "no conditioning" — it is exactly the
 conditioned velocity with no extrapolation, and because the unconditional pass is
 then skipped entirely it **halves the work per step**. So it is the first knob to
 reach for when a conversion is too slow, ahead of cutting `--steps`, since it
-costs an extrapolation rather than accuracy in the solver.
+costs an extrapolation rather than accuracy in the solver. Any value **at or
+below** zero selects that same branch, so `--guidance -1` is legal and means what
+`--guidance 0` means — it is spelled with the value split from the flag like any
+other, which it was not until the flag carried `allow_negative_numbers`.
 
 `--length-adjust` scales the output's duration against the source's — above 1 is
 slower, below is faster, and pitch is untouched, because the content is resampled
