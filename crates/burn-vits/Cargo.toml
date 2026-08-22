@@ -12,3 +12,11 @@ burn = { version = "0.21", default-features = false, features = ["std"] }
 burn-store.workspace = true
 # Checkpoint loading, shared with every other network crate.
 burn-kit = { workspace = true, features = ["store"] }
+
+# The tests here need a backend to build a module on and run one forward pass
+# through; ndarray is the one that needs no GPU and no system library. A
+# *dev*-dependency rather than a feature: this crate deliberately declares no
+# `cuda`/`tch`/`wgpu` feature, because those exist to give a crate's examples a
+# backend and there are none here.
+[dev-dependencies]
+burn = { version = "0.21", default-features = false, features = ["std", "ndarray"] }
