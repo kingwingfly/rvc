@@ -469,3 +469,106 @@ fn vector<B: Backend, const D: usize>(what: &'static str, t: Tensor<B, D>) -> Re
         why: format!("was not f32: {e:?}"),
     })
 }
+
+/// `covered` is all that stands between a checkpoint that does not match this
+/// model and five networks running on their initialised values, and it is a copy
+/// of `burn_kit::check_coverage` rather than a call to it — the `tracing::info!`
+/// below the checks is what `examples/coverage` reads off the log, and that
+/// example is the crate's only harness against real weights. A copy nothing pins
+/// is a copy that drifts, so these ask the four questions that matter: three
+/// reports it must refuse, and one it must accept.
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    /// One report, built field by field because `ApplyResult` has no `Default`.
+    fn report(
+        applied: &[&str],
+        missing: &[&str],
+        unused: &[&str],
+        errors: Vec<burn_kit::ApplyError>,
+    ) -> burn_kit::ApplyResult {
+        burn_kit::ApplyResult {
+            applied: applied.iter().map(|s| s.to_string()).collect(),
+            skipped: Vec::new(),
+            missing: missing
+                .iter()
+                .map(|s| (s.to_string(), String::new()))
+                .collect(),
+            unused: unused.iter().map(|s| s.to_string()).collect(),
+            errors,
+        }
+    }
+
+    /// The refusal `covered` produced, or a panic naming what it let through.
+    fn message(result: &burn_kit::ApplyResult) -> String {
+        match covered("the transformer", result) {
+            Err(Error::Load { why, .. }) => why,
+            other => panic!("this report had to be refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_wrong_shaped_checkpoint_is_refused_though_nothing_is_missing() {
+        // The failure `covered` exists for, and the one that reads as a clean
+        // load if `errors` is asked second: the applier drops an errored path
+        // from `applied` and from `missing` alike, so a checkpoint carrying the
+        // right names at the wrong shapes arrives with `missing` empty and
+        // `applied` full — indistinguishable from success to anyone counting
+        // only what is absent. A Seed-VC preset with other dimensions is
+        // exactly that file.
+        let result = report(
+            &["net.cfm.estimator.input_pos"],
+            &[],
+            &[],
+            vec![burn_kit::ApplyError::ShapeMismatch {
+                path: "net.cfm.estimator.time_embed.0.weight".to_string(),
+                expected: burn::tensor::Shape::from([512, 256]),
+                found: burn::tensor::Shape::from([768, 256]),
+            }],
+        );
+        assert!(result.missing.is_empty(), "the premise of this test");
+        assert!(!result.applied.is_empty(), "and the other half of it");
+
+        let err = message(&result);
+        assert!(err.contains("time_embed"), "{err}");
+    }
+
+    #[test]
+    fn a_parameter_with_no_weights_behind_it_is_refused() {
+        let result = report(
+            &["net.cfm.estimator.input_pos"],
+            &["net.cfm.estimator.final_layer.weight"],
+            &[],
+            vec![],
+        );
+        let err = message(&result);
+        assert!(err.contains("had no weights"), "{err}");
+    }
+
+    #[test]
+    fn a_load_that_applied_nothing_is_refused() {
+        // A rename that matched nothing. The applier does not currently produce
+        // this shape — it visits the module's parameters, so a foreign file
+        // arrives as every parameter *missing* — but the check costs nothing and
+        // `burn_store` has narrowed `missing` once already, around `errors`.
+        let result = report(&[], &[], &["something.else"], vec![]);
+        message(&result);
+    }
+
+    #[test]
+    fn tensors_left_over_are_not_a_failure() {
+        // `unused` is not a defect and must never be treated as one here: the
+        // Seed-VC `.pth` holds five modules, so loading any one leaves the
+        // others over, CAMPPlus leaves 122 `num_batches_tracked` counters, and
+        // Whisper leaves its whole decoder. A threshold would refuse working
+        // weights, which is worse than not checking.
+        let result = report(
+            &["net.cfm.estimator.input_pos"],
+            &[],
+            &["net.style_encoder.0.weight", "net.vq.codebook"],
+            vec![],
+        );
+        covered("the transformer", &result).expect("leftover tensors are not a failure");
+    }
+}

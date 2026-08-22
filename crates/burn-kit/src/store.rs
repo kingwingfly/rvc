@@ -36,6 +36,15 @@ use burn_store::{
 /// the failure this workspace has already shipped once: a port that loads at
 /// full coverage and computes the wrong thing.
 ///
+/// The third check is the weakest of the three and should be read as such.
+/// `missing` counts the *module's* parameters rather than the *file's* tensors,
+/// so a checkpoint of an entirely different model comes back as every parameter
+/// missing and is refused one branch earlier; `applied.is_empty()` only ever
+/// fires on a module with no parameters at all, or if `burn_store` narrows
+/// `missing` again the way it already narrows it around `errors`. It is kept as
+/// a backstop and because it is the honest message for that case — not because
+/// a caller omitting it has a hole. `errors` is the one nobody may omit.
+///
 /// `unused` is deliberately neither checked nor a parameter. A correct load
 /// leaves tensors over all the time — RMVPE's 118 `num_batches_tracked`
 /// counters, ContentVec's 57 LayerNorm aliases, or a multi-module `.pth` of
@@ -66,10 +75,17 @@ pub fn check_coverage(label: &str, result: &ApplyResult) -> Result<(), String> {
         ));
     }
     if result.applied.is_empty() {
-        // Not reachable through `missing` above, and not something the loaders
-        // can raise on their own: `load_pytorch_into` reads any checkpoint it can
-        // parse, so being handed a different model entirely is a silent success
-        // until the applied count is looked at.
+        // A backstop rather than the sole reporter of "handed a different model
+        // entirely", and the distinction was measured rather than reasoned:
+        // `Applier::into_result` derives `missing` from the paths it *visited*,
+        // and it visits every parameter of the module rather than every tensor
+        // of the file, so a checkpoint matching nothing arrives as every
+        // parameter missing and the branch above already refuses it. Kept
+        // because it is free, because it is the honest message for that case,
+        // and because `missing` has already been narrowed once — around
+        // `errors` — so it is not a field to trust unconditionally.
+        // `a_foreign_checkpoint_is_every_parameter_missing_not_an_empty_report`
+        // is what would fail if that changed.
         return Err(format!(
             "{label}: nothing was applied — no parameter of the module appears \
              in the checkpoint at all"
@@ -335,9 +351,11 @@ mod tests {
         let err = check_coverage("rmvpe weights", &missing).expect_err("missing must be refused");
         assert!(err.contains("enc.bias"), "{err}");
 
-        // The "handed a different model entirely" case, which no loader can
-        // raise on its own — and which the `missing` branch above cannot report
-        // sensibly either, since it would read "0 of 0 parameters".
+        // A report with nothing applied *and* nothing missing, which the
+        // `missing` branch above could only describe as "0 of 0 parameters".
+        // The applier does not currently produce it — see
+        // `a_foreign_checkpoint_is_every_parameter_missing_not_an_empty_report`
+        // — so this pins the backstop, not a state reachable today.
         let empty = report(&[], &[], &["something.else"], vec![]);
         let err =
             check_coverage("rmvpe weights", &empty).expect_err("an empty apply must be refused");
@@ -399,5 +417,64 @@ mod tests {
         loaded.weight.val().to_data().assert_eq(&expected, true);
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_foreign_checkpoint_is_every_parameter_missing_not_an_empty_report() {
+        // What `burn_store`'s *real* applier does, as opposed to what a
+        // hand-built `ApplyResult` can be made to say. Every other test in this
+        // module constructs the report itself, so none of them can establish
+        // which states the applier actually produces — and two of
+        // `check_coverage`'s three branches exist because of a claim about one
+        // of those states.
+        //
+        // The claim under test: handed a checkpoint whose names match nothing,
+        // does the applier report an *empty* `missing` — leaving
+        // `applied.is_empty()` as the only field that could notice?
+        //
+        // It does not. `Applier::into_result` derives `missing` from the paths
+        // it *visited*, and it visits every parameter of the module rather than
+        // every tensor of the file, so a file that matches nothing comes back as
+        // every parameter missing. `applied.is_empty()` is therefore a backstop
+        // rather than the sole reporter of this case: a caller that checks
+        // `errors` and `missing` alone still refuses a foreign checkpoint.
+        //
+        // Which is worth pinning precisely because it is the *cheap* half of the
+        // check to get wrong in the other direction: if a future `burn-store`
+        // narrows `missing` the way it already narrows it around `errors`, this
+        // test fails and the third branch stops being redundant.
+        type B = burn::backend::NdArray;
+        let device = Default::default();
+        let saved = burn::nn::LinearConfig::new(3, 5).init::<B>(&device);
+
+        let dir = std::env::temp_dir().join("burn-kit-foreign");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("linear.safetensors");
+        save_safetensors::<B, _>(&saved, &path).unwrap();
+
+        // Rename every incoming tensor to a path the module has no slot for.
+        let mut loaded = burn::nn::LinearConfig::new(3, 5).init::<B>(&device);
+        let result =
+            load_safetensors_into::<B, _>(&mut loaded, &path, &[(r"^", "not_this_model.")])
+                .unwrap();
+        std::fs::remove_file(&path).ok();
+
+        assert!(result.applied.is_empty(), "nothing of this module is there");
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let missing: Vec<&str> = result.missing.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(
+            missing,
+            ["bias", "weight"],
+            "the applier visits the module's parameters, not the file's tensors"
+        );
+        assert_eq!(
+            result.unused.len(),
+            2,
+            "and the file's two tensors are over"
+        );
+
+        let err = check_coverage("the generator", &result)
+            .expect_err("a checkpoint of a different model must be refused");
+        assert!(err.contains("had no weights"), "{err}");
     }
 }

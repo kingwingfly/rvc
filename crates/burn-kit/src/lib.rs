@@ -24,6 +24,14 @@ pub mod store;
 #[cfg(feature = "store")]
 pub use burn_store::ApplyResult;
 
+/// Why one tensor of a checkpoint could not be applied — re-exported beside
+/// [`ApplyResult`] for the same reason, and for one more: `errors` is the field
+/// a coverage check may not omit, so a crate that wants to *test* its own check
+/// against a wrong-shaped checkpoint has to be able to build one of these
+/// without taking a direct `burn-store` dependency.
+#[cfg(feature = "store")]
+pub use burn_store::ApplyError;
+
 /// The check every loader's caller owes its [`ApplyResult`], hoisted here so
 /// there is one definition of what "the checkpoint matches the model" means
 /// rather than one per engine — and, more to the point, so no engine can go on
