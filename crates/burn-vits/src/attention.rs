@@ -254,3 +254,381 @@ impl<B: Backend> Encoder<B> {
         x
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type B = burn::backend::NdArray;
+    type Dev = burn::backend::ndarray::NdArrayDevice;
+
+    fn flat<const D: usize>(t: Tensor<B, D>) -> Vec<f32> {
+        t.into_data().to_vec().unwrap()
+    }
+    fn worst(got: &[f32], want: &[f32]) -> f32 {
+        assert_eq!(got.len(), want.len(), "{got:?} vs {want:?}");
+        assert!(got.iter().all(|v| v.is_finite()), "output must be finite");
+        got.iter()
+            .zip(want)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max)
+    }
+
+    /// `[1, n, 1]` holding `1..=n`, so a padded zero is distinguishable from
+    /// row 0 — which is the whole difficulty in reading the table below.
+    fn ramp(n: usize, device: &Dev) -> Tensor<B, 3> {
+        let v: Vec<f32> = (1..=n).map(|i| i as f32).collect();
+        Tensor::<B, 1>::from_floats(v.as_slice(), device).reshape([1, n, 1])
+    }
+
+    fn head(window_size: usize, device: &Dev) -> MultiHeadAttention<B> {
+        MultiHeadAttention::new(2, 1, window_size, device)
+    }
+
+    /// Hand-computed index table for the `[1, 2w+1, dk]` → `[1, 2l-1, dk]`
+    /// window slice, at a `window_size` of 4 (every configuration in the family
+    /// uses 4). Rows carry `1..=9`, so a `0` in an expectation is a pad.
+    ///
+    /// Both regimes, because they take different branches: `l <= w + 1` slices
+    /// out of the middle with no padding at all (the `pad == 0` path, which is
+    /// the one that hands out a bare view of the live `Param`), and `l > w + 1`
+    /// zero-pads first and then takes the whole thing.
+    #[test]
+    fn relative_embeddings_match_a_hand_written_index_table() {
+        let device = Default::default();
+        let mha = head(4, &device);
+        let emb = ramp(9, &device);
+
+        // pad == 0, sliced from the middle: start = (w + 1) - l = 2, five rows.
+        let got = flat(mha.get_relative_embeddings(emb.clone(), 3));
+        assert!(worst(&got, &[3.0, 4.0, 5.0, 6.0, 7.0]) == 0.0, "{got:?}");
+
+        // pad == 0 and l == w + 1: the whole table, start = 0, nine rows.
+        let got = flat(mha.get_relative_embeddings(emb.clone(), 5));
+        let all: Vec<f32> = (1..=9).map(|i| i as f32).collect();
+        assert!(worst(&got, &all) == 0.0, "{got:?}");
+
+        // pad == 1: one zero row each side, all eleven rows taken.
+        let got = flat(mha.get_relative_embeddings(emb.clone(), 6));
+        let mut want = vec![0.0];
+        want.extend_from_slice(&all);
+        want.push(0.0);
+        assert!(worst(&got, &want) == 0.0, "{got:?}");
+
+        // pad == 2: two zero rows each side, all thirteen rows taken.
+        let got = flat(mha.get_relative_embeddings(emb, 7));
+        let mut want = vec![0.0, 0.0];
+        want.extend_from_slice(&all);
+        want.extend_from_slice(&[0.0, 0.0]);
+        assert!(worst(&got, &want) == 0.0, "{got:?}");
+    }
+
+    /// The output width is `2l - 1` for every length, on both sides of the
+    /// branch — the invariant `rel_to_abs` then depends on, and the one a
+    /// wrong `slice_end` breaks without changing any value in view.
+    #[test]
+    fn relative_embeddings_are_always_two_l_minus_one_wide() {
+        let device = Default::default();
+        for w in [1usize, 4, 6] {
+            let mha = head(w, &device);
+            let emb = ramp(2 * w + 1, &device);
+            for l in 1..=(2 * w + 3) {
+                let dims = mha.get_relative_embeddings(emb.clone(), l).dims();
+                assert_eq!(dims, [1, 2 * l - 1, 1], "window {w}, length {l}");
+            }
+        }
+    }
+
+    /// Relative → absolute, as a literal table and then as the index formula
+    /// that produced it.
+    ///
+    /// `x[i][j]` holds the score for query `i` at relative offset `j - (l - 1)`,
+    /// so the absolute entry `out[i][k]` must be `x[i][k - i + l - 1]`. That
+    /// `l - 1` is the off-by-one this family gets wrong: shifting the final
+    /// slice by one column still returns the right shape and finite numbers,
+    /// and simply reads every score off by one position.
+    #[test]
+    fn rel_to_abs_matches_a_hand_written_table() {
+        let device = Default::default();
+        let l = 3;
+        let v: Vec<f32> = (1..=15).map(|i| i as f32).collect();
+        let x = Tensor::<B, 1>::from_floats(v.as_slice(), &device).reshape([1, 1, l, 2 * l - 1]);
+        let got = flat(MultiHeadAttention::<B>::rel_to_abs(x));
+        // Rows 1..5, 6..10, 11..15; row i keeps the window starting at l-1-i.
+        let want = [3.0, 4.0, 5.0, 7.0, 8.0, 9.0, 11.0, 12.0, 13.0];
+        assert!(worst(&got, &want) == 0.0, "{got:?}");
+
+        // The same claim as a formula, over a wider case, so the table above is
+        // an instance of a rule rather than a memorised answer.
+        let l = 5;
+        let (b, h) = (2, 3);
+        let n = b * h * l * (2 * l - 1);
+        let v: Vec<f32> = (1..=n).map(|i| i as f32).collect();
+        let x = Tensor::<B, 1>::from_floats(v.as_slice(), &device).reshape([b, h, l, 2 * l - 1]);
+        let got = flat(MultiHeadAttention::<B>::rel_to_abs(x));
+        let mut want = Vec::with_capacity(b * h * l * l);
+        for bh in 0..(b * h) {
+            for i in 0..l {
+                for k in 0..l {
+                    want.push(v[(bh * l + i) * (2 * l - 1) + (k + l - 1 - i)]);
+                }
+            }
+        }
+        assert!(worst(&got, &want) == 0.0);
+    }
+
+    /// Absolute → relative, the inverse skew, as a literal table. The zeros are
+    /// the entries no relative offset addresses at that query position, and
+    /// where they fall is the whole content of the transform.
+    #[test]
+    fn abs_to_rel_matches_a_hand_written_table() {
+        let device = Default::default();
+        let l = 3;
+        let v: Vec<f32> = (1..=9).map(|i| i as f32).collect();
+        let x = Tensor::<B, 1>::from_floats(v.as_slice(), &device).reshape([1, 1, l, l]);
+        let got = flat(MultiHeadAttention::<B>::abs_to_rel(x));
+        let want = [
+            0.0, 0.0, 1.0, 2.0, 3.0, //
+            0.0, 4.0, 5.0, 6.0, 0.0, //
+            7.0, 8.0, 9.0, 0.0, 0.0,
+        ];
+        assert!(worst(&got, &want) == 0.0, "{got:?}");
+    }
+
+    /// A round trip that must return its input exactly: `abs_to_rel` skews an
+    /// absolute score matrix into relative offsets and `rel_to_abs` skews it
+    /// back, so the composition in *that* order is the identity.
+    ///
+    /// The other order is not, and the second half of this test says so — the
+    /// relative form has `2l - 1` columns per row of which only `l` are ever
+    /// addressed, so a rel → abs → rel round trip zeroes the rest. That
+    /// asymmetry is what makes the pair's direction load-bearing rather than
+    /// decorative.
+    #[test]
+    fn rel_to_abs_undoes_abs_to_rel() {
+        let device = Default::default();
+        let (b, h, l) = (2, 3, 5);
+        let x = Tensor::<B, 4>::random(
+            [b, h, l, l],
+            Distribution::Normal(0.0, 1.0),
+            &device,
+        );
+        let before = flat(x.clone());
+        let after = flat(MultiHeadAttention::<B>::rel_to_abs(
+            MultiHeadAttention::<B>::abs_to_rel(x),
+        ));
+        assert!(worst(&after, &before) == 0.0);
+
+        let y = Tensor::<B, 4>::random(
+            [b, h, l, 2 * l - 1],
+            Distribution::Normal(0.0, 1.0),
+            &device,
+        );
+        let before = flat(y.clone());
+        let after = flat(MultiHeadAttention::<B>::abs_to_rel(
+            MultiHeadAttention::<B>::rel_to_abs(y),
+        ));
+        let changed = before
+            .iter()
+            .zip(&after)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(changed > 0.1, "the two directions are not inverses either way");
+    }
+
+    /// Scalar softmax attention written by hand, against the tensor path with
+    /// the relative-position tables zeroed out.
+    ///
+    /// The four 1×1 convolutions get four **independent random** weight
+    /// matrices, and the reference does those projections itself by index — the
+    /// shape `burn-rmvpe`'s GRU reference uses, and the reason for it is that
+    /// identity convolutions would make `q = k = v = x`, whose score matrix is
+    /// symmetric in query and key, so a `conv_q`/`conv_k` mix-up would be
+    /// invisible. That copy-paste is exactly the class that loads at 100%
+    /// coverage and produces garbage.
+    ///
+    /// Four things it pins that a shape check cannot: each projection is wired
+    /// to its own place; the scale is `sqrt(dk)` and not `dk` or
+    /// `sqrt(channels)`; the softmax runs over the **key** axis, which in
+    /// self-attention has the same extent as the query axis and is therefore
+    /// shape-identical when wrong; and the heads are contiguous channel blocks
+    /// (`head * dk + d`), which an interleaved split would also survive.
+    #[test]
+    fn attention_matches_a_scalar_softmax_reference() {
+        let device = Default::default();
+        let (c, h, t) = (4usize, 2usize, 5usize);
+        let dk = c / h;
+        let mut mha = MultiHeadAttention::<B>::new(c, h, 4, &device);
+
+        let normal = Distribution::Normal(0.0, 1.0);
+        let draw = || Tensor::<B, 3>::random([c, c, 1], normal, &device);
+        let (wq, wk, wv, wo) = (draw(), draw(), draw(), draw());
+        for (conv, w) in [
+            (&mut mha.conv_q, &wq),
+            (&mut mha.conv_k, &wk),
+            (&mut mha.conv_v, &wv),
+            (&mut mha.conv_o, &wo),
+        ] {
+            conv.weight = Param::from_tensor(w.clone());
+            conv.bias = Some(Param::from_tensor(Tensor::zeros([c], &device)));
+        }
+        let zeros = || Param::from_tensor(Tensor::<B, 3>::zeros([1, 9, dk], &device));
+        mha.emb_rel_k = zeros();
+        mha.emb_rel_v = zeros();
+
+        let x = Tensor::<B, 3>::random([1, c, t], normal, &device);
+        let got = flat(mha.forward(x.clone()));
+
+        // Everything below is scalar and indexed by hand: `[channel][time]`
+        // flattened channel-major, which is how the tensors are laid out.
+        let xs: Vec<f64> = flat(x).iter().map(|v| *v as f64).collect();
+        let proj = |w: &Tensor<B, 3>, src: &[f64]| -> Vec<f64> {
+            let w: Vec<f32> = flat(w.clone());
+            let mut y = vec![0.0f64; c * t];
+            for o in 0..c {
+                for i in 0..t {
+                    y[o * t + i] = (0..c).map(|k| w[o * c + k] as f64 * src[k * t + i]).sum();
+                }
+            }
+            y
+        };
+        let (q, k, v) = (proj(&wq, &xs), proj(&wk, &xs), proj(&wv, &xs));
+
+        let mut att = vec![0.0f64; c * t];
+        for head in 0..h {
+            let ch = |d: usize| head * dk + d;
+            for i in 0..t {
+                let logits: Vec<f64> = (0..t)
+                    .map(|j| {
+                        let dot: f64 = (0..dk)
+                            .map(|d| q[ch(d) * t + i] * k[ch(d) * t + j])
+                            .sum();
+                        dot / (dk as f64).sqrt()
+                    })
+                    .collect();
+                let max = logits.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                let exp: Vec<f64> = logits.iter().map(|l| (l - max).exp()).collect();
+                let sum: f64 = exp.iter().sum();
+                for d in 0..dk {
+                    att[ch(d) * t + i] = (0..t).map(|j| exp[j] / sum * v[ch(d) * t + j]).sum();
+                }
+            }
+        }
+        let want: Vec<f32> = proj(&wo, &att).iter().map(|v| *v as f32).collect();
+        assert!(worst(&got, &want) < 1e-5, "{got:?} vs {want:?}");
+    }
+
+    /// The two relative-position tables are not interchangeable: `emb_rel_k`
+    /// biases the scores before the softmax and `emb_rel_v` mixes into the
+    /// values after it. Reading one of them twice — the easiest possible slip,
+    /// since the two call sites differ by one letter — changes no shape and
+    /// keeps everything finite.
+    ///
+    /// Three runs on one input: neither table live, then each alone. All three
+    /// must differ, and a table read twice collapses two of them together.
+    #[test]
+    fn the_key_and_value_relative_tables_are_not_interchangeable() {
+        let device = Default::default();
+        let (c, h, t) = (4usize, 2usize, 6usize);
+        let dk = c / h;
+        let normal = Distribution::Normal(0.0, 1.0);
+        let table = Tensor::<B, 3>::random([1, 9, dk], normal, &device);
+        let x = Tensor::<B, 3>::random([1, c, t], normal, &device);
+
+        let mut mha = MultiHeadAttention::<B>::new(c, h, 4, &device);
+        let run = |mha: &MultiHeadAttention<B>| flat(mha.forward(x.clone()));
+        let zeros = || Param::from_tensor(Tensor::<B, 3>::zeros([1, 9, dk], &device));
+
+        mha.emb_rel_k = zeros();
+        mha.emb_rel_v = zeros();
+        let neither = run(&mha);
+        mha.emb_rel_k = Param::from_tensor(table.clone());
+        let key_only = run(&mha);
+        mha.emb_rel_k = zeros();
+        mha.emb_rel_v = Param::from_tensor(table);
+        let value_only = run(&mha);
+
+        let apart = |a: &[f32], b: &[f32]| {
+            assert!(a.iter().chain(b).all(|v| v.is_finite()));
+            a.iter().zip(b).map(|(p, q)| (p - q).abs()).fold(0.0f32, f32::max)
+        };
+        assert!(apart(&neither, &key_only) > 1e-4, "the key table does nothing");
+        assert!(apart(&neither, &value_only) > 1e-4, "the value table does nothing");
+        assert!(
+            apart(&key_only, &value_only) > 1e-4,
+            "the two tables are being read from the same place"
+        );
+    }
+
+    /// Finiteness on its own, on both sides of the padding branch and with the
+    /// relative tables live. A softmax row that has gone entirely to `-inf`
+    /// yields `NaN` rather than an error, and `assert_approx_eq` compares `NaN`
+    /// to `NaN` without complaint — so this is asserted separately from any
+    /// comparison, which is how a reversed mask once shipped at 100% coverage.
+    #[test]
+    fn attention_output_is_finite_at_every_length() {
+        let device = Default::default();
+        let mha = MultiHeadAttention::<B>::new(8, 2, 4, &device);
+        for t in [1usize, 4, 5, 6, 17] {
+            let x = Tensor::<B, 3>::random([2, 8, t], Distribution::Normal(0.0, 1.0), &device);
+            let y = mha.forward(x);
+            assert_eq!(y.dims(), [2, 8, t]);
+            assert!(flat(y).iter().all(|v| v.is_finite()), "length {t}");
+        }
+    }
+
+    /// VITS's "same" padding is asymmetric — `(k-1)/2` left and `k/2` right —
+    /// and this pins the alignment rather than only the length.
+    ///
+    /// Both convolutions are a delta at kernel index 0, so each shifts its
+    /// input right by exactly its left pad and the whole FFN is a shift by two.
+    /// An even kernel is the discriminating case: `k = 4` needs `(1, 2)`, and
+    /// `(2, 1)` — the same total, the same output length — shifts by four.
+    /// `k = 3` is the control, where the two spellings agree.
+    #[test]
+    fn ffn_same_padding_keeps_the_alignment_for_even_kernels() {
+        let device = Default::default();
+        for kernel in [3usize, 4] {
+            let mut ffn = Ffn::<B>::new(1, 1, kernel, &device);
+            let mut delta = vec![0.0f32; kernel];
+            delta[0] = 1.0;
+            for conv in [&mut ffn.conv_1, &mut ffn.conv_2] {
+                conv.weight = Param::from_tensor(
+                    Tensor::<B, 1>::from_floats(delta.as_slice(), &device).reshape([1, 1, kernel]),
+                );
+                conv.bias = Some(Param::from_tensor(Tensor::zeros([1], &device)));
+            }
+            // All positive, so the ReLU between the two convolutions is the
+            // identity and the shift is all that is left.
+            let x = Tensor::<B, 1>::from_floats([1.0, 2.0, 3.0, 4.0, 5.0], &device)
+                .reshape([1, 1, 5]);
+            let got = flat(ffn.forward(x));
+            assert!(
+                worst(&got, &[0.0, 0.0, 1.0, 2.0, 3.0]) == 0.0,
+                "kernel {kernel}: {got:?}"
+            );
+        }
+    }
+
+    /// The stack keeps `[batch, hidden, time]` and stays finite through two
+    /// layers of attention, FFN and two LayerNorms — the composition the two
+    /// models actually run, at a length past the relative window so the padded
+    /// branch is the one exercised.
+    #[test]
+    fn encoder_preserves_shape_and_stays_finite() {
+        let device = Default::default();
+        let cfg = EncoderConfig {
+            hidden_channels: 8,
+            filter_channels: 16,
+            n_heads: 2,
+            n_layers: 2,
+            kernel_size: 3,
+            window_size: 4,
+        };
+        let enc = Encoder::<B>::new(&cfg, &device);
+        let x = Tensor::<B, 3>::random([2, 8, 12], Distribution::Normal(0.0, 1.0), &device);
+        let y = enc.forward(x);
+        assert_eq!(y.dims(), [2, 8, 12]);
+        assert!(flat(y).iter().all(|v| v.is_finite()));
+    }
+}
