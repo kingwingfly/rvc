@@ -275,8 +275,7 @@ fn read_config(path: &Path) -> Result<WhisperConfig> {
 mod tests {
     use super::*;
     use crate::engine::Engine;
-    use std::cell::RefCell;
-    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
 
     /// What reached the model, shared with the test that built the stub.
     ///
@@ -306,20 +305,14 @@ mod tests {
         /// transcript a clip of room tone gives.
         scripts: Vec<Vec<u32>>,
         vocab_size: usize,
-        log: Rc<RefCell<Recorder>>,
+        log: Arc<Mutex<Recorder>>,
         /// Which script the current decode reads, and how far into it.
         clip: usize,
         emitted: usize,
     }
 
-    // `Engine: Send`, and an `Rc` is not. Nothing in this module moves a
-    // `Transcriber` across threads — every test builds one, drives it and drops
-    // it on the test's own thread — so the handle stays an `Rc` rather than
-    // paying for an `Arc<Mutex<_>>` to satisfy a bound no test exercises.
-    unsafe impl Send for StubEngine {}
-
     impl StubEngine {
-        fn new(scripts: Vec<Vec<u32>>, log: Rc<RefCell<Recorder>>) -> Self {
+        fn new(scripts: Vec<Vec<u32>>, log: Arc<Mutex<Recorder>>) -> Self {
             Self {
                 scripts,
                 vocab_size: VOCAB_SIZE,
@@ -336,7 +329,7 @@ mod tests {
         }
 
         fn encode(&mut self, mel: &[f32], frames: usize) -> Result<()> {
-            let mut log = self.log.borrow_mut();
+            let mut log = self.log.lock().unwrap();
             log.encoded.push((frames, mel.len()));
             self.clip = log.encoded.len() - 1;
             drop(log);
@@ -418,17 +411,17 @@ mod tests {
 
     /// A [`Transcriber`] over a stub scripting `WORDS[i]` for clip `i`, plus the
     /// handle onto what it encodes.
-    fn transcriber(clips: usize) -> (Transcriber, Rc<RefCell<Recorder>>) {
+    fn transcriber(clips: usize) -> (Transcriber, Arc<Mutex<Recorder>>) {
         scripted((0..clips).map(|i| vec![i as u32 + 1]).collect())
     }
 
     /// The same, with the token script for each clip given explicitly — an empty
     /// script is a clip that decodes to nothing.
-    fn scripted(scripts: Vec<Vec<u32>>) -> (Transcriber, Rc<RefCell<Recorder>>) {
-        let log = Rc::new(RefCell::new(Recorder::default()));
+    fn scripted(scripts: Vec<Vec<u32>>) -> (Transcriber, Arc<Mutex<Recorder>>) {
+        let log = Arc::new(Mutex::new(Recorder::default()));
         let stt = Transcriber {
             mel: mel::LogMel::new(MEL_BINS),
-            engine: Box::new(StubEngine::new(scripts, Rc::clone(&log))),
+            engine: Box::new(StubEngine::new(scripts, Arc::clone(&log))),
             tokens: control_tokens(),
             vocab: vocabulary(),
         };
@@ -674,17 +667,26 @@ mod tests {
 
     /// The one documented divergence, **and it is expected** — do not file it.
     ///
-    /// [`Transcriber`] drives [`Slicer`] on both of its own paths, so `stt
+    /// [`Transcriber`] drives [`Slicer`] on *both* of its own paths, so `stt
     /// convert` and the bare filter cut identically (the test above). What they
     /// both diverge from is [`audio_kit::slice::slice`], the whole-recording
-    /// slicer: on speech that never pauses, `Slicer` cuts as late as `max_clip`
-    /// allows, while `slice` knows the run's full length and balances the split
-    /// across it. Cutting late is the price of not buffering the recording,
-    /// which is the point of the type.
+    /// slicer, and only on speech that never pauses: `Slicer` has to decide
+    /// without knowing how long the run will turn out to be, so it cuts at the
+    /// quietest frame of the window it has, where `slice` knows the full length
+    /// and balances the split across it. Not buffering the recording is the
+    /// point of the type, and this is its price.
+    ///
+    /// **Which of the two cuts *later* is not the rule, and assuming it is was
+    /// wrong here.** `Slicer`'s own docs say it cuts "as late as `max_clip`
+    /// allows", which reads as a claim about the knife and is a claim about the
+    /// clock: the decision is deferred until `max_clip` has already elapsed, but
+    /// the cut then lands wherever the search window is quietest. On the uniform
+    /// signal below that is 29 920 against `slice`'s 32 000 — *earlier*. The
+    /// numbers are derived in the body rather than remembered.
     ///
     /// Neither loses a sample, which is the property that actually matters.
     #[test]
-    fn a_gapless_run_cuts_later_than_the_whole_recording_slicer_would() {
+    fn a_gapless_run_cuts_differently_from_the_whole_recording_slicer() {
         let audio = voiced(8.0);
         let slice_opts = SliceOptions {
             max_clip: 3.0,
@@ -767,7 +769,7 @@ mod tests {
         }
 
         assert_eq!(
-            log.borrow().encoded,
+            log.lock().unwrap().encoded,
             vec![(WINDOW_FRAMES, MEL_BINS * WINDOW_FRAMES); 2],
             "3000 frames of 80 mel-major bands, whatever came in"
         );
@@ -794,7 +796,7 @@ mod tests {
         assert_eq!(segments[0].text, "one");
         // ...and it was still encoded, so this is the decode dropping it rather
         // than the slicer never producing it.
-        assert_eq!(log.borrow().encoded.len(), 2);
+        assert_eq!(log.lock().unwrap().encoded.len(), 2);
     }
 
     /// Timings come back absolute however the audio was cut up, and the language
@@ -868,7 +870,7 @@ mod tests {
         );
         // ...while only the first 30 s of it reached the model.
         assert_eq!(
-            log.borrow().encoded,
+            log.lock().unwrap().encoded,
             vec![(WINDOW_FRAMES, MEL_BINS * WINDOW_FRAMES)]
         );
 
@@ -897,7 +899,7 @@ mod tests {
         assert!(stt.transcribe(&silence(4.0), &opts).unwrap().is_empty());
         assert!(stt.transcribe(&[], &opts).unwrap().is_empty());
         assert!(
-            log.borrow().encoded.is_empty(),
+            log.lock().unwrap().encoded.is_empty(),
             "the slicer must not hand the decoder a quiet stretch to fill"
         );
     }
