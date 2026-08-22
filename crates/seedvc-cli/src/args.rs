@@ -301,3 +301,322 @@ pub struct DownloadArgs {
     #[command(flatten)]
     pub download: cli_kit::DownloadOpts,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    /// The `seedvc` binary's tree, minus `completions` — which belongs to the
+    /// binary rather than to the engine, so it is not part of what is tested
+    /// here. The bare invocation's flags sit beside the subcommands exactly as
+    /// `main.rs` arranges them, because that adjacency is what stops clap
+    /// marking `-r` required and is therefore load-bearing for these tests.
+    #[derive(Debug, Parser)]
+    #[command(name = "seedvc")]
+    struct Bin {
+        #[command(flatten)]
+        filter: FilterArgs,
+        #[command(subcommand)]
+        command: Option<SeedVcCommand>,
+    }
+
+    /// `voice`'s tree, so a flag is exercised in the *nested* position too.
+    ///
+    /// This is the whole reason `allow_negative_numbers` goes on the argument
+    /// and not on the command: a `*-cli` crate exports an `Args` type that
+    /// somebody else's `Command` hosts, and a `Command`-level annotation is
+    /// left behind when that happens.
+    #[derive(Debug, Parser)]
+    #[command(name = "voice")]
+    struct Nested {
+        #[command(subcommand)]
+        command: NestedCommand,
+    }
+
+    #[derive(Debug, Subcommand)]
+    enum NestedCommand {
+        #[command(name = "seedvc")]
+        SeedVc(SeedVcCli),
+    }
+
+    /// `try_parse_from(..).unwrap()` rather than `parse_from`: the latter
+    /// prints and calls `exit`, which takes the whole test binary down and
+    /// hides every other failure in the file.
+    fn parse(argv: &[&str]) -> Bin {
+        Bin::try_parse_from(argv).unwrap()
+    }
+
+    fn convert(argv: &[&str]) -> Box<ConvertArgs> {
+        match parse(argv).command {
+            Some(SeedVcCommand::Convert(a)) => a,
+            other => panic!("expected convert, got {other:?}"),
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // The negative-value flag class.
+    //
+    // Every test below passes the value SPLIT from its flag (`--flag -1`
+    // rather than `--flag=-1`). That is the only form that reproduces the
+    // defect: clap reads a leading `-` as the start of a short-flag cluster
+    // unless the argument opted out, and the `=` form is never ambiguous. A
+    // test written the natural way — the way anybody writes one for a flag
+    // they have just added — passes against a broken flag.
+    //
+    // `--guidance` is the one flag here whose value may begin with `-`, and
+    // the mechanical test that says so is not what its examples show but
+    // whether `verify` accepts a value below zero. It does, and its own help
+    // says what such a value means: "zero or below skips the unconditional
+    // pass entirely and halves the work per step".
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn a_negative_guidance_parses_when_split_from_its_flag() {
+        let a = convert(&["seedvc", "convert", "--guidance", "-1", "in.wav"]);
+        assert_eq!(a.sampler.guidance, -1.0);
+        // And it is a value the sampler is documented to accept, so `verify`
+        // has to let it through as well: a parser and a validator that
+        // disagree make a documented value unreachable either way.
+        a.verify().unwrap();
+    }
+
+    #[test]
+    fn a_negative_guidance_parses_on_the_bare_invocation_too() {
+        // `SamplerOpts` is flattened into `FilterArgs` as well, so the
+        // annotation has to survive that flatten — the bare invocation is the
+        // primary mode of this binary, not an afterthought.
+        let bin = parse(&["seedvc", "--guidance", "-0.5", "-r", "me.wav"]);
+        assert_eq!(bin.filter.sampler.guidance, -0.5);
+        bin.filter.verify().unwrap();
+    }
+
+    #[test]
+    fn a_negative_guidance_parses_nested_under_voice_too() {
+        let NestedCommand::SeedVc(cli) =
+            Nested::try_parse_from(["voice", "seedvc", "convert", "--guidance", "-1", "in.wav"])
+                .unwrap()
+                .command;
+        let Some(SeedVcCommand::Convert(a)) = cli.command else {
+            panic!("expected convert");
+        };
+        assert_eq!(a.sampler.guidance, -1.0);
+    }
+
+    // The negative controls. `allow_negative_numbers` widens what a value may
+    // look like, so it belongs only where a negative one is meaningful — a
+    // count of Euler steps, a number of samples, a stretch factor and a
+    // duration are none of them, and each must still be refused by the parser
+    // rather than reaching a `verify` that would have to say so twice.
+
+    #[test]
+    fn the_flags_that_cannot_be_negative_are_still_refused_by_the_parser() {
+        for (flag, value) in [
+            ("--steps", "-1"),
+            ("--length-adjust", "-1"),
+            ("--reference-secs", "-1"),
+            ("--seed", "-1"),
+        ] {
+            assert!(
+                Bin::try_parse_from(["seedvc", "convert", flag, value, "in.wav"]).is_err(),
+                "{flag} {value} parsed, but a negative value there is not meaningful"
+            );
+        }
+        for (flag, value) in [("--chunk", "-1"), ("--block-frames", "-1")] {
+            assert!(
+                Bin::try_parse_from(["seedvc", flag, value, "-r", "me.wav"]).is_err(),
+                "{flag} {value} parsed, but a negative value there is not meaningful"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // What `verify` refuses. Each of these reaches arithmetic if it is not
+    // caught here, and `verify` runs before a byte of the four checkpoints is
+    // fetched — which is the whole reason the check is worth making twice.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn zero_euler_steps_is_refused_by_name() {
+        let a = convert(&["seedvc", "convert", "--steps", "0", "in.wav"]);
+        let err = a.verify().unwrap_err().to_string();
+        assert!(err.contains("--steps"), "{err}");
+    }
+
+    #[test]
+    fn a_zero_length_adjust_is_refused_by_name() {
+        let a = convert(&["seedvc", "convert", "--length-adjust", "0", "in.wav"]);
+        let err = a.verify().unwrap_err().to_string();
+        assert!(err.contains("--length-adjust"), "{err}");
+    }
+
+    #[test]
+    fn a_non_finite_sampler_knob_is_refused_before_it_reaches_the_flow() {
+        // `nan` and `inf` are values `f64::from_str` accepts, so clap does
+        // too. Guidance at infinity makes the extrapolation
+        // `(1 + g)·conditioned − g·unconditional` non-finite for every
+        // element of the mel, and a `length_adjust` of infinity saturates the
+        // frame count it scales. `StreamParams::chunk` catches the second one
+        // in the core, but only on the streaming path and only after four
+        // checkpoints have been loaded.
+        for (flag, value) in [
+            ("--guidance", "inf"),
+            ("--guidance", "nan"),
+            ("--length-adjust", "inf"),
+            ("--length-adjust", "nan"),
+        ] {
+            let a = convert(&["seedvc", "convert", flag, value, "in.wav"]);
+            let Err(err) = a.verify() else {
+                panic!("{flag} {value} was accepted");
+            };
+            let err = err.to_string();
+            assert!(err.contains(flag), "{flag} {value}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_zero_read_chunk_is_refused_by_name() {
+        let bin = parse(&["seedvc", "--chunk", "0", "-r", "me.wav"]);
+        let err = bin.filter.verify().unwrap_err().to_string();
+        assert!(err.contains("--chunk"), "{err}");
+    }
+
+    #[test]
+    fn a_block_that_carries_no_new_audio_is_refused_by_name() {
+        let bin = parse(&["seedvc", "--block-frames", "0", "-r", "me.wav"]);
+        let err = bin.filter.verify().unwrap_err().to_string();
+        assert!(err.contains("--block-frames"), "{err}");
+    }
+
+    #[test]
+    fn a_reference_cap_the_analysis_cannot_use_is_refused_by_name() {
+        for value in ["0", "31", "inf", "nan"] {
+            let a = convert(&["seedvc", "convert", "--reference-secs", value, "in.wav"]);
+            let err = a.verify().unwrap_err().to_string();
+            assert!(err.contains("--reference-secs"), "{value}: {err}");
+        }
+    }
+
+    #[test]
+    fn the_reference_cap_is_checked_by_both_hosting_commands() {
+        // The check lives on `ModelOpts`, which both the filter and `convert`
+        // flatten — adding it to one is the silent half, since both analyse
+        // the reference through the same function. Pinned here so a `verify`
+        // that stops delegating shows up.
+        let bin = parse(&["seedvc", "--reference-secs", "31", "-r", "me.wav"]);
+        let err = bin.filter.verify().unwrap_err().to_string();
+        assert!(err.contains("--reference-secs"), "{err}");
+        let a = convert(&["seedvc", "convert", "--reference-secs", "31", "in.wav"]);
+        assert!(
+            a.verify()
+                .unwrap_err()
+                .to_string()
+                .contains("--reference-secs")
+        );
+        // The cap the engine itself defaults to has to survive its own check.
+        assert_eq!(
+            seedvc_core::reference::MAX_REFERENCE_SECONDS, 30.0,
+            "the message above quotes this, so a change to it changes the advice"
+        );
+        convert(&["seedvc", "convert", "in.wav"]).verify().unwrap();
+    }
+
+    // ---------------------------------------------------------------------
+    // A flag that is typed, accepted, and then dropped on the way into the
+    // engine — which `-h` cannot show and the engine cannot report, because it
+    // never learns the value existed. Each knob is set to something that is
+    // NOT its default, so a conversion that hard-codes a field or forgets one
+    // fails rather than coincidentally agreeing.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn every_sampler_knob_reaches_the_engine() {
+        let a = convert(&[
+            "seedvc",
+            "convert",
+            "--steps",
+            "7",
+            "--guidance",
+            "-1",
+            "--length-adjust",
+            "1.25",
+            "--seed",
+            "99",
+            "in.wav",
+        ]);
+        let opts = a.sampler.options();
+        assert_eq!(opts.sampler.steps, 7);
+        assert_eq!(opts.sampler.guidance, -1.0);
+        assert_eq!(opts.length_adjust, 1.25);
+        assert_eq!(opts.seed, 99);
+    }
+
+    #[test]
+    fn the_sampler_defaults_are_the_ones_the_engine_would_have_picked() {
+        // `SamplerOpts` restates the engine's own defaults rather than
+        // deferring to them, so the two can drift in silence while `-h` goes
+        // on printing whichever clap holds.
+        let got = convert(&["seedvc", "convert", "in.wav"]).sampler.options();
+        let want = seedvc_core::ConvertOptions::default();
+        assert_eq!(got.sampler.steps, want.sampler.steps);
+        assert_eq!(got.sampler.guidance, want.sampler.guidance);
+        assert_eq!(got.length_adjust, want.length_adjust);
+        assert_eq!(got.seed, want.seed);
+    }
+
+    #[test]
+    fn the_block_flag_is_the_only_thing_it_moves_in_the_stream_geometry() {
+        // `params()` overrides one field of the preset and inherits the rest,
+        // so a value that is not the default has to arrive while every other
+        // field stays where `realtime()` put it.
+        let bin = parse(&["seedvc", "--block-frames", "64", "-r", "me.wav"]);
+        let (got, preset) = (bin.filter.params(), seedvc_core::StreamParams::realtime());
+        assert_eq!(got.block, 64);
+        assert_ne!(got.block, preset.block, "64 has to differ from the default");
+        assert_eq!(got.crossfade, preset.crossfade);
+        // Omitting the flag is the preset's own number through the same code
+        // path, not a value converted back and forth.
+        let bin = parse(&["seedvc", "-r", "me.wav"]);
+        assert_eq!(bin.filter.params().block, preset.block);
+    }
+
+    // ---------------------------------------------------------------------
+    // The reference is the whole speaker specification, so its absence is the
+    // one thing that must be reported before anything is fetched.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn a_missing_reference_is_refused_with_the_flag_that_supplies_it() {
+        // Clap cannot mark it required — these options sit beside the
+        // subcommands, so `required` would demand one of `download` and
+        // `completions` too — which is why the check is here at all.
+        let bin = parse(&["seedvc"]);
+        let err = bin.filter.models.reference().unwrap_err().to_string();
+        assert!(err.contains("--reference"), "{err}");
+        let a = convert(&["seedvc", "convert", "in.wav"]);
+        assert!(
+            a.models
+                .reference()
+                .unwrap_err()
+                .to_string()
+                .contains("--reference")
+        );
+    }
+
+    #[test]
+    fn download_and_completions_do_not_demand_a_reference() {
+        // The other half of the same trade: `-r` being optional to clap is
+        // what lets these two parse at all, and that is the property the
+        // check above pays for.
+        assert!(Bin::try_parse_from(["seedvc", "download"]).is_ok());
+    }
+
+    /// There is no `train`, and its absence is the engine's defining property
+    /// rather than a gap — a 1-30 s reference clip is the whole speaker
+    /// specification. Pinned so somebody adding one has to delete a test that
+    /// says why.
+    #[test]
+    fn there_is_no_train_subcommand() {
+        assert!(Bin::try_parse_from(["seedvc", "train", "clips/"]).is_err());
+    }
+}

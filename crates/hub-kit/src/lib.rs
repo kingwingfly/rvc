@@ -1379,6 +1379,49 @@ mod tests {
         );
     }
 
+    /// Serializes every test that touches the **real** process environment.
+    ///
+    /// `std::env::set_var` is process-global and these tests share one binary,
+    /// so two of them running concurrently would read each other's variables.
+    /// Poison-tolerant on purpose: one panicking test must not take the rest
+    /// of the suite with it.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Set or clear one variable. `unsafe` in edition 2024 because it is not
+    /// thread-safe; [`ENV_LOCK`] is what makes each call site sound.
+    fn set(key: &str, value: Option<&str>) {
+        match value {
+            Some(v) => unsafe { std::env::set_var(key, v) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+    }
+
+    /// Puts the named variables back as they were when the test ends, including
+    /// on a panic — otherwise a failure here would change what every later test
+    /// in this binary reads.
+    struct EnvScope(Vec<(String, Option<std::ffi::OsString>)>);
+
+    impl EnvScope {
+        fn capture(keys: &[&str]) -> Self {
+            Self(
+                keys.iter()
+                    .map(|k| (k.to_string(), std::env::var_os(k)))
+                    .collect(),
+            )
+        }
+    }
+
+    impl Drop for EnvScope {
+        fn drop(&mut self) {
+            for (key, value) in &self.0 {
+                match value {
+                    Some(v) => unsafe { std::env::set_var(key, v) },
+                    None => unsafe { std::env::remove_var(key) },
+                }
+            }
+        }
+    }
+
     /// A fake environment, so precedence is tested without `set_var` racing the
     /// other tests in this binary.
     fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<std::ffi::OsString> + use<> {
@@ -1497,6 +1540,153 @@ mod tests {
             seedvc_paths(&dir).unwrap().bigvgan_config,
             dir.join("config.json")
         );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The precedence above is tested over an injected environment, which is
+    /// what keeps it from racing the rest of this binary — but that leaves one
+    /// thing unpinned: whether the two **public** entry points hand
+    /// [`resolve_cache_dir`] the right variable *names*. A typo there ("VOICE_CACHE"
+    /// for `VOICE_CACHE_DIR`, say) passes every test above, because none of them
+    /// goes through `cache_dir_for` at all.
+    ///
+    /// So this one mutates the real process environment, and everything that
+    /// does is serialized behind [`ENV_LOCK`]: `set_var` is process-global and
+    /// these fifteen tests share one binary.
+    #[test]
+    fn the_public_entry_points_read_the_documented_variables() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _restore = EnvScope::capture(&[
+            "RVC_CACHE_DIR",
+            "STT_CACHE_DIR",
+            "VOICE_CACHE_DIR",
+            "XDG_CACHE_HOME",
+        ]);
+
+        set("XDG_CACHE_HOME", Some("/xdg"));
+        set("VOICE_CACHE_DIR", None);
+        set("RVC_CACHE_DIR", None);
+        assert_eq!(default_cache_dir(), Path::new("/xdg/voice"));
+        assert_eq!(cache_dir_for("RVC_CACHE_DIR"), Path::new("/xdg/voice"));
+
+        // The toolkit-wide variable is read by both, and by that exact name.
+        set("VOICE_CACHE_DIR", Some("/shared"));
+        assert_eq!(default_cache_dir(), Path::new("/shared"));
+        assert_eq!(cache_dir_for("RVC_CACHE_DIR"), Path::new("/shared"));
+
+        // …and one engine's own beats it, without moving anybody else's.
+        set("RVC_CACHE_DIR", Some("/just-rvc"));
+        assert_eq!(cache_dir_for("RVC_CACHE_DIR"), Path::new("/just-rvc"));
+        assert_eq!(cache_dir_for("STT_CACHE_DIR"), Path::new("/shared"));
+        assert_eq!(default_cache_dir(), Path::new("/shared"));
+    }
+
+    /// A relative `XDG_CACHE_HOME` is ignored rather than joined, through the
+    /// public entry point as well — a CWD-relative cache is the exact failure
+    /// the split exists to prevent, so it is worth pinning where a user's
+    /// environment actually reaches it.
+    #[test]
+    fn a_relative_xdg_cache_home_is_ignored_by_the_public_entry_point() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _restore = EnvScope::capture(&[
+            "RVC_CACHE_DIR",
+            "VOICE_CACHE_DIR",
+            "XDG_CACHE_HOME",
+            "HOME",
+        ]);
+
+        set("RVC_CACHE_DIR", None);
+        set("VOICE_CACHE_DIR", None);
+        set("HOME", Some("/home/u"));
+        set("XDG_CACHE_HOME", Some("relative/path"));
+        assert_eq!(default_cache_dir(), Path::new("/home/u/.cache/voice"));
+        assert_eq!(cache_dir_for("RVC_CACHE_DIR"), Path::new("/home/u/.cache/voice"));
+
+        set("XDG_CACHE_HOME", Some("/absolute/path"));
+        assert_eq!(default_cache_dir(), Path::new("/absolute/path/voice"));
+    }
+
+    /// The warm-start bases live *inside* the shared cache, one directory down.
+    ///
+    /// This is the correction the module doc records: they used to go beside a
+    /// run's output, which made training *n* voices fetch the same 219 MB *n*
+    /// times. A base is the published upstream file, byte for byte, identical
+    /// for every voice ever trained on the machine — so it belongs where every
+    /// other reusable download does.
+    #[test]
+    fn the_warm_start_bases_live_inside_the_shared_cache() {
+        assert_eq!(
+            pretrained_dir(Path::new("/cache/voice")),
+            Path::new("/cache/voice/pretrained")
+        );
+        // Relative in, relative out: this joins, it does not resolve — the
+        // caller has already decided where the cache is.
+        assert_eq!(pretrained_dir(Path::new("c")), Path::new("c/pretrained"));
+    }
+
+    /// Which upstream files the three warm-start bases are. Each name is what
+    /// `fetch_pretrained` stores flat, so a change here moves a file on disk.
+    #[test]
+    fn the_warm_start_bases_are_the_published_upstream_files() {
+        for (base, file) in [
+            (default_pretrained_g(), "pretrained_v2/f0G48k.pth"),
+            (default_pretrained_d(), "pretrained_v2/f0D48k.pth"),
+        ] {
+            assert_eq!(base.owner, "lj1995");
+            assert_eq!(base.name, "VoiceConversionWebUI");
+            assert_eq!(base.file, file);
+        }
+        let s2d = default_gptsovits_s2d();
+        assert_eq!(s2d.owner, "lj1995");
+        assert_eq!(s2d.name, "GPT-SoVITS");
+        assert_eq!(s2d.file, "gsv-v2final-pretrained/s2D2333k.pth");
+    }
+
+    /// `pretrained/` is **flat**, under the upstream file's basename — not the
+    /// Hub's tree, and not the repo's own `pretrained_v2/` prefix. That is what
+    /// lets the directory be read by eye and hand-populated by anyone who
+    /// already holds the weights.
+    ///
+    /// Pinned through the reuse path, which needs no network: a file placed at
+    /// the flat name must be *found*. Un-flatten the layout — store it under
+    /// `pretrained_v2/f0G48k.pth`, or under the full `owner/name/file` — and the
+    /// hand-placed copy stops matching, so this call goes to the Hub instead of
+    /// returning, which is exactly the regression worth catching.
+    #[tokio::test]
+    async fn a_hand_placed_base_is_found_under_its_flat_upstream_name() {
+        let dir = std::env::temp_dir().join(format!(
+            "hub-kit-pretrained-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        for (base, flat) in [
+            (default_pretrained_g(), "f0G48k.pth"),
+            (default_pretrained_d(), "f0D48k.pth"),
+            (default_gptsovits_s2d(), "s2D2333k.pth"),
+        ] {
+            // Not the repo's `pretrained_v2/` prefix, and not a Hub tree: the
+            // basename, directly in `dir`.
+            let dest = dir.join(flat);
+            std::fs::write(&dest, b"not really weights").unwrap();
+            assert_eq!(
+                fetch_pretrained(&base, &dir).await.unwrap(),
+                dest,
+                "{} must be reused from its flat name",
+                base.file
+            );
+        }
+
+        // The upstream names are distinct across engines, which is what lets one
+        // directory serve all of them — three files, three names, no collision.
+        let mut names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        names.sort();
+        assert_eq!(names.len(), 3, "{names:?}");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
