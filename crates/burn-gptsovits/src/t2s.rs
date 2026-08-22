@@ -196,6 +196,13 @@ impl<B: Backend> FusedAttention<B> {
         // CLAUDE.md, **`swap_dims` on LibTorch returns a view burn-tch forgets
         // the provenance of**, and `tch_aliasing` below.
         let q = heads(q / (d_head as f64).sqrt(), seq);
+        // `k` and `v` need no such ordering, and the reason is worth stating
+        // rather than leaving to the reader: `cache.k` and `cache.v` hold those
+        // buffers for the whole call, so both head views below alias live
+        // tensors — but each is consumed only by `matmul`, which allocates its
+        // output and mutates neither operand. That is the entire clearance. An
+        // in-place-capable op moved onto either view would scribble on the
+        // cache, and the next decode step would attend over the damage.
         let mut scores = q.matmul(heads(k, n_kv).swap_dims(2, 3));
         if let Some(mask) = mask {
             scores = scores.mask_fill(mask.unsqueeze::<4>(), f32::NEG_INFINITY);

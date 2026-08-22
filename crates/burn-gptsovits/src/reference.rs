@@ -192,6 +192,14 @@ impl<B: Backend> ReferenceEncoder<B> {
             h = mish(layer.fc.forward(h));
         }
 
+        // This is the one place in the crate where the write burn-tch forgets
+        // about actually happens: `Conv1dGlu::forward` ends in
+        // `x + signal * sigmoid(gate)`, and on LibTorch that add mutates this
+        // transposed view in place, straight through into the spectral stack's
+        // output (CLAUDE.md, **`swap_dims` on LibTorch returns a view burn-tch
+        // forgets the provenance of**). It is benign because that output is
+        // moved in here and no other handle to it survives, so the write lands
+        // in a buffer nothing else reads — not because the view is inert.
         let mut h = h.swap_dims(1, 2);
         for layer in &self.temporal {
             h = layer.forward(h);
@@ -241,5 +249,113 @@ mod tests {
         assert_eq!(out.dims(), [1, 8, 10]);
         let v: Vec<f32> = out.into_data().to_vec().unwrap();
         assert!(v.iter().all(|x| x.is_finite()));
+    }
+}
+
+/// The backend that has the aliasing defect, against one that does not.
+///
+/// `t2s.rs` carries the same cross-backend check for `FusedAttention`; this is
+/// the crate's other place where a `swap_dims` view is mutated **in place** —
+/// see the comment on the transpose in [`ReferenceEncoder::forward`], which is
+/// what the write there lands on. It duplicates that file's fill harness rather
+/// than sharing it, because a `cfg(test)` module is private to its own file and
+/// reaching across would make one test module part of the crate's internal
+/// surface.
+#[cfg(all(test, feature = "tch"))]
+mod tch_aliasing {
+    use super::*;
+    use burn::module::{ModuleMapper, Param};
+    use burn::tensor::TensorData;
+
+    type Tch = burn::backend::LibTorch<f32>;
+    type Nd = burn_ndarray::NdArray;
+
+    /// Small, and still wide enough that `n_head` divides `hidden` into more
+    /// than one head — a single head makes the transposed view degenerate.
+    fn tiny() -> ReferenceConfig {
+        ReferenceConfig {
+            in_dim: 24,
+            hidden: 16,
+            out_dim: 8,
+            kernel_size: 5,
+            n_head: 2,
+        }
+    }
+
+    /// A fixed LCG, so the two backends get byte-identical weights without a
+    /// record round-trip. `Distribution` is not required to draw the same
+    /// numbers on two backends, and a test that assumed it would fail for a
+    /// reason that is not the one it is for.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn take(&mut self, n: usize) -> Vec<f32> {
+            (0..n)
+                .map(|_| {
+                    self.0 = self
+                        .0
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    ((self.0 >> 40) as f32 / 8388608.0) - 1.0
+                })
+                .collect()
+        }
+    }
+
+    /// Replaces every parameter with that sequence, in module-tree order.
+    ///
+    /// Initialised weights would not do: the point is to make every stage of the
+    /// encoder carry signal, so a corrupted intermediate has somewhere to show.
+    struct Fill(Lcg);
+
+    impl<B: Backend> ModuleMapper<B> for Fill {
+        fn map_float<const D: usize>(&mut self, param: Param<Tensor<B, D>>) -> Param<Tensor<B, D>> {
+            let (device, shape) = (param.val().device(), param.val().shape());
+            let data = TensorData::new(self.0.take(shape.num_elements()), shape.clone());
+            param.map(move |_| Tensor::from_data(data.clone(), &device))
+        }
+    }
+
+    fn speaker<B: Backend>(cfg: &ReferenceConfig, device: &B::Device) -> Vec<f32> {
+        let enc = ReferenceEncoder::<B>::new(cfg, device).map(&mut Fill(Lcg(1)));
+        let frames = 12;
+        let x = Tensor::<B, 3>::from_data(
+            TensorData::new(Lcg(7).take(cfg.in_dim * frames), [1, cfg.in_dim, frames]),
+            device,
+        );
+        enc.forward(x).into_data().to_vec().unwrap()
+    }
+
+    /// LibTorch and `ndarray` are two independent implementations of the same
+    /// arithmetic, so on one set of weights and one input they have to agree.
+    ///
+    /// That is the reading that catches an aliased view whatever it corrupts:
+    /// `ndarray` refcounts its buffers correctly, so it computes what the code
+    /// says while LibTorch computes what the code plus the defect say. The
+    /// residual add inside `Conv1dGlu` writes *through* the transpose in
+    /// `ReferenceEncoder::forward`; today the buffer it reaches is owned by that
+    /// expression alone, and this is what reports it if a second handle on the
+    /// spectral stack's output ever arrives.
+    #[test]
+    fn libtorch_agrees_with_ndarray_through_the_gated_convolutions() {
+        let cfg = tiny();
+        let want = speaker::<Nd>(&cfg, &Default::default());
+        let got = speaker::<Tch>(&cfg, &Default::default());
+
+        assert!(
+            got.iter().all(|v| v.is_finite()),
+            "LibTorch speaker vector must be finite"
+        );
+        assert_eq!(want.len(), got.len(), "both backends give one vector");
+        let worst = want
+            .iter()
+            .zip(&got)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        let scale = want.iter().fold(0.0f32, |a, b| a.max(b.abs()));
+        assert!(
+            worst < 1e-4 * scale.max(1.0),
+            "the two backends differ by {worst} on a vector peaking at {scale}"
+        );
     }
 }
