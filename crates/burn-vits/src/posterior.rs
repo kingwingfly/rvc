@@ -103,7 +103,9 @@ mod tests {
         let (m, logs) = pe.forward(x, g);
 
         let want = |base: usize| -> Vec<f32> {
-            (0..out).flat_map(|c| (0..t).map(move |_| (base + c) as f32)).collect()
+            (0..out)
+                .flat_map(|c| (0..t).map(move |_| (base + c) as f32))
+                .collect()
         };
         let (m, logs) = (flat(m), flat(logs));
         assert!(m.iter().chain(&logs).all(|v| v.is_finite()));

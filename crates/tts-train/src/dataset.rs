@@ -405,7 +405,11 @@ mod tests {
             .touch("c.txt");
 
         let (found, log) = logged(|| pairs(&dir.0).expect("one pair is enough to train on"));
-        assert_eq!(dir.stems(&found), ["a.wav"], "only the lower-case wav pairs");
+        assert_eq!(
+            dir.stems(&found),
+            ["a.wav"],
+            "only the lower-case wav pairs"
+        );
 
         // Named individually: a count of "2 skipped" is not something a reader
         // can act on, and acting on it means opening the file that was missed.
@@ -419,7 +423,10 @@ mod tests {
         // The contrast that makes the test above mean something: this arm has
         // reported itself since the function was written, and a fix that made
         // the other half loud must not have made this one quiet.
-        let dir = Corpus::new("orphan-audio").touch("a.wav").touch("b.wav").touch("b.txt");
+        let dir = Corpus::new("orphan-audio")
+            .touch("a.wav")
+            .touch("b.wav")
+            .touch("b.txt");
 
         let (found, log) = logged(|| pairs(&dir.0).expect("b is a pair"));
         assert_eq!(dir.stems(&found), ["b.wav"]);
@@ -457,7 +464,9 @@ mod tests {
         // format dropped from it fails nothing else.
         let mut dir = Corpus::new("extensions");
         for ext in ["wav", "mp3", "flac", "m4a", "ogg", "opus"] {
-            dir = dir.touch(&format!("a.{ext}")).touch(&format!("a.{ext}.txt"));
+            dir = dir
+                .touch(&format!("a.{ext}"))
+                .touch(&format!("a.{ext}.txt"));
         }
         // Each file above is `a.<ext>`, whose transcript is `a.txt` — write it
         // once rather than six near-identical names.
@@ -496,7 +505,12 @@ mod tests {
 
         for c in [clip(5, 7), clip(4, 100), clip(1, 1), clip(3, 3), c_no_audio] {
             let frames = c.frames();
-            assert_eq!(frames % 2, 0, "odd frame count from {} tokens", c.tokens.len());
+            assert_eq!(
+                frames % 2,
+                0,
+                "odd frame count from {} tokens",
+                c.tokens.len()
+            );
             assert!(frames / 2 <= c.tokens.len(), "would slice past the tokens");
             if !c.audio.is_empty() {
                 assert!(
@@ -528,7 +542,7 @@ mod tests {
         // missing and reads as a clean load. `covered` therefore asks about
         // `errors` first, and this is what pins that order — a report with a
         // shape mismatch and an otherwise perfect count must still be refused.
-        use burn::store::ApplyError;
+        use burn_kit::{ApplyError, ApplyResult};
 
         let report = |applied: Vec<String>, missing: Vec<(String, String)>, errors| ApplyResult {
             applied,
@@ -561,7 +575,10 @@ mod tests {
             .expect_err("an empty apply must not read as full coverage");
 
         // And the ordinary good load still passes.
-        covered("cnhubert", &report(vec!["a".into()], Vec::new(), Vec::new()))
-            .expect("a complete apply is what this is meant to accept");
+        covered(
+            "cnhubert",
+            &report(vec!["a".into()], Vec::new(), Vec::new()),
+        )
+        .expect("a complete apply is what this is meant to accept");
     }
 }

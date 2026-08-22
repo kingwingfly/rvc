@@ -189,7 +189,11 @@ impl SttArgs {
             anyhow::ensure!(
                 v.is_finite(),
                 "{name} must be a finite number of {}, not {v}",
-                if name == "--silence-db" { "dBFS" } else { "seconds" }
+                if name == "--silence-db" {
+                    "dBFS"
+                } else {
+                    "seconds"
+                }
             );
         }
         // 30 s is not a tuning choice: it is the width of Whisper's encoder
@@ -441,7 +445,10 @@ mod tests {
         // Both forms have to reach the slicer.
         let a = parse(&["stt", "--silence-db", "-50"]);
         assert_eq!(a.transcribe.silence_db, -50.0);
-        assert_eq!(parse(&["stt", "--silence-db=-50"]).transcribe.silence_db, -50.0);
+        assert_eq!(
+            parse(&["stt", "--silence-db=-50"]).transcribe.silence_db,
+            -50.0
+        );
     }
 
     #[test]
@@ -508,12 +515,21 @@ mod tests {
         // so a cap above it would produce transcripts that silently stop early
         // while `--format jsonl` reported the segment's full length.
         let a = filter(&["stt", "--max-clip", "31"]);
-        let msg = format!("{:#}", a.verify().expect_err("31 s cannot fit a 30 s window"));
-        assert!(msg.contains("--max-clip"), "the message must name the flag: {msg}");
+        let msg = format!(
+            "{:#}",
+            a.verify().expect_err("31 s cannot fit a 30 s window")
+        );
+        assert!(
+            msg.contains("--max-clip"),
+            "the message must name the flag: {msg}"
+        );
         // And the boundary itself is legal, so the default is reachable.
         assert!(filter(&["stt"]).verify().is_ok());
         let edge = filter(&["stt", "--max-clip", "30"]);
-        assert!(edge.verify().is_ok(), "the window's own width must be accepted");
+        assert!(
+            edge.verify().is_ok(),
+            "the window's own width must be accepted"
+        );
     }
 
     #[test]
@@ -522,8 +538,14 @@ mod tests {
         // being under `--min-clip`: a run that transcribes nothing and reports
         // no reason.
         let a = filter(&["stt", "--min-clip", "20", "--max-clip", "10"]);
-        let msg = format!("{:#}", a.verify().expect_err("min above max must be refused"));
-        assert!(msg.contains("--min-clip") && msg.contains("--max-clip"), "{msg}");
+        let msg = format!(
+            "{:#}",
+            a.verify().expect_err("min above max must be refused")
+        );
+        assert!(
+            msg.contains("--min-clip") && msg.contains("--max-clip"),
+            "{msg}"
+        );
     }
 
     #[test]
@@ -551,7 +573,10 @@ mod tests {
         // produces a segment over 30 s at all, and at 15.1 the worst case is
         // exactly 30.20 s.
         let a = filter(&["stt", "--min-clip", "15.1", "--max-clip", "30"]);
-        let msg = format!("{:#}", a.verify().expect_err("15.1 defeats splitting at 30"));
+        let msg = format!(
+            "{:#}",
+            a.verify().expect_err("15.1 defeats splitting at 30")
+        );
         assert!(
             msg.contains("--min-clip") && msg.contains("--max-clip"),
             "the message must name both flags that interact: {msg}"
@@ -749,8 +774,15 @@ mod tests {
         // on demand, so the two have to be pointed at the same place by the
         // same flags — otherwise prefetching leaves the first real run
         // downloading anyway.
-        let Some(SttCommand::Download(d)) =
-            parse(&["stt", "download", "--repo", "me/whisper", "--cache-dir", "/tmp/c"]).command
+        let Some(SttCommand::Download(d)) = parse(&[
+            "stt",
+            "download",
+            "--repo",
+            "me/whisper",
+            "--cache-dir",
+            "/tmp/c",
+        ])
+        .command
         else {
             panic!("expected download");
         };

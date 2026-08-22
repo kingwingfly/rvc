@@ -290,10 +290,22 @@ mod tests {
         let device = Default::default();
         let d = DiscriminatorS::<B>::new(&device);
         let padded = |t: usize| d.forward(ramp(t, &device)).1[0].dims()[2];
-        assert_eq!(padded(128), 128, "a pad of 129 into 128 samples must be refused");
-        assert_eq!(padded(129), 257, "a pad of 128 into 129 samples must be taken");
+        assert_eq!(
+            padded(128),
+            128,
+            "a pad of 129 into 128 samples must be refused"
+        );
+        assert_eq!(
+            padded(129),
+            257,
+            "a pad of 128 into 129 samples must be taken"
+        );
         // And the refused case still runs: it is a lost alignment, not a panic.
-        assert!(flat(d.forward(ramp(128, &device)).0).iter().all(|v| v.is_finite()));
+        assert!(
+            flat(d.forward(ramp(128, &device)).0)
+                .iter()
+                .all(|v| v.is_finite())
+        );
     }
 
     /// The period fold is a partition: with the waveform padded to a multiple

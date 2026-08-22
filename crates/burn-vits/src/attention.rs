@@ -408,11 +408,7 @@ mod tests {
     fn rel_to_abs_undoes_abs_to_rel() {
         let device = Default::default();
         let (b, h, l) = (2, 3, 5);
-        let x = Tensor::<B, 4>::random(
-            [b, h, l, l],
-            Distribution::Normal(0.0, 1.0),
-            &device,
-        );
+        let x = Tensor::<B, 4>::random([b, h, l, l], Distribution::Normal(0.0, 1.0), &device);
         let before = flat(x.clone());
         let after = flat(MultiHeadAttention::<B>::rel_to_abs(
             MultiHeadAttention::<B>::abs_to_rel(x),
@@ -433,7 +429,10 @@ mod tests {
             .zip(&after)
             .map(|(a, b)| (a - b).abs())
             .fold(0.0f32, f32::max);
-        assert!(changed > 0.1, "the two directions are not inverses either way");
+        assert!(
+            changed > 0.1,
+            "the two directions are not inverses either way"
+        );
     }
 
     /// Scalar softmax attention written by hand, against the tensor path with
@@ -500,9 +499,7 @@ mod tests {
             for i in 0..t {
                 let logits: Vec<f64> = (0..t)
                     .map(|j| {
-                        let dot: f64 = (0..dk)
-                            .map(|d| q[ch(d) * t + i] * k[ch(d) * t + j])
-                            .sum();
+                        let dot: f64 = (0..dk).map(|d| q[ch(d) * t + i] * k[ch(d) * t + j]).sum();
                         dot / (dk as f64).sqrt()
                     })
                     .collect();
@@ -550,10 +547,19 @@ mod tests {
 
         let apart = |a: &[f32], b: &[f32]| {
             assert!(a.iter().chain(b).all(|v| v.is_finite()));
-            a.iter().zip(b).map(|(p, q)| (p - q).abs()).fold(0.0f32, f32::max)
+            a.iter()
+                .zip(b)
+                .map(|(p, q)| (p - q).abs())
+                .fold(0.0f32, f32::max)
         };
-        assert!(apart(&neither, &key_only) > 1e-4, "the key table does nothing");
-        assert!(apart(&neither, &value_only) > 1e-4, "the value table does nothing");
+        assert!(
+            apart(&neither, &key_only) > 1e-4,
+            "the key table does nothing"
+        );
+        assert!(
+            apart(&neither, &value_only) > 1e-4,
+            "the value table does nothing"
+        );
         assert!(
             apart(&key_only, &value_only) > 1e-4,
             "the two tables are being read from the same place"
@@ -600,8 +606,8 @@ mod tests {
             }
             // All positive, so the ReLU between the two convolutions is the
             // identity and the shift is all that is left.
-            let x = Tensor::<B, 1>::from_floats([1.0, 2.0, 3.0, 4.0, 5.0], &device)
-                .reshape([1, 1, 5]);
+            let x =
+                Tensor::<B, 1>::from_floats([1.0, 2.0, 3.0, 4.0, 5.0], &device).reshape([1, 1, 5]);
             let got = flat(ffn.forward(x));
             assert!(
                 worst(&got, &[0.0, 0.0, 1.0, 2.0, 3.0]) == 0.0,

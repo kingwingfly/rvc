@@ -1589,19 +1589,18 @@ mod tests {
     #[test]
     fn a_relative_xdg_cache_home_is_ignored_by_the_public_entry_point() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let _restore = EnvScope::capture(&[
-            "RVC_CACHE_DIR",
-            "VOICE_CACHE_DIR",
-            "XDG_CACHE_HOME",
-            "HOME",
-        ]);
+        let _restore =
+            EnvScope::capture(&["RVC_CACHE_DIR", "VOICE_CACHE_DIR", "XDG_CACHE_HOME", "HOME"]);
 
         set("RVC_CACHE_DIR", None);
         set("VOICE_CACHE_DIR", None);
         set("HOME", Some("/home/u"));
         set("XDG_CACHE_HOME", Some("relative/path"));
         assert_eq!(default_cache_dir(), Path::new("/home/u/.cache/voice"));
-        assert_eq!(cache_dir_for("RVC_CACHE_DIR"), Path::new("/home/u/.cache/voice"));
+        assert_eq!(
+            cache_dir_for("RVC_CACHE_DIR"),
+            Path::new("/home/u/.cache/voice")
+        );
 
         set("XDG_CACHE_HOME", Some("/absolute/path"));
         assert_eq!(default_cache_dir(), Path::new("/absolute/path/voice"));

@@ -25,6 +25,20 @@ pub fn resolve_backend(backend: Backend, model: &Path) -> Backend {
 /// Build a streaming [`Converter`] over the selected backend. Shared by
 /// `convert` (batch preset) and the bare filter (realtime preset); the same
 /// block/overlap/crossfade code drives either the ONNX or the Burn generator.
+/// `-m` names a file that is not there: a message, not two downloads.
+///
+/// `ModelOpts::model()` says only that the flag was *given*. This used to be
+/// checked after `resolve_feature_models`, so a typo'd path fetched ContentVec
+/// and RMVPE first — around 200 MB to report a typo.
+fn ensure_generator_exists(model: &std::path::Path) -> Result<()> {
+    anyhow::ensure!(
+        model.exists(),
+        "generator weights not found: {} (train one with the `train` subcommand)",
+        model.display()
+    );
+    Ok(())
+}
+
 pub async fn build_converter(
     opts: &ModelOpts,
     feature_opts: FeatureBackendOpts,
@@ -77,18 +91,22 @@ pub async fn build_converter(
             mixed.join(" and "),
         );
 
+        // Before any fetch, for the same reason the refusal above is: whether
+        // `-m` names a file that exists is knowable from the command line
+        // alone. It used to be checked after `resolve_feature_models`, so a
+        // typo'd path downloaded ContentVec and RMVPE first — around 200 MB
+        // spent to report a typo. It sits *after* the mixing check because a
+        // command that is wrong in both ways should hear about the flags it
+        // can fix rather than about a path it may have meant to create.
+        ensure_generator_exists(model)?;
         let (content, rmvpe) = resolve_feature_models(opts, features).await?;
         let cfg = build_rvc_config(opts, content, rmvpe)?;
         let onnx = RvcModel::load(cfg).context("failed to load RVC models")?;
         return Ok(Converter::new(onnx, params, conv_params).with_denoise(denoise));
     }
 
+    ensure_generator_exists(model)?;
     let (content, rmvpe) = resolve_feature_models(opts, features).await?;
-    anyhow::ensure!(
-        model.exists(),
-        "generator weights not found: {} (train one with the `train` subcommand)",
-        model.display()
-    );
     tracing::info!(
         "loading Burn generator from {} ({backend}, device {device})",
         model.display(),
@@ -318,4 +336,343 @@ pub fn parse_model_ref(s: &str) -> Result<ModelRef> {
         .split_once('/')
         .context("expected format `owner/name:file`")?;
     Ok(ModelRef::new(owner, name, file))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::args::CrossfadeShape;
+
+    /// A scratch directory of this test's own. Every test here that names a
+    /// cache wants one nothing has ever downloaded into, because "is it still
+    /// empty afterwards" is the assertion.
+    fn scratch(what: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "rvc-cli-{what}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    fn model_opts(model: &Path, cache: &Path) -> ModelOpts {
+        ModelOpts {
+            model: Some(model.to_path_buf()),
+            model_sr: 48_000,
+            content: None,
+            rmvpe: None,
+            cache_dir: cache.to_path_buf(),
+            speaker_id: 0,
+            f0_threshold: rvc_core::FeatureExtractor::F0_THRESHOLD,
+        }
+    }
+
+    fn feature_opts(content: Option<Backend>, rmvpe: Option<Backend>) -> FeatureBackendOpts {
+        FeatureBackendOpts {
+            content_vec_backend: content,
+            rmvpe_backend: rmvpe,
+        }
+    }
+
+    /// Whether anything at all landed in the cache. The refusals below are only
+    /// worth having if they cost a message rather than two downloads, and this
+    /// is the only way to say that from inside a test.
+    fn is_empty(dir: &Path) -> bool {
+        std::fs::read_dir(dir)
+            .map(|mut d| d.next().is_none())
+            .unwrap_or(true)
+    }
+
+    /// The engine-specific half of backend resolution: the generator's weights
+    /// are one file, so "is this an ONNX artefact" is its extension. Everything
+    /// else `Backend::resolve` decides, and a named backend is never
+    /// substituted — including the case that reads backwards, an explicit Burn
+    /// backend against an `.onnx` path, which must survive to be *refused*
+    /// downstream rather than being quietly rewritten to `onnx` here.
+    #[test]
+    fn the_extension_decides_auto_and_nothing_else() {
+        assert_eq!(
+            resolve_backend(Backend::Auto, Path::new("voice.onnx")),
+            Backend::Onnx
+        );
+        for named in [Backend::Onnx, Backend::Cuda, Backend::Tch, Backend::Wgpu] {
+            assert_eq!(
+                resolve_backend(named, Path::new("voice.onnx")),
+                named,
+                "{named} against .onnx"
+            );
+            assert_eq!(
+                resolve_backend(named, Path::new("voice.safetensors")),
+                named,
+                "{named} against .safetensors"
+            );
+        }
+        // `auto` on Burn weights resolves on hardware alone, so the only thing
+        // this can assert is what it must never become.
+        assert_ne!(
+            resolve_backend(Backend::Auto, Path::new("voice.safetensors")),
+            Backend::Onnx
+        );
+        assert_ne!(
+            resolve_backend(Backend::Auto, Path::new("voice.safetensors")),
+            Backend::Auto
+        );
+    }
+
+    /// The one combination that cannot be mixed, and the one property that
+    /// makes refusing it worth anything: **it costs a message, not two
+    /// downloads**. `RvcModel` is one fused pipeline built from a single
+    /// `RvcConfig` naming all three graphs at once, so there is nowhere to put
+    /// a feature model built elsewhere; and the generic path below cannot host
+    /// an ONNX generator either, since every constructor that takes a prebuilt
+    /// `FeatureExtractor` is a Burn one.
+    ///
+    /// The empty cache is the ordering assertion. Widen the condition back into
+    /// the `if` and this falls through to `Backend::Onnx => unreachable!()` —
+    /// two downloads and two model loads after the flag that caused it was
+    /// parsed, which is the panic this `ensure!` replaced.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_onnx_generator_refuses_a_burn_feature_model_before_fetching_anything() {
+        for (flag, opts) in [
+            (
+                "--content-vec-backend",
+                feature_opts(Some(Backend::Tch), None),
+            ),
+            ("--rmvpe-backend", feature_opts(None, Some(Backend::Cuda))),
+        ] {
+            let cache = scratch("mix");
+            // The generator is not even on disk: the refusal must come first,
+            // so *which* error arrives says which check ran first.
+            let err = build_converter(
+                &model_opts(Path::new("voice.onnx"), &cache),
+                opts,
+                Backend::Onnx,
+                burn_kit::DeviceSpec::Auto,
+                0,
+                StreamParams::batch(),
+                None,
+            )
+            .await
+            .err()
+            .expect("a Burn feature model under an .onnx generator must be refused")
+            .to_string();
+            assert!(err.contains(flag), "{err}");
+            assert!(err.contains(".onnx"), "{err}");
+            assert!(
+                is_empty(&cache),
+                "{flag}: the refusal fetched something into {}",
+                cache.display()
+            );
+            let _ = std::fs::remove_dir_all(&cache);
+        }
+    }
+
+    /// Both flags mixed names both, rather than the first one found — a message
+    /// that names one of two offending flags sends the user round twice.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn both_offending_flags_are_named_at_once() {
+        let cache = scratch("mix-both");
+        let err = build_converter(
+            &model_opts(Path::new("voice.onnx"), &cache),
+            feature_opts(Some(Backend::Tch), Some(Backend::Tch)),
+            Backend::Auto,
+            burn_kit::DeviceSpec::Auto,
+            0,
+            StreamParams::batch(),
+            None,
+        )
+        .await
+        .err()
+        .expect("two Burn feature models under an .onnx generator must be refused")
+        .to_string();
+        assert!(err.contains("--content-vec-backend"), "{err}");
+        assert!(err.contains("--rmvpe-backend"), "{err}");
+        assert!(is_empty(&cache), "the refusal fetched something");
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    /// `--content-vec-backend onnx` beside an `.onnx` generator is not a mix,
+    /// so it must *not* be refused — the check has to be about disagreement,
+    /// not about the flag having been typed. Reached by letting the fetch fail
+    /// against an unusable cache: whatever error comes back, it is not the
+    /// mixing refusal.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn naming_onnx_out_loud_is_not_a_mix() {
+        let blocker = std::env::temp_dir().join(format!(
+            "rvc-cli-notdir-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&blocker, b"a file, not a directory").expect("blocker");
+        // A cache path *under a regular file*: nothing can be written there, so
+        // the fetch fails immediately and without a network round trip.
+        let cache = blocker.join("cache");
+
+        let err = build_converter(
+            &model_opts(Path::new("voice.onnx"), &cache),
+            feature_opts(Some(Backend::Onnx), Some(Backend::Auto)),
+            Backend::Onnx,
+            burn_kit::DeviceSpec::Auto,
+            0,
+            StreamParams::batch(),
+            None,
+        )
+        .await
+        .err()
+        .expect("an unusable cache cannot produce a converter")
+        .to_string();
+        assert!(
+            !err.contains("cannot name a Burn backend"),
+            "onnx named out loud was read as a mix: {err}"
+        );
+        let _ = std::fs::remove_file(&blocker);
+    }
+
+    /// Every field of the fused pipeline's config, value by value, each set to
+    /// something that is not its default — so a swapped pair or a forgotten
+    /// line fails rather than coincidentally agreeing.
+    ///
+    /// `f0_threshold` is the one with history: the fused pipeline builds its own
+    /// RMVPE from this config rather than from `build_pitch_estimator`, so miss
+    /// it here and `--f0-threshold` parses, validates and does nothing whenever
+    /// `-m` names an `.onnx` export.
+    #[test]
+    fn every_model_option_reaches_the_fused_config() {
+        let dir = scratch("cfg");
+        let generator = dir.join("voice.onnx");
+        std::fs::write(&generator, b"").unwrap();
+
+        let mut opts = model_opts(&generator, &dir);
+        opts.model_sr = 40_000;
+        opts.speaker_id = 7;
+        opts.f0_threshold = 0.42;
+
+        let content = PathBuf::from("/content/vec.onnx");
+        let rmvpe = PathBuf::from("/rmvpe/rmvpe.onnx");
+        let cfg = build_rvc_config(&opts, content.clone(), rmvpe.clone()).expect("config");
+
+        assert_eq!(cfg.model_sr, 40_000);
+        assert_eq!(cfg.speaker_id, 7);
+        assert_eq!(cfg.f0_threshold, 0.42);
+        assert_eq!(cfg.models.generator, generator);
+        assert_eq!(cfg.models.content, content, "content path");
+        assert_eq!(cfg.models.rmvpe, rmvpe, "rmvpe path");
+        // The two feature paths are the pair a swap would hide: both are
+        // `PathBuf`s of resolved weights, so nothing downstream disagrees about
+        // the types and ORT would load each graph into the other's slot.
+        assert_ne!(cfg.models.content, cfg.models.rmvpe);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `-m` that names nothing must cost a message, not two downloads.
+    ///
+    /// `models.model()` only says the flag was *given*; whether the file is
+    /// there was checked after `resolve_feature_models`, so a typo'd path
+    /// fetched ContentVec and RMVPE first — around 200 MB to report a typo. The
+    /// empty cache afterwards is the whole assertion; the message is the easy
+    /// half.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_generator_that_is_not_there_is_reported_before_anything_is_fetched() {
+        for name in ["missing.onnx", "missing.safetensors"] {
+            let cache = scratch("missing");
+            let err = build_converter(
+                &model_opts(&cache.join(name), &cache),
+                feature_opts(None, None),
+                Backend::Auto,
+                burn_kit::DeviceSpec::Auto,
+                0,
+                StreamParams::batch(),
+                None,
+            )
+            .await
+            .err()
+            .expect("a generator that is not on disk cannot be loaded");
+            // The whole chain, not just the top: the refusal is raised where
+            // the path is known and may be wrapped by the loader above it.
+            let err = format!("{err:#}");
+            assert!(err.contains(name), "{err}");
+            assert!(
+                is_empty(&cache),
+                "{name}: reporting a missing generator fetched into {}",
+                cache.display()
+            );
+            let _ = std::fs::remove_dir_all(&cache);
+        }
+    }
+
+    /// The `owner/name:file` escape hatch, which is how a user points at a
+    /// mirror this crate has never heard of. `rsplit_once(':')` and
+    /// `split_once('/')` in that order is what lets a *file* carry slashes —
+    /// which the PyTorch ContentVec's `hubert_base/…` names do.
+    #[test]
+    fn a_model_override_splits_on_the_last_colon_and_the_first_slash() {
+        let r = parse_model_ref("lj1995/VoiceConversionWebUI:rmvpe.pt").unwrap();
+        assert_eq!(r.owner, "lj1995");
+        assert_eq!(r.name, "VoiceConversionWebUI");
+        assert_eq!(r.file, "rmvpe.pt");
+
+        let nested =
+            parse_model_ref("lj1995/VoiceConversionWebUI:hubert_base/config.json").unwrap();
+        assert_eq!(nested.name, "VoiceConversionWebUI");
+        assert_eq!(nested.file, "hubert_base/config.json");
+
+        for bad in ["no-colon-here", "nocolon/or/slash", "owner:file"] {
+            assert!(
+                parse_model_ref(bad).is_err(),
+                "{bad} is not `owner/name:file`"
+            );
+        }
+    }
+
+    /// The de-hiss switch is this engine's and the tuning is shared, so the two
+    /// halves have to meet correctly: off means `None` whatever the knobs say,
+    /// and on carries all three through. `patch_secs` and `research_secs` are
+    /// both small floats a millisecond apart — a swapped pair is invisible
+    /// everywhere except here.
+    #[test]
+    fn the_denoise_flags_reach_the_filter_only_when_the_stage_is_on() {
+        let tuning = cli_kit::DenoiseOpts {
+            denoise_strength: 0.05,
+            denoise_patch: 0.003,
+            denoise_research: 0.011,
+        };
+        assert!(
+            crate::args::DenoiseOpts {
+                denoise: false,
+                tuning,
+            }
+            .params()
+            .is_none(),
+            "the tuning flags must not turn the stage on by themselves"
+        );
+
+        let params = crate::args::DenoiseOpts {
+            denoise: true,
+            tuning,
+        }
+        .params()
+        .expect("--denoise turns the stage on");
+        assert_eq!(params.strength, 0.05);
+        assert_eq!(params.patch_secs, 0.003);
+        assert_eq!(params.research_secs, 0.011);
+    }
+
+    /// The crossfade curve is the one geometry value that is not a length, so
+    /// the three `resolve` tests in `args.rs` cannot catch a mis-mapped variant.
+    /// `linear` is the default and stays the default: every voice this toolkit
+    /// has converted was joined with it.
+    #[test]
+    fn the_crossfade_curve_maps_variant_for_variant() {
+        assert_eq!(
+            rvc_core::CrossfadeShape::from(CrossfadeShape::Linear),
+            rvc_core::CrossfadeShape::Linear
+        );
+        assert_eq!(
+            rvc_core::CrossfadeShape::from(CrossfadeShape::EqualPower),
+            rvc_core::CrossfadeShape::EqualPower
+        );
+    }
 }

@@ -565,11 +565,10 @@ mod tests {
         // clap type unchanged, so a subcommand added here appears there with no
         // edit to `voice-cli` at all.
         for argv in [
-            ["voice", "tts", "train", "corpus/"],
-            ["voice", "tts", "download", "--no-prosody", ""],
+            &["voice", "tts", "train", "corpus/"][..],
+            &["voice", "tts", "download", "--no-prosody"][..],
         ] {
-            let argv: Vec<&str> = argv.iter().copied().filter(|a| !a.is_empty()).collect();
-            Nested::try_parse_from(&argv).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+            Nested::try_parse_from(argv).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
         }
         // The bare filter nests too, flags and all.
         let NestedCommand::Tts(cli) =
