@@ -178,6 +178,14 @@ impl<B: Backend> StyleAttention<B> {
         // [batch, channels, time] -> [batch, heads, time, k_channels]
         let split = |t: Tensor<B, 3>| t.reshape([batch, heads, k_channels, time]).swap_dims(2, 3);
 
+        // Scaled *after* the transpose, which is the ordering `burn-gptsovits`'s
+        // `FusedAttention` had to be fixed for: on LibTorch `swap_dims` stamps a
+        // transposed view `Storage::Owned`, so the divide is taken in place
+        // straight through it. It is safe here only because `conv_q`, `conv_k`
+        // and `conv_v` are three separate convolutions — `q`'s buffer is its own
+        // and nothing else reads it. Fusing them into one projection for speed,
+        // which is what upstream's DiT does, would reintroduce the defect with
+        // no other edit and no error.
         let q = split(self.conv_q.forward(x.clone())) / (k_channels as f64).sqrt();
         let k = split(self.conv_k.forward(x.clone()));
         let v = split(self.conv_v.forward(x));

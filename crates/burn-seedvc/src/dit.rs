@@ -320,6 +320,14 @@ impl<B: Backend> Attention<B> {
                 .reshape([b, t, self.heads, self.head_dim])
         };
 
+        // `q` and `k` are *copies* of their slice, not views of it: `apply_rope`
+        // ends in `Tensor::cat`, which allocates. `v` is the one of the three
+        // that still aliases the live `qkv`, and on LibTorch `swap_dims` stamps
+        // that alias `Storage::Owned` so `can_mut()` says yes — see CLAUDE.md's
+        // `swap_dims` entry. It is safe because `matmul` is its only consumer
+        // and reads without mutating, and because the scale below lands on
+        // `scores` rather than on `q`, which is the ordering `burn-gptsovits`'s
+        // `FusedAttention` had to be fixed for. `tch_aliasing` pins the pass.
         let q = apply_rope(split(0), cos.clone(), sin.clone()).swap_dims(1, 2);
         let k = apply_rope(split(1), cos, sin).swap_dims(1, 2);
         let v = split(2).swap_dims(1, 2);
@@ -842,5 +850,124 @@ mod tests {
         assert_eq!(&out[..4], &[1.0, 0.0, 1.0, 0.0]);
         assert!((out[4] - 1.0f32.cos()).abs() < 1e-6, "{}", out[4]);
         assert!((out[5] - 1.0f32.sin()).abs() < 1e-6, "{}", out[5]);
+    }
+}
+
+/// The hazard that only exists on LibTorch, so it takes LibTorch to see it.
+///
+/// `cargo test -p burn-seedvc --features tch` — the invocation that is
+/// guaranteed to run it, since a bare `cargo test -p burn-seedvc` builds this
+/// crate on its own default features, which carry no compute backend at all.
+///
+/// **Unlike `burn-gptsovits`'s equivalent, this one is also reachable from
+/// `cargo test --workspace`**, and the difference is worth stating because the
+/// sentence there does not transfer: `seedvc-cli`'s defaults include `tch` and
+/// forward it through `seedvc-core` to this crate, so feature unification turns
+/// the module on in a workspace build, where `tts-core/tch` forwards only to
+/// `burn-kit` and never reaches `burn-gptsovits`. A maintainer told this test
+/// is unreachable from the main gate would misread a `--workspace` failure here
+/// as impossible.
+///
+/// The eight-line probe that exhibits the backend defect itself lives once, in
+/// `burn_gptsovits::t2s`; this module is the model-side net for the same class.
+#[cfg(all(test, feature = "tch"))]
+mod tch_aliasing {
+    use super::*;
+    use burn::module::ModuleMapper;
+
+    type Tch = burn::backend::LibTorch<f32>;
+    type Nd = burn_ndarray::NdArray;
+
+    /// A fixed LCG, so the two backends get byte-identical weights without a
+    /// record round-trip. `Distribution` is not required to draw the same
+    /// numbers on two backends, and a test that assumed it would fail for a
+    /// reason that is not the one it is for.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn take(&mut self, n: usize) -> Vec<f32> {
+            (0..n)
+                .map(|_| {
+                    self.0 = self
+                        .0
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    ((self.0 >> 40) as f32 / 8388608.0) - 1.0
+                })
+                .collect()
+        }
+    }
+
+    /// Replaces every parameter with that sequence, in module-tree order.
+    struct Fill(Lcg);
+
+    impl<B: Backend> ModuleMapper<B> for Fill {
+        fn map_float<const D: usize>(&mut self, param: Param<Tensor<B, D>>) -> Param<Tensor<B, D>> {
+            let (device, shape) = (param.val().device(), param.val().shape());
+            let data = TensorData::new(self.0.take(shape.num_elements()), shape.clone());
+            param.map(move |_| Tensor::from_data(data.clone(), &device))
+        }
+    }
+
+    /// One pass of the fused-`qkv` attention on filled weights and a fixed input.
+    ///
+    /// `heads` is deliberately more than one: a single head makes the transposed
+    /// view degenerate and proves nothing.
+    fn attention<B: Backend>(device: &B::Device) -> Vec<f32> {
+        const DIM: usize = 32;
+        const HEADS: usize = 4;
+        const FRAMES: usize = 7;
+
+        let attn = Attention::<B>::new(DIM, HEADS, device).map(&mut Fill(Lcg(1)));
+        let (cos, sin) = rope_tables::<B>(FRAMES, DIM / HEADS, device);
+        let x = Tensor::<B, 3>::from_data(
+            TensorData::new(Lcg(7).take(FRAMES * DIM), [1, FRAMES, DIM]),
+            device,
+        );
+        attn.forward(x, cos, sin).into_data().to_vec().unwrap()
+    }
+
+    /// LibTorch and `ndarray` are two independent implementations of the same
+    /// arithmetic, so on one set of weights and one input they have to agree.
+    ///
+    /// That is the reading that catches an aliased view: `ndarray` refcounts its
+    /// buffers correctly, so it computes what the code says while LibTorch
+    /// computes what the code plus the defect say.
+    ///
+    /// **Be honest about its reach**, the same way `t2s.rs`'s equivalent is.
+    /// `Attention::forward` is safe today, so this passes now and would have
+    /// passed before any fix; and a write through a transposed alias into a
+    /// region nothing reads again is invisible to *any* output comparison. What
+    /// it does catch is the ordering that makes such a write observable — a
+    /// scale or a norm taken through one split view before another split of the
+    /// same `qkv` is read, which is precisely what an in-place rotary or a
+    /// scale moved onto `q` would introduce.
+    #[test]
+    fn libtorch_agrees_with_ndarray_on_the_fused_qkv_attention() {
+        let want = attention::<Nd>(&Default::default());
+        let got = attention::<Tch>(&Default::default());
+
+        assert!(
+            got.iter().all(|v| v.is_finite()),
+            "LibTorch attention must be finite"
+        );
+        let worst = want
+            .iter()
+            .zip(&got)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        let scale = want.iter().fold(0.0f32, |a, b| a.max(b.abs()));
+        // Measured at 2.86e-06 on an output peaking at 12.71, so the bound
+        // works out at 1.27e-03 — between two and three orders clear. That is
+        // wide enough to read a corruption rather than a rounding difference
+        // between two BLAS implementations, and it is checked rather than
+        // remembered: seeding the two backends differently fails it at 28.2,
+        // and injecting the hazard the doc claims to catch (a scale taken
+        // through one split view before another split of the same `qkv` is
+        // read) fails it at 3.54.
+        assert!(
+            worst < 1e-4 * scale.max(1.0),
+            "the two backends differ by {worst} on an output peaking at {scale}"
+        );
     }
 }
