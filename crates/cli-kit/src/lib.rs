@@ -28,6 +28,23 @@
 //! It is annotated per argument rather than per struct on purpose: it widens
 //! what a value may look like, so it belongs only where a negative value is
 //! meaningful. A `--sr -5` should still be rejected by the parser.
+//!
+//! **The rule cannot be replaced by a fixture, but the flags that already
+//! follow it can be fenced, and are.** A rule is still what a *new* flag needs,
+//! since no test can be written for an argument nobody has declared yet. What a
+//! fixture can do is stop an existing one from drifting, in both directions:
+//! the `tests` module here and in `preprocess-cli` enumerate every numeric
+//! argument the two crates declare, and pin each to whichever half of the rule
+//! it falls under — a split-form parse for the ones whose `verify` accepts a
+//! value below zero, a refusal for the ones whose `verify` does not.
+//!
+//! The greppable question is deliberately **"does `verify` accept a value below
+//! zero?"** and not "does the help text show a negative". `preprocess diarize
+//! --threshold` is why: a cosine similarity starts at −1 and `verify` accepts
+//! the whole of −1..=1 by name, but every example of one is positive, so
+//! nobody reading the help would have thought to try it — and it failed to
+//! parse for as long as the flag existed. What the help shows is a judgement;
+//! what `verify` accepts is an answer.
 
 mod backend;
 
@@ -315,6 +332,64 @@ pub fn use_tui(no_tui: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::{CommandFactory, Parser, Subcommand};
+
+    /// `rvc-cli`'s wrapper around [`DenoiseOpts`], **name and all**.
+    ///
+    /// The name is the point. Clap derives a group id from the struct name, so
+    /// an engine that wraps the kit's tuning in a struct of its own called
+    /// `DenoiseOpts` — which is exactly what `rvc-cli` does, to add the
+    /// `--denoise` gate the kit deliberately does not own — puts two groups
+    /// called `DenoiseOpts` into one command unless the kit's own group is
+    /// spelled out. Reproduced here rather than tested over there because the
+    /// attribute that prevents it is in this file, and this is the crate whose
+    /// regression it would be.
+    mod gate {
+        #[derive(Debug, clap::Args)]
+        pub struct DenoiseOpts {
+            #[arg(long)]
+            pub denoise: bool,
+            #[command(flatten)]
+            pub tuning: crate::DenoiseOpts,
+        }
+    }
+
+    /// An engine's tree: the shape all six binaries host the shared flags in.
+    #[derive(Debug, Parser)]
+    #[command(name = "rvc")]
+    struct Bin {
+        #[command(subcommand)]
+        command: BinCommand,
+    }
+
+    #[derive(Debug, Subcommand)]
+    enum BinCommand {
+        Convert {
+            #[command(flatten)]
+            denoise: gate::DenoiseOpts,
+        },
+        Download {
+            #[command(flatten)]
+            download: DownloadOpts,
+        },
+    }
+
+    /// `voice`'s tree, so a shared flag is exercised in the *nested* position
+    /// as well. That is the whole reason `allow_negative_numbers` — and its
+    /// absence — is a property of the argument rather than of the command: a
+    /// `*-cli` crate exports an `Args` type that somebody else's `Command`
+    /// hosts, and a `Command`-level annotation is left behind when it does.
+    #[derive(Debug, Parser)]
+    #[command(name = "voice")]
+    struct Nested {
+        #[command(subcommand)]
+        command: NestedCommand,
+    }
+
+    #[derive(Debug, Subcommand)]
+    enum NestedCommand {
+        Rvc(Bin),
+    }
 
     #[test]
     fn log_goes_beside_the_weights() {
@@ -329,5 +404,72 @@ mod tests {
         );
         // A bare stem writes its weights into the current directory.
         assert_eq!(log_beside(Path::new("voice")), Path::new("train.log"));
+    }
+
+    /// The flags this crate declares that must keep refusing a negative value.
+    ///
+    /// Every one is checked in the form the defect needs — the value **split**
+    /// from its flag (`--denoise-patch -1`, never `--denoise-patch=-1`), since
+    /// clap only reads a leading `-` as the start of a short-flag cluster when
+    /// the argument has not opted out, and the `=` form is never ambiguous. A
+    /// test written the natural way passes against a broken flag, which is why
+    /// the split form is not a stylistic choice here.
+    ///
+    /// The three `f32` entries are the ones with teeth: nothing but the absence
+    /// of `allow_negative_numbers` refuses them, so adding the annotation to any
+    /// of them turns this test red. The `u64`/`u32` entries are refused twice
+    /// over — by the parser and again by the value type, which has no negative
+    /// to hold — so they cannot fail; they are here so the enumeration is
+    /// complete and visibly so, because "which flags did somebody check" is the
+    /// question this file has to be able to answer.
+    ///
+    /// A gap here is six gaps: these are the flags every binary in the toolkit
+    /// hosts.
+    const MUST_REFUSE_A_NEGATIVE: &[(&str, &str)] = &[
+        // `DenoiseOpts`: `verify` demands a positive strength and patch, and a
+        // research window larger than the patch — so no value below zero is
+        // legal for any of the three, and none carries the annotation.
+        ("convert", "--denoise-strength"),
+        ("convert", "--denoise-patch"),
+        ("convert", "--denoise-research"),
+        // `DownloadOpts`: seconds and a count.
+        ("download", "--download-timeout"),
+        ("download", "--retries"),
+    ];
+
+    #[test]
+    fn no_shared_flag_accepts_a_negative_value() {
+        for (sub, flag) in MUST_REFUSE_A_NEGATIVE {
+            assert!(
+                Bin::try_parse_from(["rvc", sub, flag, "-1"]).is_err(),
+                "rvc {sub} {flag} accepted a negative value"
+            );
+        }
+    }
+
+    #[test]
+    fn no_shared_flag_accepts_a_negative_value_nested_under_voice_either() {
+        // The annotation is per argument, so its absence has to survive being
+        // hosted by another binary's command tree just as its presence does.
+        for (sub, flag) in MUST_REFUSE_A_NEGATIVE {
+            assert!(
+                Nested::try_parse_from(["voice", "rvc", sub, flag, "-1"]).is_err(),
+                "voice rvc {sub} {flag} accepted a negative value"
+            );
+        }
+    }
+
+    #[test]
+    fn the_denoise_tuning_group_survives_being_wrapped_by_an_engine() {
+        // `#[group(id = "denoise_tuning")]` on `DenoiseOpts` is what stops the
+        // derived id colliding with the wrapper's. Losing it is not a parse
+        // error any argument test would see: it is a `debug_assert` inside
+        // clap's builder, so it fires while the command tree is being built —
+        // before parsing, on *every* subcommand of the binary that did it.
+        // `debug_assert()` is clap's own way of asking for that check, so the
+        // panic lands here, in the crate whose attribute would be the
+        // regression, rather than in whichever engine happened to be run next.
+        Bin::command().debug_assert();
+        Nested::command().debug_assert();
     }
 }
