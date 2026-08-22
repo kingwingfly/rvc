@@ -64,8 +64,8 @@ mod tests {
     use burn::module::Param;
     use burn::tensor::Distribution;
 
-    type B = burn_ndarray::NdArray;
-    type Dev = burn_ndarray::NdArrayDevice;
+    type B = burn::backend::NdArray;
+    type Dev = burn::backend::ndarray::NdArrayDevice;
 
     const HIDDEN: usize = 8;
     const GIN: usize = 4;

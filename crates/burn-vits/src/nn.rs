@@ -47,7 +47,7 @@ impl<B: Backend> VitsLayerNorm<B> {
 mod tests {
     use super::*;
 
-    type B = burn_ndarray::NdArray;
+    type B = burn::backend::NdArray;
 
     fn vec1(t: Tensor<B, 1>) -> Vec<f32> {
         t.into_data().to_vec().unwrap()

@@ -221,4 +221,107 @@ mod tests {
         // an utterance that never stops.
         assert_eq!(crate::engine::EOS, T2sConfig::default().eos());
     }
+
+    /// `covered` is a copy of `burn_kit::check_coverage` rather than a call to
+    /// it, and a copy nothing pins is a copy that drifts — so these ask the four
+    /// questions that matter: three reports it must refuse, and one it must
+    /// accept. The order is the whole of it, since two of the three states are
+    /// indistinguishable from success to a check that asks in the wrong one.
+    ///
+    /// One `ApplyResult` stands in for all three loads. `covered` is generic
+    /// over the label and reads nothing else, so cnhubert, `s1` and `s2` are the
+    /// same code path with a different string.
+    ///
+    /// This one is built field by field because `ApplyResult` has no `Default`.
+    fn report(
+        applied: &[&str],
+        missing: &[&str],
+        unused: &[&str],
+        errors: Vec<burn_kit::ApplyError>,
+    ) -> burn_kit::ApplyResult {
+        burn_kit::ApplyResult {
+            applied: applied.iter().map(|s| s.to_string()).collect(),
+            skipped: Vec::new(),
+            missing: missing
+                .iter()
+                .map(|s| (s.to_string(), String::new()))
+                .collect(),
+            unused: unused.iter().map(|s| s.to_string()).collect(),
+            errors,
+        }
+    }
+
+    /// The refusal `covered` produced, or a panic naming what it let through.
+    fn message(result: &burn_kit::ApplyResult) -> String {
+        match covered("s2", result) {
+            Err(TtsError::Weights(why)) => why,
+            other => panic!("this report had to be refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_wrong_shaped_checkpoint_is_refused_though_nothing_is_missing() {
+        // The failure `covered` exists for, and the one that reads as a clean
+        // load if `errors` is asked second: the applier drops an errored path
+        // from `applied` and from `missing` alike, so a checkpoint carrying the
+        // right names at the wrong shapes arrives with `missing` empty and
+        // `applied` full — indistinguishable from success to anyone counting
+        // only what is absent. An `s2G` from a later GPT-SoVITS against the v2
+        // config is exactly that file.
+        let result = report(
+            &["enc_p.text_embedding.weight"],
+            &[],
+            &[],
+            vec![burn_kit::ApplyError::ShapeMismatch {
+                path: "enc_p.text_embedding.weight".to_string(),
+                expected: burn::tensor::Shape::from([732, 192]),
+                found: burn::tensor::Shape::from([512, 192]),
+            }],
+        );
+        assert!(result.missing.is_empty(), "the premise of this test");
+        assert!(!result.applied.is_empty(), "and the other half of it");
+
+        let err = message(&result);
+        assert!(err.contains("text_embedding"), "{err}");
+    }
+
+    #[test]
+    fn a_parameter_with_no_weights_behind_it_is_refused() {
+        // What the two spellings of PyTorch's weight norm cost when only one is
+        // accepted: two tensors go missing and the convolution keeps its
+        // initialised values, which is not an error anywhere else.
+        let result = report(
+            &["encoder.layers.0.attention.k_proj.weight"],
+            &["encoder.pos_conv_embed.conv.weight_g"],
+            &[],
+            vec![],
+        );
+        let err = message(&result);
+        assert!(err.contains("had no weights"), "{err}");
+    }
+
+    #[test]
+    fn a_load_that_applied_nothing_is_refused() {
+        // A rename that matched nothing. The applier does not currently produce
+        // this shape — it visits the module's parameters, so a foreign file
+        // arrives as every parameter *missing* — but the check costs nothing and
+        // `burn_store` has narrowed `missing` once already, around `errors`.
+        let result = report(&[], &[], &["something.else"], vec![]);
+        message(&result);
+    }
+
+    #[test]
+    fn tensors_left_over_are_not_a_failure() {
+        // `unused` is not a defect and must never be treated as one here: a
+        // fine-tuned `s2` carries `enc_q`, which only training reads, and the
+        // quantiser's three EMA statistics are over on every load. A threshold
+        // would refuse working weights, which is worse than not checking.
+        let result = report(
+            &["dec.conv_pre.weight_g"],
+            &[],
+            &["enc_q.pre.weight", "quantizer.ema_count"],
+            vec![],
+        );
+        covered("s2", &result).expect("leftover tensors are not a failure");
+    }
 }

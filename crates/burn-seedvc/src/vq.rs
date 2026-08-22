@@ -118,6 +118,14 @@ impl<B: Backend> VectorQuantize<B> {
     /// candidates, so the nearest entry is exactly the largest dot product.
     fn encode(&self, latents: Tensor<B, 3>) -> Tensor<B, 2, Int> {
         let x = l2_normalise(latents.swap_dims(1, 2));
+        // `book` is transposed and the codebook parameter behind it stays live in
+        // the module, which is the shape CLAUDE.md's `swap_dims` entry names — but
+        // the alias is already broken here, because `l2_normalise` divides a
+        // `val()` clone the `Param` still holds and so is forced out of place.
+        // Pre-normalising the codebook at load time is the obvious saving and
+        // would put `transpose()` straight onto the live weight; `matmul` reads
+        // without mutating, so even that stays safe, and nothing else may be
+        // inserted between the two.
         let book = l2_normalise(self.codebook.weight.val());
         x.matmul(book.transpose().unsqueeze())
             .argmax(2)

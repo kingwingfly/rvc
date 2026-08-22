@@ -209,8 +209,8 @@ impl<B: Backend> MultiPeriodDiscriminator<B> {
 mod tests {
     use super::*;
 
-    type B = burn_ndarray::NdArray;
-    type Dev = burn_ndarray::NdArrayDevice;
+    type B = burn::backend::NdArray;
+    type Dev = burn::backend::ndarray::NdArrayDevice;
 
     fn flat<const D: usize>(t: Tensor<B, D>) -> Vec<f32> {
         t.into_data().to_vec().unwrap()

@@ -1158,7 +1158,6 @@ version = "0.1.0"
 dependencies = [
  "burn",
  "burn-kit",
- "burn-ndarray",
  "burn-store",
 ]
 
@@ -8217,6 +8216,7 @@ dependencies = [
  "text-kit",
  "thiserror 2.0.19",
  "tracing",
+ "tracing-subscriber",
  "train-kit",
  "tts-core",
 ]
@@ -8482,6 +8482,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "clap_complete",
  "cli-kit",
  "preprocess-cli",
  "rpath-kit",

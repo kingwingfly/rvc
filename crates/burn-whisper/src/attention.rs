@@ -112,11 +112,28 @@ impl<B: Backend> Attention<B> {
         let d_head = d_model / self.n_head;
 
         // [batch, seq, d_model] -> [batch, head, seq, d_head]
+        //
+        // `k` and `v` are usually still in the caller's `KvCache` here — the
+        // three entry points above all store before attending — and on LibTorch
+        // the `swap_dims` inside this closure hands back a view carrying a
+        // storage handle burn-tch believes is exclusive. Every consumer of the
+        // three head views below is a `matmul`, which allocates its output and
+        // mutates neither operand, so the cache is safe; that is the whole
+        // reason it is safe, and `tch_aliasing` in `burn-rmvpe` pins it.
         let heads = |t: Tensor<B, 3>, seq: usize| {
             t.reshape([batch, seq, self.n_head, d_head]).swap_dims(1, 2)
         };
         // The reference scales q and k by `d_head^-0.25` each, which is an fp16
         // overflow guard; the product is the same and this crate is fp32.
+        //
+        // Scaling *after* the transpose is the line that was a defect in
+        // `burn-gptsovits`'s `FusedAttention`, where a scalar multiply wrote in
+        // place through the view into a fused `qkv` the KV cache was still
+        // holding. It is safe here for a reason that is a property of this
+        // function rather than of the pattern: `q` is a whole fresh `q_proj`
+        // output, not a slice of a buffer anything else reads, so the in-place
+        // multiply lands on a buffer with no other handle. Do not copy the
+        // ordering to a fused-qkv attention.
         let q = heads(q, n_q) * (d_head as f64).powf(-0.5);
         let k = heads(k, n_kv);
         let v = heads(v, n_kv);

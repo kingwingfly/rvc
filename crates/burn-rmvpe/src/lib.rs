@@ -155,6 +155,26 @@ impl<B: Backend> Rmvpe<B> {
 
         // `[batch, 1, frames, bins]`: time becomes the height and the mel bins
         // the width, which is the orientation every block below assumes.
+        //
+        // **This consumes `mel`, and on LibTorch it means it.** `swap_dims`
+        // there returns a view carrying a storage handle burn-tch believes is
+        // exclusive (CLAUDE.md, **`swap_dims` on LibTorch returns a view
+        // burn-tch forgets the provenance of**; `gru::tch_aliasing` pins the
+        // mechanism), the `reshape` inherits it, and the first thing the U-net
+        // does is `Encoder`'s input normalisation — a broadcast subtract, which
+        // is in-place-capable. So a caller that keeps a clone and passes
+        // `forward(mel.clone())` gets its own copy overwritten. Measured on an
+        // initialised model: 1.8e-5, and it is the running statistics' size on
+        // a loaded one.
+        //
+        // Every caller in this workspace moves a freshly built tensor
+        // (`rvc_core::burn_features`, `examples/load`, the tests below), so
+        // nothing is wrong today — but note the exposure is *conditional on the
+        // frame count*: the padding branch above goes through `Tensor::cat`,
+        // which allocates, so only a clip that is already a multiple of 32
+        // reaches this line holding the caller's buffer. Adding a caller that
+        // retains `mel` is the way this becomes a bug, and it would look like a
+        // pitch contour that depends on clip length.
         let x = mel.swap_dims(1, 2).reshape([batch, 1, padded, n_mels]);
         let x = self.cnn.forward(self.unet.forward(x));
         // `[batch, frames, 3, bins]` flattened to `[batch, frames, 3 * bins]` —

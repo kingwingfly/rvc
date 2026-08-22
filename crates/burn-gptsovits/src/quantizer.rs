@@ -70,7 +70,10 @@ impl<B: Backend> Codebook<B> {
         // storage — a `.transpose()` slipped between the two would reset that
         // count and square the codebook itself, once, permanently. The
         // `embed.transpose()` on the next line *is* such a view of a live
-        // `Param`, and `matmul` is the only thing that touches it.
+        // `Param`, and it is safe for one reason and no other: the only thing
+        // that touches it is `matmul`, which allocates its output and mutates
+        // neither operand. Any consumer that can write in place — a scalar op,
+        // an add, a `mask_fill` — would square or scale the codebook itself.
         let embed = self.embed.val();
         let sq = embed.clone().powi_scalar(2).sum_dim(1).transpose();
         let scores = x.matmul(embed.transpose().unsqueeze()) * 2.0 - sq.unsqueeze();

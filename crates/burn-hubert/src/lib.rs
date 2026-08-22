@@ -237,6 +237,18 @@ impl<B: Backend> Attention<B> {
                 .swap_dims(1, 2)
         };
 
+        // The scale lands on a `swap_dims` view, which is the shape that
+        // corrupted GPT-SoVITS's `FusedAttention` — on LibTorch `swap_dims`
+        // stamps a fresh `Storage::Owned` over somebody else's buffer, so the
+        // multiply happens in place and writes straight through (CLAUDE.md,
+        // **`swap_dims` on LibTorch returns a view burn-tch forgets the
+        // provenance of**). It is safe *here* only because `q_proj.forward`
+        // allocates its output and nothing else keeps a handle on it, so the
+        // write reaches a buffer this expression owns outright. That is an
+        // ownership accident rather than a discipline: give these projections a
+        // cache or a second reader and the site is live again, and the fix is
+        // then the one `FusedAttention` took — scale before `heads`, while the
+        // tensor is still something whose provenance burn-tch tracks.
         let q = heads(self.q_proj.forward(x.clone())) * (d_head as f64).powf(-0.5);
         let k = heads(self.k_proj.forward(x.clone()));
         let v = heads(self.v_proj.forward(x));
@@ -329,6 +341,14 @@ impl<B: Backend> Encoder<B> {
     fn forward(&self, x: Tensor<B, 3>) -> Vec<Tensor<B, 3>> {
         // Position information is added, not concatenated: a grouped convolution
         // over time, then GELU.
+        //
+        // `x` is still live on the next line while this transposed view of it
+        // goes into `PosConv`, and on LibTorch such a view no longer counts the
+        // buffer it borrows (CLAUDE.md, **`swap_dims` on LibTorch returns a view
+        // burn-tch forgets the provenance of**). Safe because the only consumer
+        // is `conv1d`, which allocates its output and never writes through its
+        // input; the ContentVec Burn-against-ORT cosine of 1.000000 is the
+        // standing evidence that it does not.
         let pos = self.pos_conv_embed.forward(x.clone().swap_dims(1, 2));
         let mut x = self.layer_norm.forward(x + pos.swap_dims(1, 2));
 

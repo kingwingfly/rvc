@@ -387,3 +387,228 @@ pub(crate) async fn read_reference(path: &std::path::Path) -> Result<Vec<f32>> {
     }
     Ok(audio)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::{Parser, Subcommand};
+
+    /// The `tts` binary's own tree, minus `completions` — which belongs to the
+    /// executable rather than to the engine, and is therefore not part of what
+    /// [`TtsCli`] can be asked for.
+    #[derive(Parser)]
+    #[command(name = "tts")]
+    struct Cli {
+        #[command(flatten)]
+        tts: TtsCli,
+    }
+
+    /// `voice`'s tree, hosting the very same type.
+    #[derive(Parser)]
+    #[command(name = "voice")]
+    struct Nested {
+        #[command(subcommand)]
+        command: NestedCommand,
+    }
+
+    #[derive(Subcommand)]
+    enum NestedCommand {
+        Tts(TtsCli),
+    }
+
+    fn filter(extra: &[&str]) -> TtsArgs {
+        let mut argv = vec!["tts"];
+        argv.extend_from_slice(extra);
+        Cli::try_parse_from(&argv)
+            .unwrap_or_else(|e| panic!("{argv:?} rejected: {e}"))
+            .tts
+            .synth
+    }
+
+    #[test]
+    fn every_sampling_knob_reaches_the_options() {
+        // Each value is deliberately *not* its default, so a field that is
+        // hard-coded or dropped on the way into `SynthOptions` fails here
+        // rather than coincidentally agreeing.
+        let opts = filter(&[
+            "--top-k",
+            "7",
+            "--top-p",
+            "0.8",
+            "--temperature",
+            "0.6",
+            "--repetition-penalty",
+            "1.1",
+            "--seed",
+            "42",
+            "--max-tokens",
+            "300",
+            "--noise-scale",
+            "0.25",
+            "--language",
+            "en",
+        ])
+        .options();
+        assert_eq!(opts.sample.top_k, 7);
+        assert_eq!(opts.sample.top_p, 0.8);
+        assert_eq!(opts.sample.temperature, 0.6);
+        assert_eq!(opts.sample.repetition_penalty, 1.1);
+        assert_eq!(opts.seed, 42);
+        assert_eq!(opts.max_tokens, 300);
+        assert_eq!(opts.noise_scale, 0.25);
+        assert_eq!(opts.language, text_kit::Language::En);
+    }
+
+    #[test]
+    fn the_defaults_are_the_ones_the_engine_would_have_picked() {
+        // Every default in this file is read from `SampleOptions`/`SynthOptions`
+        // rather than spelled again, and this is what keeps that true: two of
+        // these knobs once existed as fields the CLI pinned to a literal, and a
+        // third had a literal that merely *happened* to match. Compared field by
+        // field because `SynthOptions` carries no `PartialEq`, which also makes
+        // a field added there and forgotten here a compile error.
+        let (got, want) = (filter(&[]).options(), tts_core::SynthOptions::default());
+        assert_eq!(got.language, want.language);
+        assert_eq!(got.sample.top_k, want.sample.top_k);
+        assert_eq!(got.sample.top_p, want.sample.top_p);
+        assert_eq!(got.sample.temperature, want.sample.temperature);
+        assert_eq!(
+            got.sample.repetition_penalty,
+            want.sample.repetition_penalty
+        );
+        assert_eq!(got.max_tokens, want.max_tokens);
+        assert_eq!(got.seed, want.seed);
+        assert_eq!(got.noise_scale, want.noise_scale);
+    }
+
+    #[test]
+    fn no_sampling_knob_accepts_a_value_below_zero() {
+        // The mechanical question for whether a flag needs
+        // `allow_negative_numbers` is not what its help prints but **does
+        // `verify` accept a value below zero** — so it is asked by running
+        // `verify`, in the `=` form that parses whatever the annotation says.
+        // Every answer here is no, which is why this crate carries no such
+        // annotation.
+        for flag in [
+            "--temperature=-1",
+            "--top-p=-0.5",
+            "--repetition-penalty=-1",
+            "--noise-scale=-0.1",
+        ] {
+            assert!(
+                filter(&[flag]).verify().is_err(),
+                "{flag} was accepted, so a negative value reached the sampler"
+            );
+        }
+        // And the unsigned ones are refused a step earlier, by the parser.
+        for flag in ["--top-k=-1", "--max-tokens=-1", "--sr=-1", "--seed=-1"] {
+            assert!(
+                Cli::try_parse_from(["tts", flag]).is_err(),
+                "{flag} parsed, so a negative count reached the sampler"
+            );
+        }
+    }
+
+    #[test]
+    fn the_boundaries_verify_names_are_the_ones_it_enforces() {
+        // Zero is a division by zero in the temperature, an empty candidate set
+        // in `--top-k`, and no tokens at all in `--top-p` — each rejected with
+        // its own message rather than by one blanket rule.
+        for flag in [
+            "--top-k=0",
+            "--top-p=0",
+            "--top-p=1.5",
+            "--temperature=0",
+            "--repetition-penalty=0",
+            "--max-tokens=0",
+            "--sr=0",
+        ] {
+            assert!(filter(&[flag]).verify().is_err(), "{flag} was accepted");
+        }
+        // The two values that look illegal and are not: `--top-p 1.0` disables
+        // the cut, and `--noise-scale 0` is a deterministic decode.
+        filter(&["--top-p=1.0"]).verify().expect("1.0 disables it");
+        filter(&["--noise-scale=0"])
+            .verify()
+            .expect("0 is a deterministic decode, not an error");
+    }
+
+    #[test]
+    fn the_reference_and_its_transcript_are_optional_to_clap_and_required_to_convert() {
+        // They are `Option` because `TtsArgs` is flattened into a command that
+        // also carries `train`, which wants neither — so the bare filter checks
+        // them itself. Nothing is flattened beside `convert`, so there they are
+        // what they really are: a clap usage error, reported before a model has
+        // loaded.
+        Cli::try_parse_from(["tts", "train", "corpus/"])
+            .expect("`train` must not be made to supply a reference clip");
+        assert!(filter(&[]).reference.is_none());
+        assert!(filter(&[]).reference_text.is_none());
+
+        assert!(
+            Cli::try_parse_from(["tts", "convert", "-r", "clip.wav", "in.txt"]).is_err(),
+            "`convert` without --reference-text must be a usage error: `s1` \
+             generates by continuation, and a missing transcript stops it after \
+             a token or two"
+        );
+        assert!(
+            Cli::try_parse_from(["tts", "convert", "-t", "hello", "in.txt"]).is_err(),
+            "`convert` without --reference must be a usage error"
+        );
+        Cli::try_parse_from(["tts", "convert", "-r", "clip.wav", "-t", "hello", "in.txt"])
+            .expect("both together is the whole requirement");
+    }
+
+    #[test]
+    fn the_engine_nests_under_voice_and_is_not_renamed() {
+        // `voice tts train`, not `voice tts-train`: `voice` hosts this crate's
+        // clap type unchanged, so a subcommand added here appears there with no
+        // edit to `voice-cli` at all.
+        for argv in [
+            ["voice", "tts", "train", "corpus/"],
+            ["voice", "tts", "download", "--no-prosody", ""],
+        ] {
+            let argv: Vec<&str> = argv.iter().copied().filter(|a| !a.is_empty()).collect();
+            Nested::try_parse_from(&argv).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+        }
+        // The bare filter nests too, flags and all.
+        let NestedCommand::Tts(cli) =
+            Nested::try_parse_from(["voice", "tts", "--top-p", "0.8", "-r", "clip.wav"])
+                .expect("the filter nests")
+                .command;
+        assert!(cli.command.is_none(), "no subcommand is the filter");
+        assert_eq!(cli.synth.top_p, 0.8);
+    }
+
+    #[test]
+    fn completions_belongs_to_the_binary_and_never_appears_under_voice() {
+        // While `Completions` sat in the shared enum, `voice tts completions
+        // bash` emitted a script beginning `_voice()` — four spellings of one
+        // script, three of them lies. It is now the hosting `main`'s, so this
+        // subcommand must not exist here at all.
+        assert!(
+            Nested::try_parse_from(["voice", "tts", "completions", "bash"]).is_err(),
+            "`voice tts completions` must not parse"
+        );
+        assert!(
+            Cli::try_parse_from(["tts", "completions", "bash"]).is_err(),
+            "even in the standalone tree it belongs to `main`, not to `TtsCli`"
+        );
+    }
+
+    #[test]
+    fn the_output_rate_defaults_to_what_the_model_produces() {
+        // Anything else is resampled, so the default has to be the model's own
+        // rate rather than a number that happens to match it today.
+        assert_eq!(filter(&[]).sr, tts_core::OUTPUT_SR);
+        assert_eq!(filter(&["--sr", "16000"]).sr, 16000);
+    }
+
+    #[test]
+    fn each_language_maps_to_the_front_end_it_names() {
+        assert_eq!(text_kit::Language::from(Lang::Zh), text_kit::Language::Zh);
+        assert_eq!(text_kit::Language::from(Lang::En), text_kit::Language::En);
+        assert_eq!(text_kit::Language::from(Lang::Ja), text_kit::Language::Ja);
+        assert_eq!(Lang::default(), Lang::Zh);
+    }
+}

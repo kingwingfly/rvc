@@ -106,6 +106,14 @@ impl<B: Backend> CrossAttention<B> {
             t.reshape([batch, self.n_heads, d_head, time])
                 .swap_dims(2, 3)
         };
+        // The division lands on a `swap_dims` view — verbatim the shape that
+        // corrupted `t2s.rs`'s `FusedAttention`, where the scale was applied
+        // after the transpose and wrote back into the buffer `qkv` and the KV
+        // cache were still holding (CLAUDE.md, **`swap_dims` on LibTorch returns
+        // a view burn-tch forgets the provenance of**). Safe here only because
+        // `conv_q.forward` allocates and nothing else holds that output, so the
+        // in-place divide reaches a buffer this expression owns. A second reader
+        // on the projections re-arms it; scale before `heads` if one arrives.
         let q = heads(self.conv_q.forward(x), t_q) / (d_head as f64).sqrt();
         let k = heads(self.conv_k.forward(context.clone()), t_kv);
         let v = heads(self.conv_v.forward(context), t_kv);
