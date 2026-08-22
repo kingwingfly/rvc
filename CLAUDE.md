@@ -149,7 +149,7 @@ render as `voice seed-vc` while the binary is `seedvc`. The variant therefore
 carries `#[command(name = "seedvc")]`. That is a rename **back** to the engine's
 own name, which is the rule rather than an exception to it.
 
-### A flag whose value is negative needs `allow_negative_numbers`
+### A flag whose value is negative needs `allow_negative_numbers`, and one that is not finite needs refusing
 Clap reads `-50` as a cluster of short flags rather than a number, so
 `--silence-db -50` — the exact form that flag's own help recommends — failed
 with `unexpected argument '-5'`, and **`rvc convert -t -5` was unreachable for
@@ -189,6 +189,42 @@ It goes on the argument rather than the command, and not by preference — clap'
 somebody else's `Command` hosts, so per-argument is the only placement that
 survives being nested under `voice`. Per argument is also the honest scope: it
 widens what a value may look like, and `--sr -5` should still be refused.
+
+**A float flag has a second half, and asking only about zero misses it: `inf`
+and `NaN` parse.** `f32::from_str` and `f64::from_str` accept both by name, so
+the *parser* can never refuse them and only `verify` can — and two engines'
+worth of flags did not. `stt --pad inf` reached the slicer and **panicked
+outright**, "attempt to add with overflow" where the padded end is
+`raw_end + pad` in samples; `stt --min-silence inf` was worse for being quiet,
+accepted in full, making every gap too short to count as a boundary so a whole
+recording came back as one segment. `seedvc --guidance inf` and
+`--length-adjust inf` were found independently in the same batch, where the
+extrapolation `(1 + g)·conditioned − g·unconditional` is non-finite for them.
+
+So the mechanical question is **two** questions, and both are answerable without
+judgement: *does `verify` accept a value below zero?* (annotation) and *does it
+accept one that is not finite?* (refusal, naming the flag, before anything is
+fetched). The second needs no clap attribute — it is a `verify` check, and it
+belongs beside the range checks already there.
+
+**One flag's bound can be another flag's, and neither `-h` shows it.**
+`--max-clip` alone never bounded a segment: the slicer splits an over-long run
+only where both halves clear `min_clip`, so it takes a margin of
+`max(min_clip, max_clip / 4)` at each end and gives up on any run no longer than
+twice that. Set `--min-clip` above half of `--max-clip` and the margins meet in
+the middle — a run of unbroken speech in `(max_clip, 2·min_clip]` is emitted
+whole, past the cap that was asked for. Where that also clears Whisper's 30 s
+window it stops being a slicing surprise and becomes **lost audio**:
+`mel::compute` truncates to the first 30 s without a word, while `--format
+jsonl` reports the segment's *full* length, so the timings look right and the
+words simply stop. `stt --min-clip 20` was enough to reach it, against a
+`--max-clip` nobody touched. The bound is sharp and measured by slicing
+30.05..42.00 s of unbroken tone in 0.05 s steps: at `--min-clip 15 --max-clip
+30` no input length exceeds 30 s, at 15.1 the worst case is exactly 30.20 s, and
+at 20 it is 40.00 s. `verify` refuses it now, and **names the truncation only
+where the arithmetic actually reaches the window** — `--min-clip 5 --max-clip 8`
+overruns its cap by 2 s and has nothing to do with Whisper, so saying otherwise
+would be an explanation fitted to a number it does not describe.
 
 ### `completions` belongs to the binary, not to the engine
 It is the one subcommand in the list above that is **not** part of any engine's
@@ -414,7 +450,7 @@ cargo fmt
 # There is no CI, so those two plus the tests are the whole gate — nothing else
 # will catch it. `--workspace` builds every member with default features, which
 # includes `tch`, so LibTorch has to be loadable at run time as well as linked:
-LD_LIBRARY_PATH=$PWD/libtorch/lib cargo test --workspace
+LD_LIBRARY_PATH=$PWD/libtorch/lib cargo test --workspace   # 565 as of this note
 cargo test -p text-kit                      # g2p, and the largest suite by far
 cargo test -p seedvc-core streaming_matches_the_batch_path   # one test by name
 # The one `#[ignore]`d test is `rvc-core`'s `model_probe`: it wants
@@ -478,12 +514,16 @@ cargo run -p burn-mdx --example separate --features tch -- --mixture <song.wav> 
 # the example's module doc gives. Both figures replace a smaller set measured
 # through a LibTorch aliasing bug; do not merge them.
 cargo test -p burn-mdx --features tch   # the aliasing hazard, which needs the
-cargo test -p burn-gptsovits --features tch   # ...backend that has it, in both
-# ...crates that carry a `tch_aliasing` module — `cargo test --workspace` runs
+cargo test -p burn-gptsovits --features tch   # ...backend that has it, in four
+cargo test -p burn-rmvpe --features tch   # ...crates carrying a `tch_aliasing`
+cargo test -p burn-seedvc --features tch  # ...module (five, counting both of
+# ...`burn-gptsovits`'s) — `cargo test --workspace` runs
 # them on default features and cannot reach it. See **`swap_dims` on LibTorch
 # returns a view burn-tch forgets the provenance of**. `burn-gptsovits`'s second
 # test exhibits the backend defect directly, so if *that* one fails it is news
-# (burn-tch fixed it) rather than a regression.
+# (burn-tch fixed it) rather than a regression; `burn-rmvpe`'s third asserts the
+# same thing from the other side, that `swap_dims` writes through where
+# `reshape`, `slice`, `narrow`, `gather` and `matmul` do not.
 cargo run -p preprocess-core --features tch --example timbre -- --campplus … \
     --reference <clip> <same speaker> <a different one>   # where `diarize`'s 0.55 came from
 cargo run -p seedvc-core --features tch --example convert  # the engine, end to end
@@ -644,6 +684,22 @@ Three things to take from it rather than re-derive:
   A bare `expr.swap_dims(..)` on a moved temporary — which is most of them — is
   always fine.
 
+  **"A moved temporary is always fine" holds for an in-function temporary and
+  not for a by-value parameter, which is the sharper form of the rule.** A
+  function taking `mel: Tensor<B, 3>` owns it inside, so a transpose of it reads
+  as a moved temporary — but the *caller* may still hold a clone, and the view
+  claims `can_mut` over the caller's buffer. `Rmvpe::forward` is exactly this:
+  it consumes `mel`, so there is no in-function alias, yet the U-net's first op
+  is a broadcast subtract, and `forward(mel.clone())` overwrites the caller's
+  copy — measured at 1.8e-5 on an initialised model. Exposure is *conditional on
+  the frame count*, since the padding branch allocates, so only a clip already a
+  multiple of 32 reaches that line holding the caller's buffer. All four callers
+  move a fresh tensor, so nothing is wrong today. **Deliberately not "fixed"**:
+  Burn exposes no `contiguous()`, and every `swap_dims` over a by-value
+  parameter has this shape, so patching one crate would be superstition rather
+  than a fix. The rule is what to carry away — ask who else holds the argument,
+  not whether the function owns it.
+
   **The pattern used to be `grep -rn "swap_dims\|permute"`, and that missed
   three sites**: `.transpose()`, `.t()` and `.movedim()` all lower to the same
   two backend ops, and `burn-gptsovits`'s `quantizer.rs` and `t2s.rs` and
@@ -681,11 +737,35 @@ Three things to take from it rather than re-derive:
   that buffer. It corrupted nothing only because the live handles read the
   other two thirds — a property of that layout, not of the code. Scaling before
   the transpose fixes it, because `slice` keeps `Storage::View` whose
-  `can_mut()` is false; the arithmetic is untouched, since a scalar divide
+  `can_mut()` is false **while its parent is live** — that condition is the
+  whole mechanism and an earlier revision stated it unconditionally:
+  `Storage::View::can_mut()` is
+  `strong_count(start_ref) == 1 && strong_count(view_ref) == 1`, so a slice
+  protects nothing once the parent is dropped, and in `FusedAttention` it is the
+  `part` closure keeping `qkv` alive that makes the fix work. The arithmetic is
+  untouched, since a scalar divide
   commutes with reshape and transpose. `t2s.rs`'s `tch_aliasing` pins it, and
   its second test exhibits the backend defect in eight lines — **if that one
   ever fails, burn-tch has fixed the defect upstream and the ordering is free
   again: read it as news, not as a regression.**
+- **The whole sweep has been walked once, and the class boundary measured
+  rather than reasoned.** All ~58 hits across every `burn-*` crate were audited
+  and **no further defect was found**; the live-and-safe sites now carry a
+  one-line comment naming the consumer that clears them, which is what the audit
+  produced rather than a diff. Two properties everything above rests on were
+  probed one op at a time on LibTorch 2.9.0 / burn-tch 0.21, over a source held
+  live: `reshape`, `slice`, `narrow` and `gather` wrote through **0**, and so
+  did `matmul` through a swapped view of either operand, while `swap_dims` wrote
+  **1.0**. `burn-rmvpe`'s `gru::tch_aliasing` pins both permanently, and asserts
+  the `swap_dims` case is *not* zero, so an upstream fix reports as news rather
+  than going quiet.
+
+  **A mid-audit claim that `reshape` does *not* rescue an aliased view was
+  wrong, and is retracted here so nobody re-derives it.** It came from measuring
+  `swap_dims` *followed by* `reshape` and blaming the second op — the `reshape`
+  inherits an already-broken parent. Had it been true, the boundary above would
+  have been under-scoped and every clearance resting on `reshape` void, which is
+  why it is worth naming the mistake rather than quietly correcting it.
 - **Two backends disagreeing is the cheapest possible check**, and it is what
   found this. Any Burn port here can be run on `tch` and on `cuda` over one
   input; they now agree to five figures on MDX23C. A per-model unit test that
@@ -1068,6 +1148,21 @@ Four things about that choice are worth having written down:
   accepts a prebuilt `FeatureExtractor` is a Burn one, so the mix has no third
   place to go. It is therefore an `ensure!` naming the offending flag, **before
   any download**.
+
+  **That "before any download" is the general rule, and the check next to it
+  was breaking it.** Whether `-m` names a file that *exists* is knowable from
+  the command line alone, and it was tested **after** `resolve_feature_models` —
+  so a typo'd path fetched ContentVec and RMVPE first, around 200 MB spent to
+  report a typo. It runs before either fetch now, on the ONNX and the Burn path
+  both, and sits *after* the mixing refusal rather than before it: a command
+  wrong in both ways should hear about the flag it can fix rather than about a
+  path it may have meant to create. The test that pins it asserts **the cache is
+  still empty**, not the message — the message was always the easy half, and an
+  assertion on it would have passed throughout. Its runtime is the tell: 60 s
+  before, 0.08 s after.
+
+  So the question to ask of any refusal is not only whether it fires but
+  **whether anything was fetched, loaded or written before it did.**
 
   **This is a correction, so do not restore the old shape.** The early return
   used to test that all three models agreed on ONNX and let a disagreement fall
@@ -1616,6 +1711,25 @@ examples is **not** the harmless noise it looks like. Working in parallel
 checkouts means an isolated `CARGO_TARGET_DIR`, or copying the built binary out
 and running the copy — which is where every coverage number in `burn-seedvc`'s
 module docs comes from.
+
+**It bit a third time even with per-worktree target directories set**, because
+the isolation has to reach *everything that builds*: a worker had given itself
+its own `CARGO_TARGET_DIR` and then spawned a review process that edited the
+same file in the same tree and built into it, producing one `--features tch`
+failure — `differ by 28.15512` — that matched neither its source nor reality. A
+clean re-run gave 32/32. **The rule is per-process, not per-worktree**: anything
+you spawn that compiles needs its own target directory too, and a failure that
+does not match the source in front of you is this until proven otherwise.
+
+**And each worktree being green says nothing about them composing.** Ten
+parallel branches all passed their own crate's tests and the merged tree did not
+compile: one had imported `burn::store::ApplyError`, which another branch's work
+made reachable only as `burn_kit`'s re-export, and one had a test array whose
+arity was wrong in a way its own crate never instantiated. Neither worker could
+have caught it — the conflicting code did not exist in either tree. So the merge
+of a parallel batch **is** a build step, not a formality: run the full gate on
+the merged result before believing any of it, and expect the failures to be in
+the seams rather than in the work.
 
 ### The Python boundary (`export/`)
 The only Python: a standalone `uv` project that converts a Burn `.safetensors` to
