@@ -287,39 +287,63 @@ mod tests {
         assert!(tokens.language("en").is_err());
     }
 
-    /// A miniature Whisper-shaped vocabulary: three ordinary tokens, then a run
+    /// A miniature Whisper-shaped vocabulary: four ordinary tokens, then a run
     /// of control tokens with **one non-special token interleaved among them**.
     ///
     /// That interleaving is the point. It makes the fixture distinguish the
     /// implementation from the plausible wrong one — "skip every id at or above
     /// the first control token" — which no contiguous fixture can do.
+    ///
+    /// One thing to know before editing it: `tokenizers` hands the added tokens
+    /// ids running on from the **model** vocabulary's size, not the ids written
+    /// beside them here. Add a word to `vocab` without moving `added_tokens`
+    /// down and every control token silently shifts by one, which reads exactly
+    /// like the off-by-one the tests below are looking for.
     const VOCAB: &str = r#"{
       "version": "1.0",
       "truncation": null,
       "padding": null,
       "added_tokens": [
-        {"id": 3, "content": "<|startoftranscript|>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
-        {"id": 4, "content": "<|en|>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
-        {"id": 5, "content": "<|nonspecial|>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": false},
-        {"id": 6, "content": "<|notimestamps|>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
-        {"id": 7, "content": "<|endoftext|>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true}
+        {"id": 4, "content": "<|startoftranscript|>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
+        {"id": 5, "content": "<|en|>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
+        {"id": 6, "content": "<|nonspecial|>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": false},
+        {"id": 7, "content": "<|notimestamps|>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
+        {"id": 8, "content": "<|endoftext|>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true}
       ],
       "normalizer": null,
-      "pre_tokenizer": null,
+      "pre_tokenizer": {"type": "Whitespace"},
       "post_processor": null,
       "decoder": null,
       "model": {
-        "type": "BPE",
-        "dropout": null,
-        "unk_token": null,
-        "continuing_subword_prefix": null,
-        "end_of_word_suffix": null,
-        "fuse_unk": false,
-        "byte_fallback": false,
-        "vocab": {"hello": 0, "world": 1, "boundary": 2},
-        "merges": []
+        "type": "WordLevel",
+        "unk_token": "unknown",
+        "vocab": {"hello": 0, "world": 1, "unknown": 2, "boundary": 3}
       }
     }"#;
+
+    /// Decoding is the inverse of encoding for text the vocabulary covers.
+    ///
+    /// `Vocabulary` is decode-only — nothing in this crate encodes text, since
+    /// Whisper is fed audio — so the encode half goes through the wrapped
+    /// tokenizer directly. What that pins is ours all the same: that dropping
+    /// control tokens does not also drop ordinary ones, and that the file this
+    /// type loads is the one the ids are addressed against.
+    #[test]
+    fn an_encoding_decodes_back_to_the_text_it_came_from() {
+        let dir = Scratch::new();
+        let vocab = Vocabulary::load(&dir.write("tokenizer.json", VOCAB)).expect("load");
+
+        for text in ["hello", "world", "hello world", "boundary world hello"] {
+            let ids = vocab
+                .0
+                .encode(text, false)
+                .expect("encode")
+                .get_ids()
+                .to_vec();
+            assert!(!ids.is_empty(), "{text:?} is covered by the vocabulary");
+            assert_eq!(vocab.decode(&ids).expect("decode"), text);
+        }
+    }
 
     #[test]
     fn ordinary_tokens_decode_to_their_text() {
@@ -340,17 +364,17 @@ mod tests {
 
         // Exactly the shape `decode.rs` builds: start, language, notimestamps,
         // content, end.
-        let text = vocab.decode(&[3, 4, 6, 2, 7]).expect("decode");
+        let text = vocab.decode(&[4, 5, 7, 3, 8]).expect("decode");
         assert_eq!(text, "boundary");
         assert!(!text.contains("<|"), "no control token leaked: {text:?}");
     }
 
     /// The off-by-one this whole fixture exists for.
     ///
-    /// Id 2 is the last ordinary token and id 3 the first control token, so a
+    /// Id 3 is the last ordinary token and id 4 the first control token, so a
     /// threshold that is off by one in either direction changes the answer:
     /// too low swallows `boundary`, too high leaks `<|startoftranscript|>`.
-    /// Id 5 then pins that the rule is the `special` flag rather than any
+    /// Id 6 then pins that the rule is the `special` flag rather than any
     /// threshold at all — it *looks* like a control token, sits between two
     /// real ones, and must survive.
     #[test]
@@ -359,18 +383,18 @@ mod tests {
         let vocab = Vocabulary::load(&dir.write("tokenizer.json", VOCAB)).expect("load");
 
         assert_eq!(
-            vocab.decode(&[2]).expect("decode"),
+            vocab.decode(&[3]).expect("decode"),
             "boundary",
-            "id 2 is kept"
+            "id 3 is kept"
         );
-        assert_eq!(vocab.decode(&[3]).expect("decode"), "", "id 3 is dropped");
+        assert_eq!(vocab.decode(&[4]).expect("decode"), "", "id 4 is dropped");
         assert_eq!(
-            vocab.decode(&[5]).expect("decode"),
+            vocab.decode(&[6]).expect("decode"),
             "<|nonspecial|>",
             "an id above the first control token, but not flagged special"
         );
         assert_eq!(
-            vocab.decode(&[2, 3, 4, 5, 6, 7]).expect("decode"),
+            vocab.decode(&[3, 4, 5, 6, 7, 8]).expect("decode"),
             "boundary <|nonspecial|>"
         );
     }
