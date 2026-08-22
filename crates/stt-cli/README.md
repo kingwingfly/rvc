@@ -81,7 +81,25 @@ has the whole file — is unaffected. Default `0.15`, which is under half the
 `--max-clip` **must be in `(0, 30]`** — one segment has to fit one 30 s encoder
 window — and is rejected up front rather than silently truncated. Both the
 default and the ceiling now come from `stt_core::WINDOW_SECONDS`, so the number
-cannot drift from the front end that produced it. Hitting
+cannot drift from the front end that produced it.
+
+**`--min-clip` must be at most half of `--max-clip`**, which is the constraint
+that is not obvious from either flag on its own. The slicer splits an over-long
+run only where *both* halves would clear `--min-clip`, so it needs a margin at
+each end and gives up on any run no longer than twice that; set `--min-clip`
+above half and the margins meet, so unbroken speech between `--max-clip` and
+`2 x --min-clip` seconds comes out whole, past the cap you asked for. Where
+that also clears the encoder window it stops being a slicing surprise and
+becomes lost audio, because the front end truncates the segment to its first
+30 s while `--format jsonl` still reports the full length — the timings look
+right and the words just stop. `--min-clip 20` was enough to reach that against
+the default `--max-clip`, so it is refused with both flags named.
+
+Every float flag must also be **finite**: `inf` and `NaN` are values `f32`
+parsing accepts and no amount of `-h` can warn about, and `--pad inf` used to
+panic the slicer outright.
+
+Hitting
 `--max-tokens` logs a warning for the same reason: a cut-off transcript looks
 perfectly well-formed and simply stops mid-sentence.
 

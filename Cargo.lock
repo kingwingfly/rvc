@@ -8481,6 +8481,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "clap_complete",
  "cli-kit",
  "preprocess-cli",
  "rpath-kit",
