@@ -242,7 +242,12 @@ mod tests {
     /// The mirror, and the one that used to be silent: `--onnx` beside a Burn
     /// backend asks for two runtimes at once, and the loader used to take the
     /// graphs regardless — discarding a backend the user had named out loud.
-    /// Refused before the fetch here too, for the same reason.
+    ///
+    /// Nothing is fetched down this branch either way (a graph carries its
+    /// weights), so what this pins is the *asking*: restoring the old shape —
+    /// `if opts.onnx.is_some() { Backend::Onnx } else { resolve(..) }` — makes
+    /// this test fail with `load_onnx`'s message instead of the refusal, which
+    /// is exactly the silent substitution.
     #[tokio::test]
     async fn a_burn_backend_beside_an_export_dir_is_refused_before_anything_is_fetched() {
         for backend in [Backend::Tch, Backend::Cuda, Backend::Wgpu] {

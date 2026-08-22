@@ -309,3 +309,259 @@ pub fn encoders<B: Backend>(
 
     Ok((hubert, quantizer))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// A directory that cleans up after itself, named after the test that owns
+    /// it so two running side by side cannot collide. No `tempfile`: the
+    /// workspace does not carry one, and a corpus scan needs nothing more than
+    /// a few empty files.
+    struct Corpus(PathBuf);
+
+    impl Corpus {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("tts-train-corpus-{name}"));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            Self(dir)
+        }
+
+        /// Touch a file. Contents never matter here — `pairs` reads names.
+        fn touch(self, name: &str) -> Self {
+            std::fs::write(self.0.join(name), b"").expect("write");
+            self
+        }
+
+        fn stems(&self, found: &[(PathBuf, PathBuf)]) -> Vec<String> {
+            found
+                .iter()
+                .map(|(a, _)| a.file_name().unwrap().to_string_lossy().into_owned())
+                .collect()
+        }
+    }
+
+    impl Drop for Corpus {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// What the scan said while it ran.
+    ///
+    /// A warning is the entire difference between a corpus that is short and a
+    /// corpus that is short *and says so*, and `pairs`'s return value cannot
+    /// tell those apart — the file it left out is absent either way. So the
+    /// only test that can distinguish them is one that reads the log.
+    #[derive(Clone, Default)]
+    struct Log(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Log {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Log {
+        type Writer = Self;
+        fn make_writer(&'a self) -> Self {
+            self.clone()
+        }
+    }
+
+    /// Run `f` with a subscriber of our own and hand back what it printed.
+    /// Thread-scoped, so tests running in parallel do not capture each other.
+    fn logged<T>(f: impl FnOnce() -> T) -> (T, String) {
+        let log = Log::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .with_writer(log.clone())
+            .finish();
+        let out = tracing::subscriber::with_default(subscriber, f);
+        let text = String::from_utf8_lossy(&log.0.lock().unwrap()).into_owned();
+        (out, text)
+    }
+
+    #[test]
+    fn a_transcript_whose_audio_the_scan_never_saw_is_reported() {
+        // The two shapes that produce one, side by side with a pair that works:
+        // an extension outside the list, and the same extension in the case a
+        // field recorder writes. Both leave a `.txt` the loop over audio files
+        // never reaches, so before this was fixed the run trained on one clip
+        // of three and said nothing at all.
+        let dir = Corpus::new("orphan-transcripts")
+            .touch("a.wav")
+            .touch("a.txt")
+            .touch("b.WAV")
+            .touch("b.txt")
+            .touch("c.aac")
+            .touch("c.txt");
+
+        let (found, log) = logged(|| pairs(&dir.0).expect("one pair is enough to train on"));
+        assert_eq!(dir.stems(&found), ["a.wav"], "only the lower-case wav pairs");
+
+        // Named individually: a count of "2 skipped" is not something a reader
+        // can act on, and acting on it means opening the file that was missed.
+        assert!(log.contains("b.txt"), "b.txt went unreported: {log}");
+        assert!(log.contains("c.txt"), "c.txt went unreported: {log}");
+        assert!(!log.contains("a.txt"), "a.txt was paired: {log}");
+    }
+
+    #[test]
+    fn audio_with_no_transcript_is_the_half_that_always_warned() {
+        // The contrast that makes the test above mean something: this arm has
+        // reported itself since the function was written, and a fix that made
+        // the other half loud must not have made this one quiet.
+        let dir = Corpus::new("orphan-audio").touch("a.wav").touch("b.wav").touch("b.txt");
+
+        let (found, log) = logged(|| pairs(&dir.0).expect("b is a pair"));
+        assert_eq!(dir.stems(&found), ["b.wav"]);
+        assert!(log.contains("a.wav"), "a.wav went unreported: {log}");
+    }
+
+    #[test]
+    fn a_corpus_with_no_pairs_at_all_is_an_error_naming_the_tool_that_fixes_it() {
+        // Loud, not empty: every clip missing is a mistake about the corpus,
+        // where a few missing is a mistake about a few files.
+        let dir = Corpus::new("no-pairs").touch("a.wav").touch("notes.md");
+        let err = pairs(&dir.0).expect_err("no transcripts, nothing to train on");
+        let msg = err.to_string();
+        assert!(msg.contains("stt"), "the message must name `stt`: {msg}");
+    }
+
+    #[test]
+    fn a_stem_carrying_a_dot_keeps_it() {
+        // `with_extension` replaces the last suffix only, which is the property
+        // this depends on: `take.v2.wav` must look for `take.v2.txt` and not
+        // for `take.txt`, which would silently pair two different recordings
+        // with one transcript.
+        let dir = Corpus::new("dotted-stem")
+            .touch("take.v2.wav")
+            .touch("take.v2.txt")
+            .touch("take.txt");
+        let (found, _) = logged(|| pairs(&dir.0).expect("the dotted stem pairs"));
+        assert_eq!(found.len(), 1);
+        assert!(found[0].1.ends_with("take.v2.txt"), "{:?}", found[0].1);
+    }
+
+    #[test]
+    fn every_extension_the_scan_claims_to_read_is_actually_read() {
+        // One file per accepted extension: the list is a `matches!` arm, so a
+        // format dropped from it fails nothing else.
+        let mut dir = Corpus::new("extensions");
+        for ext in ["wav", "mp3", "flac", "m4a", "ogg", "opus"] {
+            dir = dir.touch(&format!("a.{ext}")).touch(&format!("a.{ext}.txt"));
+        }
+        // Each file above is `a.<ext>`, whose transcript is `a.txt` — write it
+        // once rather than six near-identical names.
+        std::fs::write(dir.0.join("a.txt"), b"").unwrap();
+        let (found, _) = logged(|| pairs(&dir.0).expect("all six read"));
+        assert_eq!(found.len(), 6, "{:?}", dir.stems(&found));
+    }
+
+    #[test]
+    fn the_frame_count_is_even_and_inside_both_of_its_sources() {
+        // `s2`'s `micro_step` slices `clip.audio[..frames * SAMPLES_PER_FRAME]`
+        // and `clip.tokens[..frames / 2]` with nothing else bounding either, so
+        // these three properties are what stand between a ragged corpus and a
+        // panic — or worse, a KL term comparing a prior and a posterior one
+        // frame apart.
+        let clip = |tokens: usize, frames_of_audio: usize| Clip {
+            source: PathBuf::from("t.wav"),
+            phones: vec![1, 2, 3],
+            bert: Vec::new(),
+            bert_dim: 0,
+            tokens: vec![7; tokens],
+            audio: vec![0.0; frames_of_audio * SAMPLES_PER_FRAME],
+        };
+
+        // Audio shorter than the tokens claim: the waveform wins, and the odd
+        // count it gives is rounded *down* rather than accepted.
+        let c = clip(5, 7);
+        assert_eq!(c.frames(), 6);
+        // No waveform at all (an `s1`-only preparation): the tokens are the
+        // only source, and two frames per token is already even.
+        let c_no_audio = Clip {
+            audio: Vec::new(),
+            ..clip(5, 0)
+        };
+        assert_eq!(c_no_audio.frames(), 10);
+
+        for c in [clip(5, 7), clip(4, 100), clip(1, 1), clip(3, 3), c_no_audio] {
+            let frames = c.frames();
+            assert_eq!(frames % 2, 0, "odd frame count from {} tokens", c.tokens.len());
+            assert!(frames / 2 <= c.tokens.len(), "would slice past the tokens");
+            if !c.audio.is_empty() {
+                assert!(
+                    frames * SAMPLES_PER_FRAME <= c.audio.len(),
+                    "would slice past the waveform"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_mel_floor_is_asked_of_the_spectral_config_that_owns_it() {
+        // `tts-cli` refuses `--segment-frames` below this, and the whole point
+        // of routing it through a function is that an `n_fft` or `hop` change
+        // moves the number without anybody editing a CLI. Pinned against the
+        // config rather than against a literal, so this test cannot be the
+        // thing that goes stale.
+        assert_eq!(
+            crate::mel_min_frames(),
+            burn_vits::SpectralConfig::gptsovits_v2_32k().min_frames()
+        );
+    }
+
+    #[test]
+    fn a_checkpoint_that_failed_to_apply_is_refused_before_missing_is_consulted() {
+        // The defect CLAUDE.md records three workers rediscovering: the applier
+        // drops a path that *errored* from `applied` and from `missing` alike,
+        // so a file with the right names at the wrong shapes reports zero
+        // missing and reads as a clean load. `covered` therefore asks about
+        // `errors` first, and this is what pins that order — a report with a
+        // shape mismatch and an otherwise perfect count must still be refused.
+        use burn::store::ApplyError;
+
+        let report = |applied: Vec<String>, missing: Vec<(String, String)>, errors| ApplyResult {
+            applied,
+            skipped: Vec::new(),
+            missing,
+            unused: Vec::new(),
+            errors,
+        };
+
+        let err = covered(
+            "cnhubert",
+            &report(
+                vec!["a".into()],
+                Vec::new(),
+                vec![ApplyError::AdapterError {
+                    path: "encoder.layers.0.weight".into(),
+                    message: "shape mismatch".into(),
+                }],
+            ),
+        )
+        .expect_err("an errored apply must not read as full coverage");
+        let msg = err.to_string();
+        assert!(msg.contains("could not be applied"), "{msg}");
+        assert!(msg.contains("encoder.layers.0.weight"), "{msg}");
+
+        // An empty apply is the other silent success: nothing matched, nothing
+        // is missing by the applier's own definition, and the encoder runs on
+        // its initialised weights over the whole corpus.
+        covered("quantiser", &report(Vec::new(), Vec::new(), Vec::new()))
+            .expect_err("an empty apply must not read as full coverage");
+
+        // And the ordinary good load still passes.
+        covered("cnhubert", &report(vec!["a".into()], Vec::new(), Vec::new()))
+            .expect("a complete apply is what this is meant to accept");
+    }
+}

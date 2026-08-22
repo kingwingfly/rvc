@@ -539,7 +539,8 @@ mod tests {
         );
         // The cap the engine itself defaults to has to survive its own check.
         assert_eq!(
-            seedvc_core::reference::MAX_REFERENCE_SECONDS, 30.0,
+            seedvc_core::reference::MAX_REFERENCE_SECONDS,
+            30.0,
             "the message above quotes this, so a change to it changes the advice"
         );
         convert(&["seedvc", "convert", "in.wav"]).verify().unwrap();

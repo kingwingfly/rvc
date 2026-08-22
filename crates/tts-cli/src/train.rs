@@ -367,7 +367,7 @@ pub async fn run(args: TrainArgs) -> Result<()> {
 mod tests {
     use super::*;
     use crate::args::{TtsCli, TtsCommand};
-    use clap::Parser;
+    use clap::{Parser, Subcommand};
 
     /// The `tts` binary's own tree, minus `completions` — which belongs to the
     /// executable rather than to the engine.
@@ -378,14 +378,43 @@ mod tests {
         tts: TtsCli,
     }
 
-    fn train(extra: &[&str]) -> TrainArgs {
+    /// `voice`'s tree, so every flag below is exercised in the *nested*
+    /// position too. That is not symmetry for its own sake: a `*-cli` crate
+    /// exports an `Args` type that somebody else's `Command` hosts, so any
+    /// annotation placed on the command rather than on the argument is left
+    /// behind exactly here, and only here.
+    #[derive(Parser)]
+    #[command(name = "voice")]
+    struct Nested {
+        #[command(subcommand)]
+        command: NestedCommand,
+    }
+
+    #[derive(Subcommand)]
+    enum NestedCommand {
+        Tts(TtsCli),
+    }
+
+    fn try_train(extra: &[&str]) -> Result<TrainArgs, clap::Error> {
         let mut argv = vec!["tts", "train", "corpus/"];
         argv.extend_from_slice(extra);
-        match Cli::try_parse_from(&argv)
-            .unwrap_or_else(|e| panic!("{argv:?} rejected: {e}"))
-            .tts
-            .command
-        {
+        Ok(match Cli::try_parse_from(&argv)?.tts.command {
+            Some(TtsCommand::Train(a)) => *a,
+            other => panic!("expected `train`, got {other:?}"),
+        })
+    }
+
+    fn train(extra: &[&str]) -> TrainArgs {
+        try_train(extra).unwrap_or_else(|e| panic!("{extra:?} rejected: {e}"))
+    }
+
+    fn nested_train(extra: &[&str]) -> TrainArgs {
+        let mut argv = vec!["voice", "tts", "train", "corpus/"];
+        argv.extend_from_slice(extra);
+        let NestedCommand::Tts(cli) = Nested::try_parse_from(&argv)
+            .unwrap_or_else(|e| panic!("{argv:?} rejected under voice: {e}"))
+            .command;
+        match cli.command {
             Some(TtsCommand::Train(a)) => *a,
             other => panic!("expected `train`, got {other:?}"),
         }
@@ -406,5 +435,240 @@ mod tests {
         train(&["--segment-frames", &floor.to_string()])
             .verify()
             .expect("the floor itself must be accepted");
+    }
+
+    #[test]
+    fn the_floor_is_asked_for_rather_than_written_down() {
+        // The point of routing it through `tts_train::mel_min_frames` is that an
+        // `n_fft` or `hop` change moves the number with no CLI edit. A literal
+        // here would go stale in silence, so the check compares the refusal
+        // against the config's own answer rather than against a `2`.
+        let floor = tts_train::mel_min_frames();
+        assert!(floor >= 1, "a floor of zero would guard nothing");
+        // Zero frames renders nothing at all, and is refused by the same rule
+        // rather than by a separate one.
+        train(&["--segment-frames", "0"])
+            .verify()
+            .expect_err("zero frames is not a segment");
+        // One above the floor is ordinary and must stay accepted, so the guard
+        // cannot quietly become a wider one.
+        train(&["--segment-frames", &(floor + 1).to_string()])
+            .verify()
+            .expect("above the floor is ordinary");
+    }
+
+    #[test]
+    fn the_floor_holds_nested_under_voice_too() {
+        let floor = tts_train::mel_min_frames();
+        nested_train(&["--segment-frames", "1"])
+            .verify()
+            .expect_err("`voice tts train` must refuse exactly what `tts train` refuses");
+        nested_train(&["--segment-frames", &floor.to_string()])
+            .verify()
+            .expect("and accept exactly what it accepts");
+    }
+
+    // ---- the negative-value flag class -------------------------------------
+    //
+    // Clap reads a leading `-` as the start of a short-flag cluster unless the
+    // argument opted out with `allow_negative_numbers`, so `--lr -1` fails with
+    // `unexpected argument '-1'`. The mechanical question for whether a flag
+    // needs that opt-out is not what its help text shows but **does `verify`
+    // accept a value below zero** — and for every flag in this file the answer
+    // is no, which is why `tts-cli` carries no such annotation. The tests below
+    // are that answer, run rather than asserted: each flag is given a negative
+    // in the `=` form, which parses whatever the annotation says, and `verify`
+    // has to be the thing that refuses it.
+
+    #[test]
+    fn no_train_flag_accepts_a_value_below_zero() {
+        for flag in [
+            "--lr=-1",
+            "--s2-lr=-1",
+            "--lr-final=-0.5",
+            "--ema-frac=-0.1",
+            "--d-lr-ratio=-1",
+        ] {
+            assert!(
+                train(&[flag]).verify().is_err(),
+                "{flag} was accepted, so a negative value reached the trainer"
+            );
+        }
+    }
+
+    /// The counts are unsigned, so clap refuses a negative before `verify` is
+    /// ever reached — and that refusal is worth pinning as well, because
+    /// widening one of them to accept `-1` would be a silent change in what a
+    /// rate or an epoch count may be.
+    #[test]
+    fn the_unsigned_train_flags_refuse_a_negative_at_the_parser() {
+        for flag in [
+            "--epochs=-1",
+            "--batch-size=-1",
+            "--max-tokens=-1",
+            "--max-frames=-1",
+            "--segment-frames=-1",
+            "--d-interval=-1",
+        ] {
+            assert!(
+                try_train(&[flag]).is_err(),
+                "{flag} parsed, so a negative count reached the trainer"
+            );
+        }
+    }
+
+    #[test]
+    fn a_negative_split_from_its_flag_is_refused_rather_than_misread() {
+        // The form the `preprocess` tests exist for, checked here as the
+        // *negative* control: no flag in this file documents a negative value,
+        // so `--lr -1` must fail at the parser rather than quietly becoming
+        // `--lr` with a missing value or a cluster of short flags.
+        assert!(try_train(&["--lr", "-1"]).is_err());
+        assert!(try_train(&["--ema-frac", "-0.1"]).is_err());
+    }
+
+    // ---- the two caps, and which one bounds what ---------------------------
+
+    #[test]
+    fn the_frame_cap_is_two_per_token_unless_it_is_given() {
+        // A semantic token is two latent frames, and the derivation is a method
+        // rather than a clap default because clap resolves each argument alone
+        // and cannot read `--max-tokens` while building `--max-frames`.
+        assert_eq!(train(&["--max-tokens", "100"]).max_frames(), 200);
+        assert_eq!(
+            train(&["--max-tokens", "100", "--max-frames", "50"]).max_frames(),
+            50
+        );
+        // The default pairing, so the two flags cannot drift apart in silence.
+        let d = train(&[]);
+        assert_eq!(d.max_frames(), d.max_tokens * 2);
+    }
+
+    #[test]
+    fn a_frame_cap_below_the_segment_skips_every_clip_and_is_refused() {
+        // Both bounds are compared against `frames()`, so a cap under the
+        // segment length leaves `usable` empty — which `s2` would report only
+        // after the corpus had been prepared.
+        let err = train(&["--max-frames", "8", "--segment-frames", "32"])
+            .verify()
+            .expect_err("no clip could satisfy both")
+            .to_string();
+        assert!(err.contains("--max-frames"), "{err}");
+        assert!(err.contains("--segment-frames"), "{err}");
+    }
+
+    // ---- --stage, and what belongs to which half ---------------------------
+
+    #[test]
+    fn the_stages_are_what_they_say_and_both_is_the_default() {
+        assert_eq!(train(&[]).stage, Stage::Both);
+        assert_eq!(nested_train(&[]).stage, Stage::Both);
+        assert!(Stage::S1.wants_s1() && !Stage::S1.wants_s2());
+        assert!(!Stage::S2.wants_s1() && Stage::S2.wants_s2());
+        assert!(Stage::Both.wants_s1() && Stage::Both.wants_s2());
+    }
+
+    #[test]
+    fn a_discriminator_base_is_refused_under_the_stage_that_has_no_adversary() {
+        // `s1` is plain cross-entropy, so a `--pretrained-d` there would be
+        // fetched — 94 MB — and then never opened. Saying so beats obeying a
+        // flag that cannot do anything.
+        let err = train(&["--stage", "s1", "--pretrained-d", "s2D.pth"])
+            .verify()
+            .expect_err("`s1` has no discriminator to warm-start")
+            .to_string();
+        assert!(err.contains("--pretrained-d"), "{err}");
+        train(&["--stage", "s2", "--pretrained-d", "s2D.pth"])
+            .verify()
+            .expect("`s2` is exactly where one belongs");
+        train(&["--stage", "both", "--pretrained-d", "s2D.pth"])
+            .verify()
+            .expect("and `both` reaches `s2`");
+    }
+
+    #[test]
+    fn the_two_pretrained_flags_cannot_be_given_together() {
+        // "Warm-start from this file" and "warm-start from nothing" are the two
+        // answers to one question, and clap is where that is settled.
+        assert!(try_train(&["--pretrained-d", "s2D.pth", "--no-pretrained"]).is_err());
+    }
+
+    // ---- each stage's output family ----------------------------------------
+
+    #[test]
+    fn each_stage_writes_a_family_of_its_own() {
+        // `--stage both` runs two loops over one prepared corpus, and they must
+        // not land on each other: `-o models/mine` is a *stem*, and the stage
+        // name is appended to it rather than substituted into it.
+        for out in ["models/mine", "models/voice.v2", "mine"] {
+            let out = std::path::Path::new(out);
+            let s1 = crate::backend::checkpoint(out, "s1");
+            let s2 = crate::backend::checkpoint(out, "s2");
+            let members: Vec<_> = s1
+                .members(true, false)
+                .into_iter()
+                .chain(s2.members(true, true))
+                .chain(s2.best().members(true, true))
+                .collect();
+            let unique: std::collections::HashSet<_> = members.iter().collect();
+            assert_eq!(
+                unique.len(),
+                members.len(),
+                "two members of {out:?} share a path: {members:?}"
+            );
+            // The trap the appending exists to avoid: `with_extension` sees only
+            // the last dot, so `voice.v2` would become `voice.s1` and merge two
+            // runs' outputs.
+            assert!(
+                s1.generator().to_string_lossy().contains(".s1."),
+                "{:?}",
+                s1.generator()
+            );
+        }
+        let dotted = crate::backend::checkpoint(std::path::Path::new("models/voice.v2"), "s1");
+        assert_eq!(
+            dotted.generator(),
+            std::path::Path::new("models/voice.v2.s1.safetensors")
+        );
+    }
+
+    #[test]
+    fn an_s1_family_has_no_discriminator_and_an_s2_family_does() {
+        // What `run` hands `ensure_absent` has to be what the loop actually
+        // writes: over-counting refuses a run that would have collided with
+        // nothing, and under-counting is the overwrite the guard exists for.
+        let out = std::path::Path::new("models/mine");
+        let s1 = crate::backend::checkpoint(out, "s1").members(true, false);
+        assert!(
+            !s1.iter().any(|p| p.to_string_lossy().contains(".disc.")),
+            "`s1` is one model and one loss; it saves no adversary: {s1:?}"
+        );
+        let s2 = crate::backend::checkpoint(out, "s2").members(true, true);
+        assert!(s2.iter().any(|p| p.to_string_lossy().contains(".disc.")));
+        // No EMA means no raw twin, because the live weights are themselves the
+        // deployable ones.
+        let flat = crate::backend::checkpoint(out, "s1").members(false, false);
+        assert_eq!(flat.len(), 1, "{flat:?}");
+    }
+
+    #[test]
+    fn a_run_refuses_to_overwrite_weights_already_at_its_output() {
+        // Hours of GPU and a corpus that may be gone, so a second `-o` at the
+        // same stem is far more often a mistake than an intent. `-y` is the
+        // only way past it.
+        let dir = std::env::temp_dir().join("tts-cli-overwrite-guard");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let out = dir.join("mine");
+        let planned = crate::backend::checkpoint(&out, "s2").members(true, true);
+        train_kit::ensure_absent(planned.clone(), false)
+            .expect("an empty directory is not a collision");
+        std::fs::write(&planned[0], b"an earlier run").expect("write");
+        let err = train_kit::ensure_absent(planned.clone(), false)
+            .expect_err("the weights are already there")
+            .to_string();
+        assert!(err.contains("mine.s2"), "{err}");
+        train_kit::ensure_absent(planned, true).expect("-y is the way past it");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

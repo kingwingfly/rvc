@@ -8216,6 +8216,7 @@ dependencies = [
  "text-kit",
  "thiserror 2.0.19",
  "tracing",
+ "tracing-subscriber",
  "train-kit",
  "tts-core",
 ]
